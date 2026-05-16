@@ -1,12 +1,13 @@
 # This workflow publishes a release on this repo AND mirrors per-feature
 # zips to the five sibling repos (WKOpenVR-SpaceCalibrator,
 # WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-# WKOpenVR-Captions). The mirror step needs a token with contents:write
-# on all five repos, stored as the secret MIRROR_RELEASE_TOKEN. Provision via:
+# WKOpenVR-Captions, WKOpenVR-Phantom). The mirror step needs a token with
+# contents:write on all six repos, stored as the secret MIRROR_RELEASE_TOKEN.
+# Provision via:
 #   1. github.com -> Settings -> Developer settings -> Fine-grained PAT
 #   2. Resource owner: RealWhyKnot. Repos: WKOpenVR-SpaceCalibrator,
 #      WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-#      WKOpenVR-Captions.
+#      WKOpenVR-Captions, WKOpenVR-Phantom.
 #   3. Permissions: Contents = Read and write.
 #   4. Copy token, then in this repo: Settings -> Secrets and variables
 #      -> Actions -> New repository secret -> name MIRROR_RELEASE_TOKEN.
@@ -337,6 +338,7 @@ jobs:
             [pscustomobject]@{ Name = 'InputHealth';  Flag = 'enable_inputhealth.flag';  Repo = 'RealWhyKnot/WKOpenVR-InputHealth' }
             [pscustomobject]@{ Name = 'FaceTracking'; Flag = 'enable_facetracking.flag'; Repo = 'RealWhyKnot/WKOpenVR-VRCFT' }
             [pscustomobject]@{ Name = 'Captions';     Flag = 'enable_captions.flag';     Repo = 'RealWhyKnot/WKOpenVR-Captions' }
+            [pscustomobject]@{ Name = 'Phantom';      Flag = 'enable_phantom.flag';      Repo = 'RealWhyKnot/WKOpenVR-Phantom' }
           )
 
           $mirrorPaths = @{}
@@ -363,6 +365,7 @@ jobs:
           "mirror_inputhealth=$($mirrorPaths['InputHealth'])"   >> $env:GITHUB_OUTPUT
           "mirror_facetracking=$($mirrorPaths['FaceTracking'])" >> $env:GITHUB_OUTPUT
           "mirror_captions=$($mirrorPaths['Captions'])"         >> $env:GITHUB_OUTPUT
+          "mirror_phantom=$($mirrorPaths['Phantom'])"           >> $env:GITHUB_OUTPUT
 
       - name: Verify NSIS input artifacts staged
         # makensis errors with an obscure "no files found" when File /r is
@@ -445,7 +448,7 @@ jobs:
           $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) { $makensis = "C:\Program Files\NSIS\makensis.exe" }
           if (-not (Test-Path $makensis)) { throw "makensis.exe not found." }
-          $features = @('Calibration', 'Smoothing', 'InputHealth', 'FaceTracking', 'Captions')
+          $features = @('Calibration', 'Smoothing', 'InputHealth', 'FaceTracking', 'Captions', 'Phantom')
           $outputs = @{}
           foreach ($feat in $features) {
             Push-Location install
@@ -467,6 +470,7 @@ jobs:
           "installer_inputhealth=$($outputs['InputHealth'])"   >> $env:GITHUB_OUTPUT
           "installer_facetracking=$($outputs['FaceTracking'])" >> $env:GITHUB_OUTPUT
           "installer_captions=$($outputs['Captions'])"         >> $env:GITHUB_OUTPUT
+          "installer_phantom=$($outputs['Phantom'])"           >> $env:GITHUB_OUTPUT
 
       - name: Generate release body
         id: changelog
@@ -645,6 +649,19 @@ jobs:
           $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_captions.flag so live captions activate immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
           gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
 
+      - name: Mirror release to WKOpenVR-Phantom
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+        shell: pwsh
+        run: |
+          $tag       = "${{ github.ref_name }}"
+          $zip       = "${{ steps.zips.outputs.mirror_phantom }}"
+          $installer = "${{ steps.feature_installers.outputs.installer_phantom }}"
+          $repo  = "RealWhyKnot/WKOpenVR-Phantom"
+          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_phantom.flag so phantom-tracker dropout bridging activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
+          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
+
       - name: Push promoted changelog back to main (verified)
         # Use the GraphQL createCommitOnBranch mutation so the promotion
         # commit is signed server-side with GitHub's bot key. Done last so a
@@ -761,7 +778,8 @@ jobs:
               'RealWhyKnot/WKOpenVR-Smoothing',
               'RealWhyKnot/WKOpenVR-InputHealth',
               'RealWhyKnot/WKOpenVR-VRCFT',
-              'RealWhyKnot/WKOpenVR-Captions'
+              'RealWhyKnot/WKOpenVR-Captions',
+              'RealWhyKnot/WKOpenVR-Phantom'
           )
           foreach ($repo in $mirrors) {
               Remove-ReleaseIfPresent -Repo $repo -Token $env:GH_TOKEN_MIRROR -Label "mirror"

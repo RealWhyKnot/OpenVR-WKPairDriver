@@ -280,6 +280,12 @@ Section "Install"
         FileClose $0
         DetailPrint "Enabled feature: Captions"
     !endif
+    !if "${FEATURE}" == "Phantom"
+        FileOpen $0 "$vrRuntimePath\drivers\01wkopenvr\resources\enable_phantom.flag" w
+        FileWrite $0 "enabled"
+        FileClose $0
+        DetailPrint "Enabled feature: Phantom"
+    !endif
 
     WriteRegStr HKLM "Software\WKOpenVR\Main" "" "$INSTDIR"
     WriteRegStr HKLM "Software\WKOpenVR\Driver" "" "$vrRuntimePath"
@@ -370,6 +376,7 @@ Section "Uninstall"
     Delete "$vrRuntimePath\drivers\01wkopenvr\resources\enable_inputhealth.flag"
     Delete "$vrRuntimePath\drivers\01wkopenvr\resources\enable_facetracking.flag"
     Delete "$vrRuntimePath\drivers\01wkopenvr\resources\enable_captions.flag"
+    Delete "$vrRuntimePath\drivers\01wkopenvr\resources\enable_phantom.flag"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\facetracking"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\translator"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\captions"

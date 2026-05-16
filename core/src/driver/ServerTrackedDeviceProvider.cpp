@@ -30,6 +30,12 @@
 #ifndef OPENVR_PAIR_HAS_CAPTIONS_DRIVER
 #define OPENVR_PAIR_HAS_CAPTIONS_DRIVER 0
 #endif
+#ifndef OPENVR_PAIR_HAS_PHANTOM_DRIVER
+#define OPENVR_PAIR_HAS_PHANTOM_DRIVER 0
+#endif
+
+// Phantom hot-path entry points are declared in DriverModule.h next to the
+// CreateDriverModule forward declaration; no additional include needed.
 
 namespace {
 
@@ -141,6 +147,9 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 #if OPENVR_PAIR_HAS_CAPTIONS_DRIVER
 	activateModule(captions::CreateDriverModule());
 #endif
+#if OPENVR_PAIR_HAS_PHANTOM_DRIVER
+	activateModule(phantom::CreateDriverModule());
+#endif
 
 	if (featureFlags & pairdriver::kFeatureCalibration) {
 		// Calibration setup: speed thresholds, pose telemetry shmem, IPC pipe.
@@ -218,6 +227,14 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 		captionsServer->Run();
 	}
 
+	if (featureFlags & pairdriver::kFeaturePhantom) {
+		phantomServer = std::make_unique<IPCServer>(
+			this,
+			OPENVR_PAIRDRIVER_PHANTOM_PIPE_NAME,
+			pairdriver::kFeaturePhantom);
+		phantomServer->Run();
+	}
+
 	// Hook installation is gated inside the injector by the same feature
 	// flags so the GetGenericInterface detour skips registering the
 	// per-feature inner hooks for subsystems that aren't enabled.
@@ -233,6 +250,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 		if (faceTrackingServer) faceTrackingServer->Stop();
 		if (oscRouterServer) oscRouterServer->Stop();
 		if (captionsServer) captionsServer->Stop();
+		if (phantomServer) phantomServer->Stop();
 		shmem.Close();
 		VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 		return vr::VRInitError_Driver_Failed;
@@ -269,6 +287,7 @@ void ServerTrackedDeviceProvider::Cleanup()
 		(*it)->Shutdown();
 	}
 	activeModules.clear();
+	if (phantomServer) phantomServer->Stop();
 	if (captionsServer) captionsServer->Stop();
 	if (oscRouterServer) oscRouterServer->Stop();
 	if (faceTrackingServer) faceTrackingServer->Stop();
@@ -980,6 +999,24 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			QueryPerformanceCounter(&tf.lastPoll);
 		}
 	}
+
+#if OPENVR_PAIR_HAS_PHANTOM_DRIVER
+	// Phantom-tracker pipeline. OnRealPoseObserved records the pose AFTER
+	// existing transforms (calibration / smoothing) have run so the
+	// dropout-bridging stream stays visually consistent with what the user
+	// normally sees. MaybeOverridePose may replace `pose` with a
+	// dead-reckoned / IK / ML synthesis, or return false to suppress the
+	// downstream pose update entirely (LOST state -> SteamVR treats the
+	// device as disconnected after its own timeout).
+	if (featureFlags & pairdriver::kFeaturePhantom) {
+		LARGE_INTEGER qpcNow{};
+		QueryPerformanceCounter(&qpcNow);
+		phantom::OnRealPoseObserved(openVRID, qpcNow.QuadPart, pose);
+		if (!phantom::MaybeOverridePose(openVRID, qpcNow.QuadPart, qpcFreq.QuadPart, pose)) {
+			return false;
+		}
+	}
+#endif
 
 	return true;
 }

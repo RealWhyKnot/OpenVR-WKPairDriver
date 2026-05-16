@@ -54,3 +54,19 @@ std::unique_ptr<DriverModule> CreateDriverModule();
 namespace captions {
 std::unique_ptr<DriverModule> CreateDriverModule();
 }
+
+namespace phantom {
+std::unique_ptr<DriverModule> CreateDriverModule();
+
+// Hot-path entry points called from
+// ServerTrackedDeviceProvider::HandleDevicePoseUpdated. Both are safe no-ops
+// when the phantom module has not been initialised (feature disabled, or
+// CreateDriverModule never instantiated).
+void OnRealPoseObserved(uint32_t openVRID,
+                        int64_t qpc_ns,
+                        const vr::DriverPose_t& pose);
+bool MaybeOverridePose(uint32_t openVRID,
+                       int64_t qpc_ns,
+                       int64_t qpc_freq,
+                       vr::DriverPose_t& pose);
+}

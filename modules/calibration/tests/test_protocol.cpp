@@ -22,10 +22,34 @@
 // require a deliberate two-touch acknowledgement, not to gate releases.
 // ---------------------------------------------------------------------------
 TEST(ProtocolTest, VersionPinnedToCurrent) {
-    EXPECT_EQ(protocol::Version, 18u)
+    EXPECT_EQ(protocol::Version, 19u)
         << "Protocol version changed without updating the test pin. If this is "
            "intentional: bump the literal here and add a row to wiki/Driver-"
            "Protocol.md describing the new version's wire-format changes.";
+}
+
+// ---------------------------------------------------------------------------
+// Phantom Trackers (v19) wire payloads are small. PhantomConfig is 28 bytes
+// (master + 5 timeout-ladder uint32_t values + 3 pad bytes); PhantomDeviceOptIn
+// is 16 bytes (serial hash + enable + 7 pad). Pin both so an accidental
+// expansion does not silently inflate the Request union past SetDeviceTransform.
+// ---------------------------------------------------------------------------
+TEST(ProtocolTest, PhantomConfigLayout) {
+    EXPECT_LE(sizeof(protocol::PhantomConfig), sizeof(protocol::SetDeviceTransform));
+    // master_enabled + 3 pad bytes + 5 uint32_t timeout fields = 24 bytes.
+    EXPECT_EQ(sizeof(protocol::PhantomConfig), 24u);
+    protocol::PhantomConfig c{};
+    EXPECT_EQ(c.master_enabled, 0u);
+    EXPECT_EQ(c.blend_out_ms, 0u);
+    EXPECT_EQ(c.lost_hold_ms, 0u);
+}
+
+TEST(ProtocolTest, PhantomDeviceOptInLayout) {
+    EXPECT_LE(sizeof(protocol::PhantomDeviceOptIn), sizeof(protocol::SetDeviceTransform));
+    EXPECT_EQ(sizeof(protocol::PhantomDeviceOptIn), 16u);
+    protocol::PhantomDeviceOptIn e{};
+    EXPECT_EQ(e.device_serial_hash, 0u);
+    EXPECT_EQ(e.dropout_enabled, 0u);
 }
 
 // ---------------------------------------------------------------------------

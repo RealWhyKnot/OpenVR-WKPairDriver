@@ -72,17 +72,19 @@ uint32_t DetectFeatureFlags()
 	// the legacy name.
 	const bool capOn = FlagFileExists(dir, L"enable_captions.flag")
 		|| FlagFileExists(dir, L"enable_translator.flag");
+	const bool phOn  = FlagFileExists(dir, L"enable_phantom.flag");
 	if (calOn) flags |= kFeatureCalibration;
 	if (smoOn) flags |= kFeatureSmoothing;
 	if (ihOn)  flags |= kFeatureInputHealth;
 	if (ftOn)  flags |= kFeatureFaceTracking;
 	if (orOn)  flags |= kFeatureOscRouter;
 	if (capOn) flags |= kFeatureCaptions;
+	if (phOn)  flags |= kFeaturePhantom;
 
 	// %ls expects wide string on MSVC's CRT. Cap the printed length so a
 	// pathological install path doesn't blow the log line.
-	LOG("DetectFeatureFlags: resources=%.260ls calibration=%d smoothing=%d inputhealth=%d facetracking=%d oscrouter=%d captions=%d (mask=0x%x)",
-		dir.c_str(), (int)calOn, (int)smoOn, (int)ihOn, (int)ftOn, (int)orOn, (int)capOn, (unsigned)flags);
+	LOG("DetectFeatureFlags: resources=%.260ls calibration=%d smoothing=%d inputhealth=%d facetracking=%d oscrouter=%d captions=%d phantom=%d (mask=0x%x)",
+		dir.c_str(), (int)calOn, (int)smoOn, (int)ihOn, (int)ftOn, (int)orOn, (int)capOn, (int)phOn, (unsigned)flags);
 	return flags;
 }
 

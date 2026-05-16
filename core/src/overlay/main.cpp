@@ -52,6 +52,9 @@ std::unique_ptr<FeaturePlugin> CreateOscRouterPlugin();
 #if OPENVR_PAIR_HAS_CAPTIONS_OVERLAY
 std::unique_ptr<FeaturePlugin> CreateCaptionsPlugin();
 #endif
+#if OPENVR_PAIR_HAS_PHANTOM_OVERLAY
+std::unique_ptr<FeaturePlugin> CreatePhantomPlugin();
+#endif
 
 } // namespace openvr_pair::overlay
 
@@ -83,6 +86,9 @@ std::vector<std::unique_ptr<openvr_pair::overlay::FeaturePlugin>> CreatePlugins(
 #endif
 #if OPENVR_PAIR_HAS_CAPTIONS_OVERLAY
 	plugins.push_back(CreateCaptionsPlugin());
+#endif
+#if OPENVR_PAIR_HAS_PHANTOM_OVERLAY
+	plugins.push_back(CreatePhantomPlugin());
 #endif
 	return plugins;
 }

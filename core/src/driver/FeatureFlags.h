@@ -10,6 +10,7 @@
 //   resources/enable_smoothing.flag      -- WKOpenVR-Smoothing
 //   resources/enable_inputhealth.flag    -- WKOpenVR-InputHealth
 //   resources/enable_facetracking.flag   -- WKOpenVR-VRCFT
+//   resources/enable_phantom.flag        -- WKOpenVR-Phantom
 //
 // Any subset (including the empty subset) may be present. With no flags the
 // driver loads but stays inert (no hooks installed, no pipes opened, no
@@ -24,6 +25,7 @@ constexpr uint32_t kFeatureInputHealth  = 1u << 2;
 constexpr uint32_t kFeatureFaceTracking = 1u << 3;
 constexpr uint32_t kFeatureOscRouter    = 1u << 4;
 constexpr uint32_t kFeatureCaptions     = 1u << 5;
+constexpr uint32_t kFeaturePhantom      = 1u << 6;
 
 // Returns the bitwise OR of detected feature flags. Logs the path it scanned
 // and the result to the driver log so install issues are easy to diagnose.

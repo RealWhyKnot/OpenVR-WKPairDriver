@@ -35,6 +35,10 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/modules/captions/src/overlay" "${CMAKE_BIN
 list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_captions_overlay)
 list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_CAPTIONS_OVERLAY=1)
 
+add_subdirectory("${CMAKE_SOURCE_DIR}/modules/phantom/src/overlay" "${CMAKE_BINARY_DIR}/modules/phantom-overlay")
+list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_phantom_overlay)
+list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_PHANTOM_OVERLAY=1)
+
 if(WIN32)
 	enable_language(RC)
 	set(OPENVR_PAIR_RC_SOURCES openvr-pair.rc)

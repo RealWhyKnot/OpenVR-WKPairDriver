@@ -101,6 +101,7 @@ private:
 	std::unique_ptr<IPCServer> faceTrackingServer;
 	std::unique_ptr<IPCServer> oscRouterServer;
 	std::unique_ptr<IPCServer> captionsServer;
+	std::unique_ptr<IPCServer> phantomServer;
 	std::vector<std::unique_ptr<DriverModule>> activeModules;
 
 	// Pose telemetry shmem, only created when calibration is enabled. The

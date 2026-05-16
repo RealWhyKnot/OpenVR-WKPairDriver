@@ -83,6 +83,10 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/modules/captions/src/driver" "${CMAKE_BINA
 list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_captions_driver)
 list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_CAPTIONS_DRIVER=1)
 
+add_subdirectory("${CMAKE_SOURCE_DIR}/modules/phantom/src/driver" "${CMAKE_BINARY_DIR}/modules/phantom-driver")
+list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_phantom_driver)
+list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_PHANTOM_DRIVER=1)
+
 file(GLOB_RECURSE SOURCES_DRIVER ${CMAKE_SOURCE_DIR}/core/src/driver "*.c" "*.h" "*.hpp" "*.cpp")
 file(GLOB_RECURSE SOURCES_COMMON ${CMAKE_SOURCE_DIR}/core/src/common "*.h" "*.hpp")
 

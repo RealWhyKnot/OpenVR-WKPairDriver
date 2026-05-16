@@ -29,6 +29,12 @@
 // Captions module. Driver opens this pipe gated on enable_captions.flag.
 // Accepts RequestSetCaptionsConfig and RequestCaptionsRestartHost.
 #define OPENVR_PAIRDRIVER_CAPTIONS_PIPE_NAME   "\\\\.\\pipe\\WKOpenVR-Captions"
+// Phantom Trackers module. Driver opens this pipe gated on
+// enable_phantom.flag. Phase 1 accepts RequestSetPhantomConfig (global
+// master switch + timeout ladder) and RequestSetPhantomDeviceOptIn (per-
+// device dropout bridging toggle). Later phases extend with calibration,
+// virtual-tracker, and ML messages without further pipe additions.
+#define OPENVR_PAIRDRIVER_PHANTOM_PIPE_NAME    "\\\\.\\pipe\\WKOpenVR-Phantom"
 
 // Pose telemetry shmem segment. Created by the driver only when the calibration
 // feature is enabled; the calibration overlay opens it to read driver-side
@@ -56,6 +62,13 @@
 // OSC router stats shmem. Created by the driver when oscrouter is enabled;
 // the overlay reads it at ~10 Hz to show per-route message rates.
 #define OPENVR_PAIRDRIVER_OSCROUTER_SHMEM_NAME "WKOpenVROscRouterStatsV1"
+
+// Phantom-tracker per-device state shmem. Created by the driver only when
+// the phantom feature is enabled; the Phantom overlay opens it to render
+// per-tracker state badges (REAL / RECKON / IK / ML / OUTOFRANGE / LOST)
+// and dropout-count counters at ~10 Hz. Single writer (driver) /
+// single reader (overlay).
+#define OPENVR_PAIRDRIVER_PHANTOM_STATE_SHMEM_NAME "WKOpenVRPhantomStateV1"
 
 #ifdef _OPENVR_API 
 
@@ -210,7 +223,18 @@ namespace protocol
 	// (uint32_t) and last_exit_description (char[128]) so the overlay can
 	// surface a halted host's exit reason in the Captions tab instead of
 	// just showing the halt flag. _pad shrinks from 7 to 3 bytes.
-	const uint32_t Version = 18;
+	//
+	// v19 (2026-05-16): adds the Phantom Trackers subsystem. Driver opens
+	// a new pipe (\\.\pipe\WKOpenVR-Phantom) gated on enable_phantom.flag,
+	// accepts RequestSetPhantomConfig (master switch + blend/timeout ladder)
+	// and RequestSetPhantomDeviceOptIn (per-serial dropout bridging toggle).
+	// New shmem segment (WKOpenVRPhantomStateV1) carries per-device state
+	// at ~10 Hz for the overlay's badge display. Both new payload structs
+	// are smaller than SetDeviceTransform so the Request union does not
+	// grow; static_asserts below pin that. Bump forces paired install so
+	// a version skew is rejected at handshake instead of silently dropping
+	// the new request types.
+	const uint32_t Version = 19;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -279,6 +303,13 @@ namespace protocol
 		RequestSetCaptionsConfig,
 		RequestCaptionsRestartHost,
 		RequestCaptionsGetSupervisorStatus,
+		// v19 (2026-05-16): Phantom Trackers module. Driver routes these
+		// on \\.\pipe\WKOpenVR-Phantom, gated on kFeaturePhantom.
+		// SetPhantomConfig carries the master switch + timeout ladder;
+		// SetPhantomDeviceOptIn carries the per-serial dropout bridging
+		// toggle (one message per device the user toggles).
+		RequestSetPhantomConfig,
+		RequestSetPhantomDeviceOptIn,
 	};
 
 	enum ResponseType
@@ -784,6 +815,47 @@ namespace protocol
 		char last_exit_description[128];
 	};
 
+	// POD payload for RequestSetPhantomConfig. Phantom module global config:
+	// master switch + the five timeout-ladder values. Per-device dropout
+	// opt-in travels in RequestSetPhantomDeviceOptIn (one message per
+	// toggle) so this struct stays small and the overlay does not resend
+	// the full opt-in map on each slider drag.
+	struct PhantomConfig
+	{
+		// Master switch. False = the phantom hook fast-paths to passthrough
+		// (PoseHistory still records so a later master-on toggle has back-
+		// history available, but no synthesis is applied and no virtual
+		// devices are added).
+		uint8_t  master_enabled;
+		uint8_t  _pad0[3];
+
+		// Timeout ladder values, all in milliseconds. Defaults track the
+		// constants in modules/phantom/src/common/BlendCurves.h:
+		//   blend_out_ms  = 80
+		//   blend_in_ms   = 150
+		//   reckon_hold_ms = 250
+		//   synth_hold_ms = 2000  (after this, ETrackingResult flips to
+		//                          Running_OutOfRange so consumers gracefully
+		//                          drop the tracker)
+		//   lost_hold_ms  = 5000  (after this, stop publishing entirely)
+		uint32_t blend_out_ms;
+		uint32_t blend_in_ms;
+		uint32_t reckon_hold_ms;
+		uint32_t synth_hold_ms;
+		uint32_t lost_hold_ms;
+	};
+
+	// POD payload for RequestSetPhantomDeviceOptIn. The overlay sends one of
+	// these whenever the user toggles dropout bridging for a specific device
+	// in the per-tracker list. Identified by FNV-1a 64-bit hash of the
+	// device serial string (matches the InputHealth convention).
+	struct PhantomDeviceOptIn
+	{
+		uint64_t device_serial_hash;
+		uint8_t  dropout_enabled;
+		uint8_t  _reserved[7];
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -823,6 +895,11 @@ namespace protocol
 			// Captions: config push. Smaller than SetDeviceTransform;
 			// static_assert below enforces it.
 			CaptionsConfig    setCaptionsConfig;
+			// v19: phantom-tracker global config + per-device opt-in. Both
+			// are smaller than SetDeviceTransform so the union does not
+			// grow; static_asserts below enforce it.
+			PhantomConfig     setPhantomConfig;
+			PhantomDeviceOptIn setPhantomDeviceOptIn;
 		};
 
 		Request() : type(RequestInvalid), setAlignmentSpeedParams({}) { }
@@ -846,6 +923,10 @@ namespace protocol
 		"OscPublish must not grow Request");
 	static_assert(sizeof(CaptionsConfig) <= sizeof(SetDeviceTransform),
 		"CaptionsConfig must not grow Request");
+	static_assert(sizeof(PhantomConfig) <= sizeof(SetDeviceTransform),
+		"PhantomConfig must not grow Request");
+	static_assert(sizeof(PhantomDeviceOptIn) <= sizeof(SetDeviceTransform),
+		"PhantomDeviceOptIn must not grow Request");
 
 	struct Response
 	{
