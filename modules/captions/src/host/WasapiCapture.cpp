@@ -166,15 +166,16 @@ void WasapiCapture::CaptureLoop()
                 if (FAILED(hr)) { packetLen = 0; break; }
 
                 if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && frames > 0 && data) {
-                    // Convert to float mono.
-                    std::vector<float> mono(frames);
+                    // Convert to float mono. mono_scratch_ persists across
+                    // packets so the 100 Hz capture loop does not allocate.
+                    mono_scratch_.resize(frames);
                     if (isFloat) {
                         const float *src = reinterpret_cast<const float *>(data);
                         for (UINT32 i = 0; i < frames; ++i) {
                             float s = 0.f;
                             for (UINT32 ch = 0; ch < nChannels; ++ch)
                                 s += src[i * nChannels + ch];
-                            mono[i] = s / static_cast<float>(nChannels);
+                            mono_scratch_[i] = s / static_cast<float>(nChannels);
                         }
                     } else {
                         // PCM16
@@ -183,10 +184,10 @@ void WasapiCapture::CaptureLoop()
                             float s = 0.f;
                             for (UINT32 ch = 0; ch < nChannels; ++ch)
                                 s += static_cast<float>(src[i * nChannels + ch]) / 32768.f;
-                            mono[i] = s / static_cast<float>(nChannels);
+                            mono_scratch_[i] = s / static_cast<float>(nChannels);
                         }
                     }
-                    ResampleAndAccumulate(mono.data(), frames, nSampleRate);
+                    ResampleAndAccumulate(mono_scratch_.data(), frames, nSampleRate);
                 }
 
                 capture_client_->ReleaseBuffer(frames);

@@ -60,6 +60,10 @@ private:
     std::vector<float>        accum_;
     static constexpr size_t   kFrameSamples = 480; // 30 ms at 16 kHz
 
+    // Per-packet downmix scratch (capture thread only). Reused across packets
+    // so a 100 Hz capture loop does not allocate every frame.
+    std::vector<float>        mono_scratch_;
+
     void CaptureLoop();
     bool InitCom();
     void ReleaseCom();
