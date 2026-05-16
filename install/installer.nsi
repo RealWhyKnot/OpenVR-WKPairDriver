@@ -259,6 +259,22 @@ Section "Install"
         DetailPrint "Phantom input profiles missing from build; absent-mode virtual trackers will not auto-bind."
     !endif
 
+    ; Phantom inference sidecar (native Win64 exe). Driver's
+    ; SidecarSupervisor spawns WKOpenVRPhantomSidecar.exe from this
+    ; directory when enable_phantom.flag is present. Phase 3 ships a
+    ; passthrough stub binary; the real ONNX Runtime + SparsePoser model
+    ; lands in a follow-up gated on the AMASS / SMPL licensing review.
+    ; Same /FileExists guard as the captions / facetracking hosts: omits
+    ; the File directive silently when the build host didn't produce the
+    ; sidecar (OPENVR_PAIR_BUILD_PHANTOM_SIDECAR=OFF), so makensis does
+    ; not abort with "no files found".
+    !if /FileExists "${DRIVER_BASEDIR}\resources\phantom\host\WKOpenVRPhantomSidecar.exe"
+        SetOutPath "$vrRuntimePath\drivers\01wkopenvr\resources\phantom\host"
+        File /r "${DRIVER_BASEDIR}\resources\phantom\host\*.*"
+    !else
+        DetailPrint "WKOpenVRPhantomSidecar.exe not embedded in this installer; Phantom ML inference will be unavailable (IK fallback still works)."
+    !endif
+
     ; Drop the feature enable flag when building a per-feature installer.
     ; Content matches what ShellContext::SetFlagPresent writes:
     ;   Set-Content -Value enabled -NoNewline
@@ -393,6 +409,7 @@ Section "Uninstall"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\translator"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\captions"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\input"
+    RMDir /r "$vrRuntimePath\drivers\01wkopenvr\resources\phantom"
     RMDir /r "$vrRuntimePath\drivers\01wkopenvr"
 
     ; ---- Best-effort legacy driver cleanup (pre-rename product) -----------

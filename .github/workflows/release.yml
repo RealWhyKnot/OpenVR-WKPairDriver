@@ -388,7 +388,11 @@ jobs:
             'build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe',
             'build/driver_wkopenvr/resources/captions/host/openvr_api.dll',
             'build/driver_wkopenvr/resources/captions/host/resources/captions-packs.json',
-            'build/driver_wkopenvr/resources/captions/host/resources/install-captions-pack.ps1'
+            'build/driver_wkopenvr/resources/captions/host/resources/install-captions-pack.ps1',
+            'build/driver_wkopenvr/resources/phantom/host/WKOpenVRPhantomSidecar.exe',
+            'build/driver_wkopenvr/resources/input/vive_tracker_waist_profile.json',
+            'build/driver_wkopenvr/resources/input/vive_tracker_left_foot_profile.json',
+            'build/driver_wkopenvr/resources/input/vive_tracker_right_foot_profile.json'
           )
           $missing = @()
           foreach ($p in $required) {
