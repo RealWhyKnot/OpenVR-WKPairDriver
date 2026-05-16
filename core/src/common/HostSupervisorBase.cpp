@@ -363,7 +363,15 @@ void HostSupervisorBase::Kill()
     if (process_handle_ == INVALID_HANDLE_VALUE) return;
 
     if (!attached_to_existing_) {
-        TerminateProcess(process_handle_, 0);
+        if (!TerminateProcess(process_handle_, 0)) {
+            const DWORD err = GetLastError();
+            // Common case: process already exited between caller and here.
+            // Only log when it is something else worth investigating.
+            if (err != ERROR_ACCESS_DENIED && err != ERROR_INVALID_HANDLE) {
+                Log("[host-supervisor] Kill: TerminateProcess failed err=%lu",
+                    err);
+            }
+        }
         DWORD wait_result = WaitForSingleObject(process_handle_, 5000);
         if (wait_result == WAIT_TIMEOUT) {
             Log("[host-supervisor] Kill: host did not exit within 5s of "
