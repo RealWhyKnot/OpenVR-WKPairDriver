@@ -4,9 +4,9 @@
 // is maintained in lockstep with two C# enums:
 //   - VRCFaceTracking.Core.Params.Expressions.UnifiedExpressions (upstream
 //     v5.1.1.0 order, vendored at
-//     modules/facetracking/src/host/OpenVRPair.FaceTracking.UpstreamRuntime/
+//     modules/facetracking/src/host/WKOpenVR.FaceTracking.UpstreamRuntime/
 //     Params/Expressions/UnifiedExpressions.cs)
-//   - OpenVRPair.FaceTracking.ModuleSdk.UnifiedExpression (ours)
+//   - WKOpenVR.FaceTracking.ModuleSdk.UnifiedExpression (ours)
 //
 // If either enum gains entries upstream-side or ours-side, the table
 // needs a matching pass. These tests anchor a handful of well-known

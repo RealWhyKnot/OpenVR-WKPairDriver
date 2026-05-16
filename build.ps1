@@ -196,7 +196,7 @@ Write-Host ("  -> {0}" -f $dll.FullName)
 # build/artifacts/FaceModuleHost/ (the host CMakeLists.txt publishes there).
 # The driver's HostSupervisor resolves the host exe relative to its own
 # resources directory, so the deployable tree must contain:
-#   driver_wkopenvr/resources/facetracking/host/OpenVRPair.FaceModuleHost.exe
+#   driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe
 # If OPENVR_PAIR_BUILD_FACE_HOST=OFF (no .NET SDK on the build host), the
 # artifacts dir is absent and the staging step no-ops. The driver detects
 # the missing exe at runtime, logs once, and keeps the feature inert.
@@ -205,12 +205,12 @@ $hostStageDir = "build/driver_wkopenvr/resources/facetracking/host"
 if (Test-Path $hostBuildDir) {
 	New-Item -ItemType Directory -Force -Path $hostStageDir | Out-Null
 	Copy-Item -Recurse -Force -Path "$hostBuildDir\*" -Destination $hostStageDir
-	$hostExe = Join-Path $hostStageDir "OpenVRPair.FaceModuleHost.exe"
+	$hostExe = Join-Path $hostStageDir "WKOpenVR.FaceModuleHost.exe"
 	if (Test-Path $hostExe) {
 		$hostExeItem = Get-Item $hostExe
 		Write-Host ("Staged FaceModuleHost: {0} ({1:N0} bytes)" -f $hostExeItem.Name, $hostExeItem.Length)
 	} else {
-		Write-Host "FaceModuleHost staging directory present but OpenVRPair.FaceModuleHost.exe missing -- did the publish step fail silently?" -ForegroundColor Yellow
+		Write-Host "FaceModuleHost staging directory present but WKOpenVR.FaceModuleHost.exe missing -- did the publish step fail silently?" -ForegroundColor Yellow
 	}
 } else {
 	Write-Host "FaceModuleHost build artifacts not found at $hostBuildDir (OPENVR_PAIR_BUILD_FACE_HOST=OFF or .NET SDK missing). Driver will load without the host sidecar." -ForegroundColor Yellow

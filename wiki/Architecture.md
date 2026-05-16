@@ -47,7 +47,7 @@ The driver scans the resources directory at startup; flag presence is checked on
 
 1. SteamVR loads `driver_01wkopenvr.dll` via the normal driver discovery path.
 2. The driver scans `resources/enable_*.flag`, decides which feature modules to activate, and opens the corresponding IPC servers.
-3. If `enable_facetracking.flag` is present the driver's `HostSupervisor` spawns `OpenVRPair.FaceModuleHost.exe` (the C# .NET 10 sidecar). The host loads hardware-vendor face-tracking modules in collectible `AssemblyLoadContext`s, normalises samples to the Unified Expression set, and writes per-frame data into the shmem ring. Driver restarts the host with exponential backoff if it crashes.
+3. If `enable_facetracking.flag` is present the driver's `HostSupervisor` spawns `WKOpenVR.FaceModuleHost.exe` (the C# .NET 10 sidecar). The host loads hardware-vendor face-tracking modules in collectible `AssemblyLoadContext`s, normalises samples to the Unified Expression set, and writes per-frame data into the shmem ring. Driver restarts the host with exponential backoff if it crashes.
 4. The user launches the umbrella overlay (`WKOpenVR.exe`). It registers itself as a SteamVR application via the bundled vrmanifest so it can be auto-launched the next time. The overlay connects to each module's IPC pipe, presents per-module tabs, and renders into both the desktop window and the SteamVR dashboard via an offscreen framebuffer + `vr::IVROverlay::SetOverlayTexture`.
 
 ## Logs and profiles

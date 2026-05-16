@@ -16,7 +16,7 @@
     <NoWarn>CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CS0168;CS0169;CS0414;NU1507</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\OpenVRPair.FaceTracking.UpstreamRuntime\OpenVRPair.FaceTracking.UpstreamRuntime.csproj" />
+    <ProjectReference Include="..\WKOpenVR.FaceTracking.UpstreamRuntime\WKOpenVR.FaceTracking.UpstreamRuntime.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="2.0.1" />

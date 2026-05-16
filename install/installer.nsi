@@ -219,7 +219,7 @@ Section "Install"
     File /oname=driver_01wkopenvr.dll "${DRIVER_BASEDIR}\bin\win64\driver_wkopenvr.dll"
 
     ; FaceTracking host sidecar (.NET 10). Driver's HostSupervisor spawns
-    ; OpenVRPair.FaceModuleHost.exe from this directory when the
+    ; WKOpenVR.FaceModuleHost.exe from this directory when the
     ; enable_facetracking.flag is present. The /r flag pulls in the entire
     ; published .NET tree (exe + .deps.json + .runtimeconfig.json + dependent
     ; DLLs). The whole folder is missing when the build host doesn't have the
@@ -227,7 +227,7 @@ Section "Install"
     ; directive entirely at compile time so makensis does not abort with
     ; "no files found", and the feature simply runs inert at runtime
     ; (driver still loads, just no host process).
-    !if /FileExists "${DRIVER_BASEDIR}\resources\facetracking\host\OpenVRPair.FaceModuleHost.exe"
+    !if /FileExists "${DRIVER_BASEDIR}\resources\facetracking\host\WKOpenVR.FaceModuleHost.exe"
         SetOutPath "$vrRuntimePath\drivers\01wkopenvr\resources\facetracking\host"
         File /r "${DRIVER_BASEDIR}\resources\facetracking\host\*.*"
     !else

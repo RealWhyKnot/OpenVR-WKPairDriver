@@ -167,7 +167,7 @@ std::string ResolveHostExePath(vr::IVRDriverContext *driverContext)
             if (sep == std::string::npos) break;
             path = path.substr(0, sep);
         }
-        path += "\\resources\\facetracking\\host\\OpenVRPair.FaceModuleHost.exe";
+        path += "\\resources\\facetracking\\host\\WKOpenVR.FaceModuleHost.exe";
         return path;
     }
     return {};

@@ -4,7 +4,7 @@
 
 - **Visual Studio Build Tools 2022** (or the VS 2022 IDE) with the C++ workload installed, plus the Windows 10 SDK component.
 - **CMake 4.x** -- the build wraps `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` because the `minhook` submodule pins `cmake_minimum_required(2.8.12)` which CMake 4 rejects.
-- **.NET 10 SDK** -- needed by the face-tracking host (`OpenVRPair.FaceModuleHost`). The build is gated by the `OPENVR_PAIR_BUILD_FACE_HOST` CMake option (default `ON`); pass `-DOPENVR_PAIR_BUILD_FACE_HOST=OFF` to skip if the SDK is unavailable. With the host disabled the driver still loads, but the FaceTracking feature stays inert (the supervisor logs once that the host exe is missing).
+- **.NET 10 SDK** -- needed by the face-tracking host (`WKOpenVR.FaceModuleHost`). The build is gated by the `OPENVR_PAIR_BUILD_FACE_HOST` CMake option (default `ON`); pass `-DOPENVR_PAIR_BUILD_FACE_HOST=OFF` to skip if the SDK is unavailable. With the host disabled the driver still loads, but the FaceTracking feature stays inert (the supervisor logs once that the host exe is missing).
 - **NSIS** -- only needed when building the installer; release CI does this step. Local dev builds skip the installer unless `-Release` is passed.
 
 ## One-shot build
@@ -19,7 +19,7 @@ cd WKOpenVR
 
 - `build/artifacts/Release/WKOpenVR.exe` -- umbrella overlay
 - `build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll` -- shared driver
-- `build/driver_wkopenvr/resources/facetracking/host/OpenVRPair.FaceModuleHost.exe` -- face-tracking sidecar (when the host build is enabled)
+- `build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe` -- face-tracking sidecar (when the host build is enabled)
 
 ## Incremental builds
 

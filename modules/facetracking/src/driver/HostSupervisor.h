@@ -8,7 +8,7 @@
 
 namespace facetracking {
 
-// Spawns and supervises OpenVRPair.FaceModuleHost.exe.
+// Spawns and supervises WKOpenVR.FaceModuleHost.exe.
 //
 // Lifecycle, job-object kill-on-driver-exit, exponential backoff, and the
 // 5-strike circuit breaker live in HostSupervisorBase. This class plugs in

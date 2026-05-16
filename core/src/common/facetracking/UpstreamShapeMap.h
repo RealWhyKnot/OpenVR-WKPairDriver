@@ -22,11 +22,11 @@ inline constexpr int kUpstreamShapeCount = 88;
 // Sources of truth in lockstep with this table:
 //   upstream: VRCFaceTracking.Core.Params.Expressions.UnifiedExpressions
 //             vendored at
-//             modules/facetracking/src/host/OpenVRPair.FaceTracking.UpstreamRuntime/
+//             modules/facetracking/src/host/WKOpenVR.FaceTracking.UpstreamRuntime/
 //             Params/Expressions/UnifiedExpressions.cs
 //             (mirrors upstream v5.1.1.0 order including NoseSneer at 48-49).
-//   ours:     OpenVRPair.FaceTracking.ModuleSdk.UnifiedExpression
-//             modules/facetracking/src/host/OpenVRPair.FaceTracking.ModuleSdk/
+//   ours:     WKOpenVR.FaceTracking.ModuleSdk.UnifiedExpression
+//             modules/facetracking/src/host/WKOpenVR.FaceTracking.ModuleSdk/
 //             UnifiedExpression.cs
 //
 // Most entries are direct case-insensitive name matches. Five entries are

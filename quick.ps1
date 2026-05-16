@@ -552,7 +552,7 @@ $steamVrProcessNames = @(
 	"vrstartup",
 	"vrpathreg",
 	"WKOpenVR",
-	"OpenVRPair.FaceModuleHost",
+	"WKOpenVR.FaceModuleHost",
 	"WKOpenVR.FaceModuleProcess",
 	"WKOpenVR.CaptionsHost"
 )
@@ -592,7 +592,7 @@ $required = @(
 	@("driver.vrresources", (Join-Path $driverSourceDir "resources\driver.vrresources")),
 	@("default.vrsettings", (Join-Path $driverSourceDir "resources\settings\default.vrsettings")),
 	@("driver_wkopenvr.dll", (Join-Path $driverSourceDir "bin\win64\driver_wkopenvr.dll")),
-	@("OpenVRPair.FaceModuleHost.exe", (Join-Path $driverSourceDir "resources\facetracking\host\OpenVRPair.FaceModuleHost.exe")),
+	@("WKOpenVR.FaceModuleHost.exe", (Join-Path $driverSourceDir "resources\facetracking\host\WKOpenVR.FaceModuleHost.exe")),
 	@("WKOpenVR.CaptionsHost.exe", (Join-Path $driverSourceDir "resources\captions\host\WKOpenVR.CaptionsHost.exe")),
 	@("captions host openvr_api.dll", (Join-Path $driverSourceDir "resources\captions\host\openvr_api.dll")),
 	@("captions-packs.json", (Join-Path $driverSourceDir "resources\captions\host\resources\captions-packs.json")),

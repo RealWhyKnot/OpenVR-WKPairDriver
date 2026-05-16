@@ -17,7 +17,7 @@ name: Release
 
 # Triggered by pushing a tag like v2026.5.12.0. Builds the umbrella binary
 # (WKOpenVR.exe), driver (driver_wkopenvr.dll), the C# face-tracking host
-# (OpenVRPair.FaceModuleHost.exe), and the native captions host
+# (WKOpenVR.FaceModuleHost.exe), and the native captions host
 # (WKOpenVR.CaptionsHost.exe) via CMake + MSVC + dotnet publish, runs
 # the test suite, packages an umbrella zip and five per-feature mirror zips,
 # publishes the umbrella release on this repo, and pushes a mirror release
@@ -271,8 +271,8 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path $faceHostStageDir | Out-Null
           Copy-Item -Recurse -Force -Path "$faceHostBuildDir\*" -Destination $faceHostStageDir
-          if (-not (Test-Path "$faceHostStageDir/OpenVRPair.FaceModuleHost.exe")) {
-            throw "Staged OpenVRPair.FaceModuleHost.exe missing under $faceHostStageDir."
+          if (-not (Test-Path "$faceHostStageDir/WKOpenVR.FaceModuleHost.exe")) {
+            throw "Staged WKOpenVR.FaceModuleHost.exe missing under $faceHostStageDir."
           }
 
           # Stage the native captions host. CMake emits it to
@@ -381,7 +381,7 @@ jobs:
             'build/driver_wkopenvr/resources/driver.vrresources',
             'build/driver_wkopenvr/resources/settings/default.vrsettings',
             'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll',
-            'build/driver_wkopenvr/resources/facetracking/host/OpenVRPair.FaceModuleHost.exe',
+            'build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe',
             'build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe',
             'build/driver_wkopenvr/resources/captions/host/openvr_api.dll',
             'build/driver_wkopenvr/resources/captions/host/resources/captions-packs.json',

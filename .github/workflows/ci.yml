@@ -146,7 +146,7 @@ jobs:
             'build/driver_wkopenvr/resources/driver.vrresources',
             'build/driver_wkopenvr/resources/settings/default.vrsettings',
             'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll',
-            'build/driver_wkopenvr/resources/facetracking/host/OpenVRPair.FaceModuleHost.exe',
+            'build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe',
             'build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe',
             'build/driver_wkopenvr/resources/captions/host/openvr_api.dll',
             'build/driver_wkopenvr/resources/captions/host/resources/captions-packs.json',

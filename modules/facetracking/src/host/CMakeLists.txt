@@ -27,13 +27,13 @@ if(NOT DOTNET_EXECUTABLE)
 	return()
 endif()
 
-set(FACE_HOST_SOLUTION "${CMAKE_CURRENT_LIST_DIR}/OpenVRPair.FaceTracking.sln")
-set(FACE_HOST_PROJECT  "${CMAKE_CURRENT_LIST_DIR}/OpenVRPair.FaceModuleHost/OpenVRPair.FaceModuleHost.csproj")
+set(FACE_HOST_SOLUTION "${CMAKE_CURRENT_LIST_DIR}/WKOpenVR.FaceTracking.sln")
+set(FACE_HOST_PROJECT  "${CMAKE_CURRENT_LIST_DIR}/WKOpenVR.FaceModuleHost/WKOpenVR.FaceModuleHost.csproj")
 set(FACE_MODULE_PROCESS_PROJECT "${CMAKE_CURRENT_LIST_DIR}/WKOpenVR.FaceModuleProcess/WKOpenVR.FaceModuleProcess.csproj")
 set(FACE_HOST_PUBLISH_DIR "${CMAKE_BINARY_DIR}/facetracking-host-publish")
 set(FACE_HOST_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/artifacts/FaceModuleHost")
 # Mirror the published tree into the driver staging directory so the
-# NSIS installer + the umbrella zip both find OpenVRPair.FaceModuleHost.exe
+# NSIS installer + the umbrella zip both find WKOpenVR.FaceModuleHost.exe
 # under driver_wkopenvr/resources/facetracking/host/ without any caller-
 # side post-build copy. build.ps1 used to handle this, but the CI workflow
 # runs cmake directly and skipped the step -- doing it here keeps every
@@ -78,7 +78,7 @@ add_custom_command(
 	COMMAND ${CMAKE_COMMAND} -E touch "${FACE_HOST_STAMP}"
 	DEPENDS ${FACE_HOST_INPUTS}
 	WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
-	COMMENT "Building OpenVRPair.FaceModuleHost (.NET 10)"
+	COMMENT "Building WKOpenVR.FaceModuleHost (.NET 10)"
 	VERBATIM)
 
 add_custom_target(openvr_pair_feature_facetracking_host ALL

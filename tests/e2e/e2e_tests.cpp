@@ -69,7 +69,7 @@ std::filesystem::path BuildRoot()
 std::filesystem::path FaceHostPath()
 {
     return BuildRoot() / L"driver_wkopenvr" / L"resources" / L"facetracking" /
-        L"host" / L"OpenVRPair.FaceModuleHost.exe";
+        L"host" / L"WKOpenVR.FaceModuleHost.exe";
 }
 
 std::filesystem::path CaptionsHostPath()

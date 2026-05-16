@@ -190,7 +190,7 @@ namespace protocol
 	// accepts RequestSetFaceTrackingConfig + RequestSetFaceCalibrationCommand +
 	// RequestSetFaceActiveModule. A new shmem ring
 	// (WKOpenVRFaceTrackingFrameRingV2) carries per-frame face/eye samples
-	// from a C# host sidecar (OpenVRPair.FaceModuleHost.exe) into the driver.
+	// from a C# host sidecar (WKOpenVR.FaceModuleHost.exe) into the driver.
 	// Wire layout for the existing request types is unchanged; the bump forces
 	// paired install so a version skew is rejected at handshake instead of
 	// landing as a silently-ignored RequestType.
