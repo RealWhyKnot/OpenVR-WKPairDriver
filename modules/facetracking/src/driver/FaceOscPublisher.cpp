@@ -3,6 +3,7 @@
 
 #include "RouterPublishApi.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -145,25 +146,34 @@ static_assert(
         protocol::FACETRACKING_EXPRESSION_COUNT,
     "kExprParamUpstreamAliases length must match FACETRACKING_EXPRESSION_COUNT");
 
+static inline float FiniteOrZero(float v) { return std::isfinite(v) ? v : 0.0f; }
+
 static OscCounts PublishEye(const protocol::FaceTrackingFrameBody &frame)
 {
     OscCounts counts;
-    const float pupil = (frame.pupil_dilation_l + frame.pupil_dilation_r) * 0.5f;
+    const float gx_l   = FiniteOrZero(frame.eye_gaze_l[0]);
+    const float gy_l   = FiniteOrZero(frame.eye_gaze_l[1]);
+    const float gx_r   = FiniteOrZero(frame.eye_gaze_r[0]);
+    const float gy_r   = FiniteOrZero(frame.eye_gaze_r[1]);
+    const float open_l = FiniteOrZero(frame.eye_openness_l);
+    const float open_r = FiniteOrZero(frame.eye_openness_r);
+    const float pupil  = (FiniteOrZero(frame.pupil_dilation_l) +
+                          FiniteOrZero(frame.pupil_dilation_r)) * 0.5f;
 
-    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeX",     frame.eye_gaze_l[0]));
-    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeY",     frame.eye_gaze_l[1]));
-    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeX",    frame.eye_gaze_r[0]));
-    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeY",    frame.eye_gaze_r[1]));
-    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeLid",   frame.eye_openness_l));
-    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeLid",  frame.eye_openness_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeX",     gx_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeY",     gy_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeX",    gx_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeY",    gy_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/LeftEyeLid",   open_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/RightEyeLid",  open_r));
     counts.Add(OscPublishFloat("/avatar/parameters/EyesDilation", pupil));
 
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeLeftX",      frame.eye_gaze_l[0]));
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeLeftY",      frame.eye_gaze_l[1]));
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeRightX",     frame.eye_gaze_r[0]));
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeRightY",     frame.eye_gaze_r[1]));
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeOpenLeft",   frame.eye_openness_l));
-    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeOpenRight",  frame.eye_openness_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeLeftX",      gx_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeLeftY",      gy_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeRightX",     gx_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeRightY",     gy_r));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeOpenLeft",   open_l));
+    counts.Add(OscPublishFloat("/avatar/parameters/v2/EyeOpenRight",  open_r));
     counts.Add(OscPublishFloat("/avatar/parameters/v2/PupilDilation", pupil));
     return counts;
 }
@@ -193,7 +203,7 @@ static OscCounts PublishExpressions(const protocol::FaceTrackingFrameBody &frame
     };
 
     for (uint32_t i = 0; i < protocol::FACETRACKING_EXPRESSION_COUNT; ++i) {
-        const float value = frame.expressions[i];
+        const float value = FiniteOrZero(frame.expressions[i]);
         emitBoth(kExprParamNames[i], value);
         // Modern VRCFaceTracking-v5 avatars bind to the renamed parameter
         // names (MouthClosed, MouthCornerPull*, MouthFrown*) instead of
