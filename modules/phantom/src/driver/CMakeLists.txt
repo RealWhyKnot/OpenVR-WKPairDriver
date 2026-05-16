@@ -10,6 +10,7 @@ add_library(openvr_pair_feature_phantom_driver STATIC
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/PhantomTypes.h
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/BlendCurves.h
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/PoseSample.h
+	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/RoleCatalog.h
 	# Driver-side math.
 	PoseHistory.cpp
 	PoseHistory.h
@@ -19,6 +20,8 @@ add_library(openvr_pair_feature_phantom_driver STATIC
 	BlendController.h
 	DropoutState.cpp
 	DropoutState.h
+	IkFallback.cpp
+	IkFallback.h
 	# Module entry point + IPC dispatch + state ownership. Hot-path entry
 	# points are declared in core/src/driver/DriverModule.h next to the
 	# CreateDriverModule forward decl so the umbrella driver can call them

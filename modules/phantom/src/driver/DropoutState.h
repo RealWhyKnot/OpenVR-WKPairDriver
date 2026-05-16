@@ -55,6 +55,15 @@ public:
     void SetTimings(const LadderTimings& t) { timings_ = t; }
     const LadderTimings& timings() const { return timings_; }
 
+    // Phase 1.5: tells the ladder whether an IK fallback is available for
+    // this device's role. When true, the SYNTH_RECKON -> SYNTH_IK
+    // transition fires at kReckonHoldMs; otherwise the ladder stays in
+    // SYNTH_RECKON (damped dead reckoning) until OUT_OF_RANGE / LOST.
+    // The bool is consulted on each Tick(); the caller updates it whenever
+    // a calibration arrives over IPC.
+    void SetIkAvailable(bool v) { ik_available_ = v; }
+    bool ik_available() const { return ik_available_; }
+
     // Record a real (driver-observed) pose. Updates the state machine and
     // resets silence trackers. The pose is also pushed into `history` by
     // the caller before this call.
@@ -88,6 +97,7 @@ public:
 private:
     LadderTimings timings_;
     TrackerState state_ = TrackerState::REAL;
+    bool ik_available_ = false;
 
     // QPC of the most recent observed real pose; -1 = never.
     int64_t last_real_qpc_ns_ = -1;

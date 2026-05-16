@@ -24,11 +24,13 @@ void PhantomPlugin::OnStart(openvr_pair::overlay::ShellContext&)
 {
     (void)ConnectIfNeeded();
     SendConfig();
-    // Push the persisted per-device opt-in map so the driver picks up the
-    // user's prior choices without needing to wait for them to re-toggle.
+    // Push the persisted per-device opt-in map + calibration so the driver
+    // picks up the user's prior choices without needing to wait for them
+    // to re-toggle / re-calibrate.
     for (const auto& kv : cfg_.dropout_enabled) {
         if (kv.second) SendDeviceOptIn(kv.first, true);
     }
+    ReplayCalibration();
     seededDriver_ = ipc_.IsConnected();
 }
 
@@ -41,6 +43,7 @@ void PhantomPlugin::Tick(openvr_pair::overlay::ShellContext&)
         for (const auto& kv : cfg_.dropout_enabled) {
             if (kv.second) SendDeviceOptIn(kv.first, true);
         }
+        ReplayCalibration();
         seededDriver_ = true;
     }
 
@@ -110,6 +113,10 @@ void PhantomPlugin::DrawTab(openvr_pair::overlay::ShellContext&)
     if (ImGui::BeginTabBar("PhantomTabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem("Dropouts")) {
             DrawDropoutsTab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Calibration")) {
+            DrawCalibrationTab();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Diagnostics")) {
@@ -283,6 +290,335 @@ void PhantomPlugin::DrawAdvancedTab()
     }
 }
 
+namespace {
+
+// FNV-1a 64-bit over a serial string. Matches the driver-side convention
+// so per-serial-hash maps line up on both ends.
+uint64_t Fnv1a64Local(const std::string& s)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (char c : s) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+// Quaternion conjugate (== inverse for a unit quaternion).
+vr::HmdQuaternion_t QConj(const vr::HmdQuaternion_t& q)
+{
+    return { q.w, -q.x, -q.y, -q.z };
+}
+
+vr::HmdQuaternion_t QMul(const vr::HmdQuaternion_t& a, const vr::HmdQuaternion_t& b)
+{
+    vr::HmdQuaternion_t r;
+    r.w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z;
+    r.x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y;
+    r.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
+    r.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
+    return r;
+}
+
+// HmdMatrix34_t (column-major 3x4 with column 3 = translation) -> position
+// + quaternion. Matches the convention used by GetDeviceToAbsoluteTrackingPose.
+void DecomposeMatrix34(const vr::HmdMatrix34_t& m,
+                       double pos[3],
+                       vr::HmdQuaternion_t& q)
+{
+    pos[0] = m.m[0][3];
+    pos[1] = m.m[1][3];
+    pos[2] = m.m[2][3];
+    // Standard rotation-matrix to quaternion. The matrix's upper-left 3x3
+    // is the rotation; we read it as row-major-3x3 directly.
+    const double m00 = m.m[0][0], m01 = m.m[0][1], m02 = m.m[0][2];
+    const double m10 = m.m[1][0], m11 = m.m[1][1], m12 = m.m[1][2];
+    const double m20 = m.m[2][0], m21 = m.m[2][1], m22 = m.m[2][2];
+    const double trace = m00 + m11 + m22;
+    if (trace > 0.0) {
+        const double s = std::sqrt(trace + 1.0) * 2.0;
+        q.w = 0.25 * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25 * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25 * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        const double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25 * s;
+    }
+}
+
+void QRotateInverse(const vr::HmdQuaternion_t& q, const double v[3], double out[3])
+{
+    // Rotate v by q^-1 (= conjugate for unit q). Standard formula via
+    // q^-1 * v * q expressed without intermediate quaternions.
+    const auto qi = QConj(q);
+    const double ux = qi.x, uy = qi.y, uz = qi.z, s = qi.w;
+    const double tx = 2.0 * (uy * v[2] - uz * v[1]);
+    const double ty = 2.0 * (uz * v[0] - ux * v[2]);
+    const double tz = 2.0 * (ux * v[1] - uy * v[0]);
+    out[0] = v[0] + s * tx + (uy * tz - uz * ty);
+    out[1] = v[1] + s * ty + (uz * tx - ux * tz);
+    out[2] = v[2] + s * tz + (ux * ty - uy * tx);
+}
+
+} // namespace
+
+void PhantomPlugin::SendDeviceRole(const std::string& serial, phantom::BodyRole role)
+{
+    if (!ipc_.IsConnected()) return;
+    protocol::Request req(protocol::RequestSetPhantomDeviceRole);
+    req.setPhantomDeviceRole.device_serial_hash = Fnv1a64Local(serial);
+    req.setPhantomDeviceRole.body_role = static_cast<uint8_t>(role);
+    std::memset(req.setPhantomDeviceRole._reserved, 0,
+                sizeof(req.setPhantomDeviceRole._reserved));
+    try { ipc_.SendBlocking(req); }
+    catch (const std::exception& e) { connectError_ = e.what(); }
+}
+
+void PhantomPlugin::SendTrackerOffset(phantom::BodyRole role,
+                                      const PhantomRoleOffset& offset)
+{
+    if (!ipc_.IsConnected()) return;
+    protocol::Request req(protocol::RequestSetPhantomTrackerOffset);
+    auto& o = req.setPhantomTrackerOffset;
+    o.body_role = static_cast<uint8_t>(role);
+    o.calibrated = offset.calibrated ? 1u : 0u;
+    std::memset(o._pad, 0, sizeof(o._pad));
+    o.rel_position[0] = offset.rel_position_x;
+    o.rel_position[1] = offset.rel_position_y;
+    o.rel_position[2] = offset.rel_position_z;
+    o.rel_rotation.w = offset.rel_rotation_w;
+    o.rel_rotation.x = offset.rel_rotation_x;
+    o.rel_rotation.y = offset.rel_rotation_y;
+    o.rel_rotation.z = offset.rel_rotation_z;
+    try { ipc_.SendBlocking(req); }
+    catch (const std::exception& e) { connectError_ = e.what(); }
+}
+
+void PhantomPlugin::ReplayCalibration()
+{
+    if (!ipc_.IsConnected()) return;
+    for (const auto& kv : cfg_.device_role) {
+        SendDeviceRole(kv.first, kv.second);
+    }
+    for (const auto& kv : cfg_.role_offset) {
+        if (kv.second.calibrated) SendTrackerOffset(kv.first, kv.second);
+    }
+}
+
+void PhantomPlugin::CaptureTPose()
+{
+    auto* vrSystem = vr::VRSystem();
+    if (!vrSystem) {
+        lastCalibrationSummary_ = "VR system not available; tracking poses not captured.";
+        return;
+    }
+
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+    vrSystem->GetDeviceToAbsoluteTrackingPose(
+        vr::TrackingUniverseStanding,
+        /*predictedSecondsToPhotonsFromNow=*/0.0f,
+        poses,
+        vr::k_unMaxTrackedDeviceCount);
+
+    // Locate the HMD (Class_HMD). Without it we have no reference frame for
+    // the IK fallback's rigid offsets.
+    uint32_t hmdId = vr::k_unTrackedDeviceIndexInvalid;
+    for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+        if (vrSystem->GetTrackedDeviceClass(id) == vr::TrackedDeviceClass_HMD
+            && poses[id].bPoseIsValid
+            && poses[id].eTrackingResult == vr::TrackingResult_Running_OK) {
+            hmdId = id;
+            break;
+        }
+    }
+    if (hmdId == vr::k_unTrackedDeviceIndexInvalid) {
+        lastCalibrationSummary_ = "HMD not tracked; calibration aborted.";
+        return;
+    }
+
+    double hmdPos[3];
+    vr::HmdQuaternion_t hmdRot;
+    DecomposeMatrix34(poses[hmdId].mDeviceToAbsoluteTracking, hmdPos, hmdRot);
+
+    int captured = 0;
+    int skipped  = 0;
+    char buffer[vr::k_unMaxPropertyStringSize];
+    for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+        const auto cls = vrSystem->GetTrackedDeviceClass(id);
+        if (cls == vr::TrackedDeviceClass_Invalid || cls == vr::TrackedDeviceClass_HMD) {
+            continue;
+        }
+        if (!poses[id].bPoseIsValid
+            || poses[id].eTrackingResult != vr::TrackingResult_Running_OK) {
+            continue;
+        }
+        vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+        vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String,
+            buffer, sizeof(buffer), &err);
+        if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
+        const std::string serial = buffer;
+
+        const auto roleIt = cfg_.device_role.find(serial);
+        if (roleIt == cfg_.device_role.end() || roleIt->second == phantom::BodyRole::None) {
+            ++skipped;
+            continue;
+        }
+
+        double trkPos[3];
+        vr::HmdQuaternion_t trkRot;
+        DecomposeMatrix34(poses[id].mDeviceToAbsoluteTracking, trkPos, trkRot);
+
+        const double delta[3] = {
+            trkPos[0] - hmdPos[0],
+            trkPos[1] - hmdPos[1],
+            trkPos[2] - hmdPos[2],
+        };
+        double rel[3];
+        QRotateInverse(hmdRot, delta, rel);
+        const vr::HmdQuaternion_t relRot = QMul(QConj(hmdRot), trkRot);
+
+        PhantomRoleOffset off{};
+        off.calibrated = true;
+        off.rel_position_x = rel[0];
+        off.rel_position_y = rel[1];
+        off.rel_position_z = rel[2];
+        off.rel_rotation_w = relRot.w;
+        off.rel_rotation_x = relRot.x;
+        off.rel_rotation_y = relRot.y;
+        off.rel_rotation_z = relRot.z;
+
+        cfg_.role_offset[roleIt->second] = off;
+        SendTrackerOffset(roleIt->second, off);
+        ++captured;
+    }
+
+    SavePhantomConfig(cfg_);
+    char tmp[128];
+    std::snprintf(tmp, sizeof(tmp),
+        "Captured %d role%s; skipped %d unassigned tracker%s.",
+        captured, captured == 1 ? "" : "s",
+        skipped,  skipped  == 1 ? "" : "s");
+    lastCalibrationSummary_ = tmp;
+}
+
+void PhantomPlugin::DrawCalibrationTab()
+{
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Assign a body role to each physical tracker, hold T-pose, then "
+        "click Capture. The driver remembers the rigid offset between "
+        "each tracker and your head; when a tracker drops out the offset "
+        "is reapplied to your live head pose so the avatar stays plausible "
+        "past the dead-reckoning window.");
+    ImGui::Spacing();
+
+    auto* vrSystem = vr::VRSystem();
+    if (!vrSystem) {
+        ImGui::TextDisabled("(VR system not available)");
+        return;
+    }
+
+    ImGui::SeparatorText("Role assignment");
+    char buffer[vr::k_unMaxPropertyStringSize];
+    for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+        const auto cls = vrSystem->GetTrackedDeviceClass(id);
+        if (cls == vr::TrackedDeviceClass_Invalid) continue;
+
+        vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+        vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String,
+            buffer, sizeof(buffer), &err);
+        if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
+        const std::string serial = buffer;
+
+        vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String,
+            buffer, sizeof(buffer), &err);
+        const std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
+
+        if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(cls, serial, model)) {
+            continue;
+        }
+
+        const auto roleIt = cfg_.device_role.find(serial);
+        phantom::BodyRole cur = (roleIt != cfg_.device_role.end())
+            ? roleIt->second
+            : phantom::BodyRole::None;
+
+        ImGui::PushID(("cal_" + serial).c_str());
+        ImGui::TextWrapped("%s  [%s]",
+            model.empty() ? "(unknown model)" : model.c_str(),
+            serial.c_str());
+
+        const char* curLabel = phantom::BodyRoleLabel(cur);
+        if (ImGui::BeginCombo("Role", curLabel)) {
+            for (uint8_t i = 0; i < phantom::kBodyRoleCount; ++i) {
+                const auto r = static_cast<phantom::BodyRole>(i);
+                // HMD / hand roles are not assignable on a body tracker;
+                // skip them in the dropdown to avoid invalid combinations.
+                if (r == phantom::BodyRole::Hmd
+                    || r == phantom::BodyRole::LeftHand
+                    || r == phantom::BodyRole::RightHand) continue;
+                const bool selected = (r == cur);
+                if (ImGui::Selectable(phantom::BodyRoleLabel(r), selected)) {
+                    if (r == phantom::BodyRole::None) {
+                        cfg_.device_role.erase(serial);
+                    } else {
+                        cfg_.device_role[serial] = r;
+                    }
+                    SendDeviceRole(serial, r);
+                    SavePhantomConfig(cfg_);
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopID();
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("T-pose capture");
+    if (ImGui::Button("Capture T-pose now")) {
+        CaptureTPose();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Stand in a T-pose (arms out, body upright, head level) and click.\n"
+            "Captures the rigid offset of every assigned-role tracker from your\n"
+            "head. Reassigning a role or moving a tracker means re-capturing.");
+    }
+    if (!lastCalibrationSummary_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", lastCalibrationSummary_.c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Calibration status");
+    if (cfg_.role_offset.empty()) {
+        ImGui::TextDisabled("No roles calibrated yet.");
+    } else {
+        for (const auto& kv : cfg_.role_offset) {
+            ImGui::Text("%-18s %s",
+                phantom::BodyRoleLabel(kv.first),
+                kv.second.calibrated ? "calibrated" : "not captured");
+        }
+    }
+}
+
 namespace openvr_pair::overlay {
 
 std::unique_ptr<FeaturePlugin> CreatePhantomPlugin()
@@ -291,3 +627,4 @@ std::unique_ptr<FeaturePlugin> CreatePhantomPlugin()
 }
 
 } // namespace openvr_pair::overlay
+

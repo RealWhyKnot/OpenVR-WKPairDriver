@@ -68,6 +68,29 @@ PhantomConfig LoadPhantomConfig()
         } else if (std::strncmp(key, "dropout_enabled.", 16) == 0) {
             const std::string serial(key + 16);
             cfg.dropout_enabled[serial] = (std::atoi(val) != 0);
+        } else if (std::strncmp(key, "device_role.", 12) == 0) {
+            const std::string serial(key + 12);
+            const phantom::BodyRole r = phantom::BodyRoleFromKey(val);
+            if (r != phantom::BodyRole::None) cfg.device_role[serial] = r;
+        } else if (std::strncmp(key, "role_offset.", 12) == 0) {
+            // role_offset.<role>.<field>=<value>
+            const char* rest = key + 12;
+            const char* dot = std::strchr(rest, '.');
+            if (!dot) continue;
+            std::string roleKey(rest, dot - rest);
+            const phantom::BodyRole r = phantom::BodyRoleFromKey(roleKey.c_str());
+            if (r == phantom::BodyRole::None) continue;
+            auto& o = cfg.role_offset[r];
+            const char* field = dot + 1;
+            const double d = std::strtod(val, nullptr);
+            if      (std::strcmp(field, "calibrated") == 0) o.calibrated = (std::atoi(val) != 0);
+            else if (std::strcmp(field, "px") == 0) o.rel_position_x = d;
+            else if (std::strcmp(field, "py") == 0) o.rel_position_y = d;
+            else if (std::strcmp(field, "pz") == 0) o.rel_position_z = d;
+            else if (std::strcmp(field, "qw") == 0) o.rel_rotation_w = d;
+            else if (std::strcmp(field, "qx") == 0) o.rel_rotation_x = d;
+            else if (std::strcmp(field, "qy") == 0) o.rel_rotation_y = d;
+            else if (std::strcmp(field, "qz") == 0) o.rel_rotation_z = d;
         }
     }
     std::fclose(f);
@@ -91,6 +114,24 @@ void SavePhantomConfig(const PhantomConfig& cfg)
         if (kv.second) {
             std::fprintf(f, "dropout_enabled.%s=1\n", kv.first.c_str());
         }
+    }
+    for (const auto& kv : cfg.device_role) {
+        if (kv.second != phantom::BodyRole::None) {
+            std::fprintf(f, "device_role.%s=%s\n", kv.first.c_str(),
+                         phantom::BodyRoleToKey(kv.second));
+        }
+    }
+    for (const auto& kv : cfg.role_offset) {
+        if (!kv.second.calibrated) continue;
+        const char* k = phantom::BodyRoleToKey(kv.first);
+        std::fprintf(f, "role_offset.%s.calibrated=1\n", k);
+        std::fprintf(f, "role_offset.%s.px=%.6f\n", k, kv.second.rel_position_x);
+        std::fprintf(f, "role_offset.%s.py=%.6f\n", k, kv.second.rel_position_y);
+        std::fprintf(f, "role_offset.%s.pz=%.6f\n", k, kv.second.rel_position_z);
+        std::fprintf(f, "role_offset.%s.qw=%.6f\n", k, kv.second.rel_rotation_w);
+        std::fprintf(f, "role_offset.%s.qx=%.6f\n", k, kv.second.rel_rotation_x);
+        std::fprintf(f, "role_offset.%s.qy=%.6f\n", k, kv.second.rel_rotation_y);
+        std::fprintf(f, "role_offset.%s.qz=%.6f\n", k, kv.second.rel_rotation_z);
     }
     std::fclose(f);
 }

@@ -234,7 +234,16 @@ namespace protocol
 	// grow; static_asserts below pin that. Bump forces paired install so
 	// a version skew is rejected at handshake instead of silently dropping
 	// the new request types.
-	const uint32_t Version = 19;
+	//
+	// v20 (2026-05-16): phantom Phase 1.5. Adds RequestSetPhantomDeviceRole
+	// (per-serial body-role assignment fed by the T-pose calibration
+	// wizard) and RequestSetPhantomTrackerOffset (per-role rigid offset
+	// from the HMD captured at T-pose). DropoutState now transitions
+	// to SYNTH_IK past the reckon-hold window when any calibration is on
+	// file; IkFallback rebuilds a synth pose by applying the rigid offset
+	// to the live HMD pose. Both new structs are smaller than
+	// SetDeviceTransform; static_asserts pin the union size.
+	const uint32_t Version = 20;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -310,6 +319,14 @@ namespace protocol
 		// toggle (one message per device the user toggles).
 		RequestSetPhantomConfig,
 		RequestSetPhantomDeviceOptIn,
+		// v20 (2026-05-16): phantom Phase 1.5 calibration messages.
+		// SetPhantomDeviceRole maps a physical tracker's FNV-1a serial
+		// hash to a body role (waist / foot / etc.); SetPhantomTrackerOffset
+		// carries the rigid HMD-relative offset captured during the T-pose
+		// wizard. Both arrive once per tracker per calibration; the driver
+		// keeps the values until cleared.
+		RequestSetPhantomDeviceRole,
+		RequestSetPhantomTrackerOffset,
 	};
 
 	enum ResponseType
@@ -856,6 +873,34 @@ namespace protocol
 		uint8_t  _reserved[7];
 	};
 
+	// POD payload for RequestSetPhantomDeviceRole. Maps a physical tracker's
+	// serial hash to a body role (BodyRole enum; see RoleCatalog.h). The
+	// overlay sends one of these per assignment, including a clearing
+	// message with body_role = 0 (None) when the user un-assigns. The IK
+	// fallback consults the role -> offset table; this message tells the
+	// driver which OpenVR device feeds which role.
+	struct PhantomDeviceRole
+	{
+		uint64_t device_serial_hash;
+		uint8_t  body_role;      // BodyRole enum value
+		uint8_t  _reserved[7];
+	};
+
+	// POD payload for RequestSetPhantomTrackerOffset. Carries the rigid
+	// HMD-relative offset captured during the T-pose wizard for the
+	// addressed body role. calibrated = 0 clears the slot; the driver
+	// then falls back to dead reckoning for the role. The rotation is a
+	// unit quaternion (w,x,y,z); the position is in metres in the HMD's
+	// local frame at the moment of capture.
+	struct PhantomTrackerOffset
+	{
+		uint8_t  body_role;
+		uint8_t  calibrated;
+		uint8_t  _pad[6];
+		double   rel_position[3];
+		vr::HmdQuaternion_t rel_rotation;
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -900,6 +945,11 @@ namespace protocol
 			// grow; static_asserts below enforce it.
 			PhantomConfig     setPhantomConfig;
 			PhantomDeviceOptIn setPhantomDeviceOptIn;
+			// v20: phantom Phase 1.5 calibration -- per-serial role
+			// assignment + per-role rigid offset from HMD. Both smaller
+			// than SetDeviceTransform; static_asserts pin the size.
+			PhantomDeviceRole     setPhantomDeviceRole;
+			PhantomTrackerOffset  setPhantomTrackerOffset;
 		};
 
 		Request() : type(RequestInvalid), setAlignmentSpeedParams({}) { }
@@ -927,6 +977,10 @@ namespace protocol
 		"PhantomConfig must not grow Request");
 	static_assert(sizeof(PhantomDeviceOptIn) <= sizeof(SetDeviceTransform),
 		"PhantomDeviceOptIn must not grow Request");
+	static_assert(sizeof(PhantomDeviceRole) <= sizeof(SetDeviceTransform),
+		"PhantomDeviceRole must not grow Request");
+	static_assert(sizeof(PhantomTrackerOffset) <= sizeof(SetDeviceTransform),
+		"PhantomTrackerOffset must not grow Request");
 
 	struct Response
 	{

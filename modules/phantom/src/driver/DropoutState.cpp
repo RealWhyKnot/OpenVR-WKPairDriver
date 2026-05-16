@@ -103,12 +103,18 @@ void DropoutState::Tick(int64_t qpc_ns, int64_t qpc_freq)
             state_ = TrackerState::SYNTH_RECKON;
         }
 
-        // SYNTH_RECKON: the dead-reckoner is the source until Phase 1.5
-        // hands off to SYNTH_IK at kReckonHoldMs. Phase 1 stays in
-        // SYNTH_RECKON past that point and lets the damping in
-        // DeadReckoner take over; the ladder still escalates on the
-        // wall-clock so OUT_OF_RANGE / LOST fire at the right times.
-        //
+        // SYNTH_RECKON: the dead-reckoner is the source until either
+        // Phase 1.5 hands off to SYNTH_IK at kReckonHoldMs (when a
+        // calibration is on file for this device's role) or the wall
+        // clock pushes through to OUT_OF_RANGE / LOST. When IK is not
+        // available the ladder stays in SYNTH_RECKON and the damping in
+        // DeadReckoner carries the avatar to rest.
+        if (state_ == TrackerState::SYNTH_RECKON
+            && ik_available_
+            && age_ms >= timings_.reckon_hold_ms) {
+            state_ = TrackerState::SYNTH_IK;
+        }
+
         // Past synth_hold_ms: flip to OUT_OF_RANGE so VRChat-style
         // consumers drop the tracker from their IK chain.
         if (age_ms >= timings_.synth_hold_ms

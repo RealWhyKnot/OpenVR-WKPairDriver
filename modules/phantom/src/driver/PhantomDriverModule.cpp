@@ -12,7 +12,9 @@
 #include "BlendCurves.h"
 #include "DeadReckoner.h"
 #include "DropoutState.h"
+#include "IkFallback.h"
 #include "PoseHistory.h"
+#include "RoleCatalog.h"
 
 #include <openvr_driver.h>
 
@@ -51,6 +53,16 @@ struct DeviceSlot
     std::string  serial;
     uint64_t     serial_hash = 0;
     bool         opted_in    = false;
+
+    // Body role assigned via the T-pose calibration wizard. The IK
+    // fallback (Phase 1.5+) consults this to decide which rigid offset
+    // to apply when the device drops out.
+    BodyRole     role = BodyRole::None;
+
+    // Tracks whether this device is the HMD; the IK solver needs the
+    // HMD's live pose as its reference frame. Set the first time
+    // ResolveSerialIfMissing identifies a Class_HMD device.
+    bool         is_hmd = false;
 
     // Cached "latest published pose" so BLEND_IN has a starting point that
     // matches what SteamVR is currently seeing. Updated whenever phantom
@@ -94,6 +106,19 @@ private:
     // PhantomDeviceOptIn messages and the hot path checks against this map.
     std::unordered_map<uint64_t, bool> opt_in_by_serial_hash_;
 
+    // Per-serial-hash body-role cache. Populated by RequestSetPhantomDeviceRole;
+    // applied to the per-device slot when the device first arrives in
+    // OnRealPoseObserved (or immediately if the slot already resolved).
+    std::unordered_map<uint64_t, BodyRole> role_by_serial_hash_;
+
+    // Live HMD pose cache (post-calibration / smoothing). The IK fallback
+    // applies role-relative offsets to this pose. Updated on every
+    // OnRealPoseObserved for the device flagged is_hmd.
+    vr::DriverPose_t last_hmd_pose_{};
+    bool             last_hmd_valid_ = false;
+
+    IkFallback ik_fallback_;
+
     // Per-openVRID device state. The hot path runs without locking these
     // because openVRID assignments are stable for the lifetime of the
     // device and the hook is single-threaded per device; the IPC handler
@@ -123,10 +148,26 @@ void PhantomModule::ResolveSerialIfMissing(uint32_t openVRID, DeviceSlot& s)
     s.serial = serial;
     s.serial_hash = Fnv1a64(serial.c_str());
 
+    // Tag HMD via the property system rather than assuming openVRID == 0;
+    // SteamVR's convention is stable but some custom multi-HMD setups
+    // re-order. The IK fallback's reference frame depends on this being
+    // right, so query directly.
+    vr::ETrackedPropertyError classErr = vr::TrackedProp_Success;
+    const int32_t deviceClass = vr::VRProperties()->GetInt32Property(
+        handle, vr::Prop_DeviceClass_Int32, &classErr);
+    if (classErr == vr::TrackedProp_Success
+        && deviceClass == vr::TrackedDeviceClass_HMD) {
+        s.is_hmd = true;
+    }
+
     std::lock_guard<std::mutex> lk(state_mutex_);
-    auto it = opt_in_by_serial_hash_.find(s.serial_hash);
-    if (it != opt_in_by_serial_hash_.end()) {
+    if (auto it = opt_in_by_serial_hash_.find(s.serial_hash);
+        it != opt_in_by_serial_hash_.end()) {
         s.opted_in = it->second;
+    }
+    if (auto it = role_by_serial_hash_.find(s.serial_hash);
+        it != role_by_serial_hash_.end()) {
+        s.role = it->second;
     }
 }
 
@@ -206,6 +247,43 @@ bool PhantomModule::HandleRequest(const protocol::Request& request,
             response.type = protocol::ResponseSuccess;
             return true;
         }
+        case protocol::RequestSetPhantomDeviceRole: {
+            const auto& e = request.setPhantomDeviceRole;
+            const BodyRole role = static_cast<BodyRole>(e.body_role);
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            if (role == BodyRole::None) {
+                role_by_serial_hash_.erase(e.device_serial_hash);
+            } else {
+                role_by_serial_hash_[e.device_serial_hash] = role;
+            }
+            for (auto& s : slots_) {
+                if (s.serial_hash == e.device_serial_hash) {
+                    s.role = role;
+                    s.ladder.SetIkAvailable(ik_fallback_.HasOffset(s.role));
+                }
+            }
+            response.type = protocol::ResponseSuccess;
+            return true;
+        }
+        case protocol::RequestSetPhantomTrackerOffset: {
+            const auto& e = request.setPhantomTrackerOffset;
+            const BodyRole role = static_cast<BodyRole>(e.body_role);
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            if (e.calibrated == 0) {
+                ik_fallback_.ClearOffset(role);
+            } else {
+                ik_fallback_.SetOffset(role, e.rel_position, e.rel_rotation);
+            }
+            // Update every slot's ik_available flag in case this newly
+            // calibrated role applies to a device that already has its
+            // role assigned.
+            for (auto& s : slots_) {
+                s.ladder.SetIkAvailable(s.role != BodyRole::None
+                    && ik_fallback_.HasOffset(s.role));
+            }
+            response.type = protocol::ResponseSuccess;
+            return true;
+        }
         default:
             return false;
     }
@@ -220,7 +298,14 @@ void PhantomModule::OnRealPoseObserved(uint32_t openVRID,
     ResolveSerialIfMissing(openVRID, s);
     s.history.Push(qpc_ns, pose);
     s.ladder.SetTimings(timings_);
+    s.ladder.SetIkAvailable(s.role != BodyRole::None
+        && ik_fallback_.HasOffset(s.role));
     s.ladder.OnRealPoseObserved(qpc_ns, s.history, pose);
+    if (s.is_hmd && pose.poseIsValid && pose.deviceIsConnected
+        && pose.result == vr::TrackingResult_Running_OK) {
+        last_hmd_pose_ = pose;
+        last_hmd_valid_ = true;
+    }
 }
 
 bool PhantomModule::MaybeOverridePose(uint32_t openVRID,
@@ -275,8 +360,23 @@ bool PhantomModule::MaybeOverridePose(uint32_t openVRID,
             return true;
         }
 
+        case TrackerState::SYNTH_IK: {
+            // Phase 1.5: rigid-offset IK. Requires a live HMD pose and a
+            // calibration on file for this device's role; if either is
+            // missing, fall through to dead reckoning.
+            vr::DriverPose_t synth{};
+            if (last_hmd_valid_
+                && s.role != BodyRole::None
+                && ik_fallback_.Solve(s.role, last_hmd_pose_, synth)) {
+                synth.result = s.ladder.tracking_result_override();
+                pose = synth;
+                cachePublished(pose);
+                return true;
+            }
+            // Falls through to reckoner below.
+            [[fallthrough]];
+        }
         case TrackerState::SYNTH_RECKON:
-        case TrackerState::SYNTH_IK:    // Phase 1.5 hook stays in reckoner today.
         case TrackerState::SYNTH_ML:    // Phase 3 hook stays in reckoner today.
         case TrackerState::OUT_OF_RANGE: {
             vr::DriverPose_t synth{};

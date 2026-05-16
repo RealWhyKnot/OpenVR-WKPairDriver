@@ -8,6 +8,7 @@ add_library(openvr_pair_feature_phantom_overlay STATIC
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/PhantomStateShmem.h
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/PhantomTypes.h
 	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/BlendCurves.h
+	${PHANTOM_PAIRDRIVER_ROOT}/modules/phantom/src/common/RoleCatalog.h
 	# Overlay-side.
 	Config.cpp
 	Config.h

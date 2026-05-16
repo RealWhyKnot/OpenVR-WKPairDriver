@@ -4,6 +4,7 @@
 #include "FeaturePlugin.h"
 #include "IPCClient.h"
 #include "PhantomStateShmem.h"
+#include "RoleCatalog.h"
 
 #include <chrono>
 #include <string>
@@ -34,11 +35,21 @@ private:
     // replay logic to keep the driver consistent after IPC drops.
     bool seededDriver_ = false;
 
+    // Most recent T-pose capture summary; populated by DrawCalibrationTab
+    // and rendered as a one-line "captured N roles, M skipped" badge until
+    // the user starts another capture.
+    std::string lastCalibrationSummary_;
+
     void DrawDropoutsTab();
     void DrawDiagnosticsTab();
     void DrawAdvancedTab();
+    void DrawCalibrationTab();
 
     bool ConnectIfNeeded();
     void SendConfig();
     void SendDeviceOptIn(const std::string& serial, bool enabled);
+    void SendDeviceRole(const std::string& serial, phantom::BodyRole role);
+    void SendTrackerOffset(phantom::BodyRole role, const PhantomRoleOffset& offset);
+    void ReplayCalibration();
+    void CaptureTPose();
 };

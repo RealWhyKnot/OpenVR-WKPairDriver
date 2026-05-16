@@ -1,10 +1,25 @@
 #pragma once
 
 #include "BlendCurves.h"
+#include "RoleCatalog.h"
 
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+
+// One T-pose-captured rigid offset for a body role. Persisted under the
+// role's BodyRoleToKey() name in phantom.txt.
+struct PhantomRoleOffset
+{
+    bool   calibrated = false;
+    double rel_position_x = 0.0;
+    double rel_position_y = 0.0;
+    double rel_position_z = 0.0;
+    double rel_rotation_w = 1.0;
+    double rel_rotation_x = 0.0;
+    double rel_rotation_y = 0.0;
+    double rel_rotation_z = 0.0;
+};
 
 // Persisted Phantom overlay state. Saved to
 // %LocalAppDataLow%\WKOpenVR\profiles\phantom.txt as plain key=value lines,
@@ -32,6 +47,17 @@ struct PhantomConfig
     uint32_t reckon_hold_ms = phantom::DefaultTimings::kReckonHoldMs;
     uint32_t synth_hold_ms  = phantom::DefaultTimings::kSynthHoldMs;
     uint32_t lost_hold_ms   = phantom::DefaultTimings::kLostHoldMs;
+
+    // Phase 1.5: per-physical-tracker body-role assignment (serial -> role).
+    // Drives both the IK fallback (for dropouts past 250 ms) and, in Phase
+    // 2, the absent-mode "do not invent a virtual tracker for a role a real
+    // device already holds" check.
+    std::unordered_map<std::string, phantom::BodyRole> device_role;
+
+    // Phase 1.5: per-body-role HMD-relative offset captured during the
+    // T-pose wizard. Keyed by BodyRole. Roles absent from the map are
+    // treated as uncalibrated and the driver falls back to dead reckoning.
+    std::unordered_map<phantom::BodyRole, PhantomRoleOffset> role_offset;
 };
 
 // Load from disk. On any read / parse error the on-disk file is ignored and

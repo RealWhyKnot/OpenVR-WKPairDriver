@@ -20,6 +20,8 @@ add_executable(phantom_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_blend_controller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_dropout_state.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_frozen_tracker_invariant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_ik_fallback.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_role_catalog.cpp
     # Compile the driver-side sources directly so the test binary does not
     # have to link the full driver DLL (which would drag in MinHook,
     # OpenVR runtime, IPC, etc.).
@@ -27,6 +29,7 @@ add_executable(phantom_tests
     ${PH_DRIVER_SRC}/DeadReckoner.cpp
     ${PH_DRIVER_SRC}/BlendController.cpp
     ${PH_DRIVER_SRC}/DropoutState.cpp
+    ${PH_DRIVER_SRC}/IkFallback.cpp
 )
 
 target_include_directories(phantom_tests
