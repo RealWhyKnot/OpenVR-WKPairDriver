@@ -1,6 +1,5 @@
 #include "CaptionsPlugin.h"
 #include "CaptionsConfig.h"
-#include "DiscordPresenceComposer.h"
 #include "ShellContext.h"
 #include "CaptionsIpcClient.h"
 #include "CaptionsTab.h"
@@ -390,54 +389,6 @@ void CaptionsPlugin::DrawStatusBanner()
         openvr_pair::overlay::ui::DrawErrorBanner(
             "Captions driver problem", last_error_.c_str());
     }
-}
-
-void CaptionsPlugin::ProvidePresence(WKOpenVR::PresenceComposer &composer)
-{
-    const auto &snap = host_status_.Snapshot();
-
-    // Map HostStatus::State int to a short display label.
-    // 0=Idle 1=Listening 2=Transcribing 3=Translating 4=Sending
-    static const char *const kStateLabels[] = {
-        "idle", "listening", "transcribing", "translating", "sending"
-    };
-    const int stateIdx = snap.state;
-    const char *stateLabel = (stateIdx >= 0 && stateIdx < 5)
-        ? kStateLabels[stateIdx]
-        : "idle";
-
-    WKOpenVR::PresenceUpdate u;
-
-    // Halted (circuit-breaker tripped by the driver supervisor) is a hard
-    // failure that should surface as a warning, not as "Local speech pipeline
-    // | translating" -- which is the most common cause of "Discord stats look
-    // wrong" because the host crashed minutes ago but the snapshot froze.
-    if (snap.host_halted) {
-        u.priority = 100;
-        u.details  = "Captions host stopped";
-        if (snap.last_exit_code != 0) {
-            char buf[24];
-            std::snprintf(buf, sizeof(buf), "exit 0x%X", snap.last_exit_code);
-            u.state = buf;
-        } else {
-            u.state = "not running";
-        }
-    } else if (!snap.valid || snap.stale) {
-        u.priority = 0;
-        u.details  = "Captions";
-        u.state    = snap.valid ? "status stale" : "no host status";
-    } else if (stateIdx == 0) {
-        u.priority = 0;
-        u.details  = "Captions";
-        u.state    = "idle";
-    } else {
-        u.priority = 50;
-        u.details  = "Local speech pipeline";
-        u.state    = std::string(stateLabel) +
-                     " | " + std::to_string(snap.packets_sent) + " sent";
-    }
-
-    composer.Submit("Captions", std::move(u));
 }
 
 namespace openvr_pair::overlay {

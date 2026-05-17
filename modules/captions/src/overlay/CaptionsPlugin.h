@@ -27,7 +27,6 @@ public:
     void OnShutdown(openvr_pair::overlay::ShellContext &ctx) override;
     void Tick(openvr_pair::overlay::ShellContext &ctx) override;
     void DrawTab(openvr_pair::overlay::ShellContext &ctx) override;
-    void ProvidePresence(WKOpenVR::PresenceComposer &composer) override;
 
     // Config push to driver.
     void PushConfigToDriver();

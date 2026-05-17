@@ -78,23 +78,6 @@ target_compile_definitions(pair_implot PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
 target_link_libraries(pair_implot PUBLIC pair_imgui)
 set_property(TARGET pair_implot PROPERTY FOLDER "lib")
 
-# Discord RPC -- Rich Presence static library built from source.
-# Bypasses the upstream CMakeLists (which tries to download rapidjson at
-# configure time); instead we point it at the rapidjson submodule directly.
-message("Adding discord-rpc...")
-add_library(pair_discord_rpc STATIC
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/src/discord_rpc.cpp
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/src/discord_register_win.cpp
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/src/connection_win.cpp
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/src/serialization.cpp
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/src/rpc_connection.cpp)
-target_include_directories(pair_discord_rpc PUBLIC
-    ${CMAKE_SOURCE_DIR}/lib/discord-rpc/include
-    ${CMAKE_SOURCE_DIR}/lib/rapidjson/include)
-target_compile_definitions(pair_discord_rpc PRIVATE DISCORD_WINDOWS)
-target_link_libraries(pair_discord_rpc PRIVATE psapi advapi32 Ws2_32)
-set_property(TARGET pair_discord_rpc PROPERTY FOLDER "lib")
-
 # Eigen -- header-only. The upstream repo lays headers under lib/Eigen/Eigen/*,
 # so a consumer using <Eigen/Dense> needs lib/Eigen on the include path (not
 # lib, which would only find the old flat-vendored layout).

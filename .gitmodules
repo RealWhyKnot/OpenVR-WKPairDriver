@@ -19,9 +19,3 @@
 [submodule "lib/gl3w"]
 	path = lib/gl3w
 	url = https://github.com/skaslev/gl3w.git
-[submodule "lib/discord-rpc"]
-	path = lib/discord-rpc
-	url = https://github.com/discord/discord-rpc.git
-[submodule "lib/rapidjson"]
-	path = lib/rapidjson
-	url = https://github.com/Tencent/rapidjson.git

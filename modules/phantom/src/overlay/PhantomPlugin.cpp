@@ -7,7 +7,6 @@
 #include "PhantomPlugin.h"
 
 #include "DeviceFilters.h"
-#include "DiscordPresenceComposer.h"
 #include "Protocol.h"
 #include "ShellContext.h"
 #include "UiHelpers.h"
@@ -694,88 +693,6 @@ void PhantomPlugin::DrawAbsentTab()
             calibrated ? "" : "(needs T-pose calibration)");
         ImGui::PopID();
     }
-}
-
-void PhantomPlugin::ProvidePresence(WKOpenVR::PresenceComposer &composer)
-{
-    WKOpenVR::PresenceUpdate u;
-
-    // Without a state-shmem mapping we have no real signal -- the driver may
-    // not be loaded, or the phantom feature flag may be off. Submit idle so
-    // phantom does not poison the carousel with stale data.
-    if (!stateShmemReady_ || !stateShmem_.layout()) {
-        u.priority = 0;
-        u.details  = "Phantom Trackers";
-        u.state    = "driver not loaded";
-        composer.Submit("Phantom Trackers", std::move(u));
-        return;
-    }
-
-    const auto *layout = stateShmem_.layout();
-    if (layout->magic != phantom::kPhantomStateShmemMagic) {
-        u.priority = 0;
-        u.details  = "Phantom Trackers";
-        u.state    = "state shmem magic mismatch";
-        composer.Submit("Phantom Trackers", std::move(u));
-        return;
-    }
-
-    // Tally the ladder: count distinct synthesised + degraded states across
-    // active device slots. REAL is the steady state; everything else is
-    // bridging an outage or the device is gone.
-    int active     = 0;          // valid slots (serial_len > 0)
-    int reckoning  = 0;          // dead-reckon and blends
-    int ikActive   = 0;          // IK-fallback bridging
-    int outOfRange = 0;
-    int lost       = 0;
-    for (uint32_t i = 0; i < layout->device_count; ++i) {
-        const auto &d = layout->devices[i];
-        if (d.serial_len == 0) continue;
-        ++active;
-        switch (static_cast<phantom::TrackerState>(d.state)) {
-            case phantom::TrackerState::BLEND_OUT:
-            case phantom::TrackerState::SYNTH_RECKON:
-            case phantom::TrackerState::SYNTH_ML:
-            case phantom::TrackerState::BLEND_IN:
-                ++reckoning;
-                break;
-            case phantom::TrackerState::SYNTH_IK:
-                ++ikActive;
-                break;
-            case phantom::TrackerState::OUT_OF_RANGE:
-                ++outOfRange;
-                break;
-            case phantom::TrackerState::LOST:
-                ++lost;
-                break;
-            case phantom::TrackerState::REAL:
-            default:
-                break;
-        }
-    }
-
-    if (active == 0) {
-        u.priority = 0;
-        u.details  = "Phantom Trackers";
-        u.state    = "no trackers watched";
-    } else if (reckoning == 0 && ikActive == 0 && outOfRange == 0 && lost == 0) {
-        u.priority = 0;
-        u.details  = "Phantom Trackers";
-        u.state    = std::to_string(active) + " watched | no dropouts";
-    } else {
-        u.priority = 50;
-        u.details  = "Bridging tracker dropouts";
-        std::string s;
-        if (ikActive   > 0) s += std::to_string(ikActive)   + " IK | ";
-        if (reckoning  > 0) s += std::to_string(reckoning)  + " reckon | ";
-        if (outOfRange > 0) s += std::to_string(outOfRange) + " out-of-range | ";
-        if (lost       > 0) s += std::to_string(lost)       + " lost | ";
-        // Trim trailing " | "
-        if (s.size() >= 3) s.erase(s.size() - 3);
-        u.state = std::move(s);
-    }
-
-    composer.Submit("Phantom Trackers", std::move(u));
 }
 
 namespace openvr_pair::overlay {

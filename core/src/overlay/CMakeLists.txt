@@ -35,10 +35,6 @@ add_executable(OpenVRPairOverlay WIN32
 	CalibrationAnchor.h
 	DeviceFilters.cpp
 	DeviceFilters.h
-	DiscordPresence.cpp
-	DiscordPresence.h
-	DiscordPresenceComposer.cpp
-	DiscordPresenceComposer.h
 	FeaturePlugin.cpp
 	FeaturePlugin.h
 	IpcClientBase.cpp
@@ -83,8 +79,7 @@ target_link_libraries(OpenVRPairOverlay PRIVATE
 	shell32
 	ole32
 	advapi32
-	${OPENVR_PAIR_OVERLAY_FEATURE_LIBS}
-	pair_discord_rpc)
+	${OPENVR_PAIR_OVERLAY_FEATURE_LIBS})
 
 file(READ "${CMAKE_SOURCE_DIR}/version.txt" OPENVR_PAIR_VERSION_RAW)
 string(STRIP "${OPENVR_PAIR_VERSION_RAW}" OPENVR_PAIR_VERSION_STAMP)

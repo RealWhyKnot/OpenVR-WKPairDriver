@@ -6,7 +6,6 @@
 #include "Profiles.h"
 #include "Protocol.h"
 #include "SnapshotReader.h"
-#include "inputhealth/PresenceCounting.h"
 
 #include <chrono>
 #include <cstdint>
@@ -35,7 +34,6 @@ public:
 	void Tick(openvr_pair::overlay::ShellContext &context) override;
 	void DrawTab(openvr_pair::overlay::ShellContext &context) override;
 	void DrawLogsSection(openvr_pair::overlay::ShellContext &context) override;
-	void ProvidePresence(WKOpenVR::PresenceComposer &composer) override;
 
 	// Push the in-memory config to the driver via IPC. Called after the
 	// user toggles a switch in the Diagnostics or Settings tab. Quiet on
@@ -71,11 +69,6 @@ private:
 	uint64_t observed_ipc_generation_ = 0;
 	std::chrono::steady_clock::time_point last_refresh_{};
 	std::chrono::steady_clock::time_point last_connection_check_{};
-
-	// Last presence counts pushed in ProvidePresence, used to skip duplicate
-	// debug-mode log lines when nothing about the count has changed.
-	inputhealth::PresenceCounts last_presence_counts_{};
-	bool last_presence_counts_logged_ = false;
 
 	void MaintainDriverConnection();
 	void DrawStatusBanner();

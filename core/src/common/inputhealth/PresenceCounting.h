@@ -1,11 +1,11 @@
 #pragma once
 
-// Pure-function counting helpers for the InputHealth Discord rich-presence
-// summary. Kept in core/src/common so the overlay plugin and the unit tests
+// Pure-function counting helpers for the InputHealth status summary.
+// Kept in core/src/common so the overlay plugin and the unit tests
 // share one source of truth -- the counting rules are subtle (path
 // classification + zero-hash slot guard + ph_triggered alarm count) and the
-// bug history is real (Discord card has reported wildly inflated controller
-// counts when these rules were ad-hoc inside the plugin).
+// bug history is real (inflated controller counts when these rules were
+// ad-hoc inside the plugin).
 //
 // Header-only: no SteamVR, no UI, no IPC. The plugin instantiates a
 // std::unordered_set<uint64_t> per call; the test suite synthesizes

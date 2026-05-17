@@ -4,7 +4,6 @@
 #include "DebugLogging.h"
 #include "DebugTab.h"
 #include "DiagnosticsTab.h"
-#include "DiscordPresenceComposer.h"
 #include "IPCClient.h"
 #include "LearningEngine.h"
 #include "Logging.h"
@@ -12,7 +11,6 @@
 #include "ShellFooter.h"
 #include "SnapshotReader.h"
 #include "UiHelpers.h"
-#include "inputhealth/PresenceCounting.h"
 
 #include <imgui/imgui.h>
 
@@ -243,63 +241,6 @@ void InputHealthPlugin::DrawLogsSection(openvr_pair::overlay::ShellContext &)
 	// wraps each plugin in a collapsing header so the section reads with no
 	// duplicate plugin-name heading.
 	DrawLogsTab();
-}
-
-void InputHealthPlugin::ProvidePresence(WKOpenVR::PresenceComposer &composer)
-{
-	// Counting rules live in core/src/common/inputhealth/PresenceCounting.h
-	// so the unit tests can exercise them with no SteamVR / IPC / UI deps.
-	// The presence card had been reporting inflated "controller" counts
-	// because the old loop inserted every device_serial_hash from every
-	// slot in the shmem ring, including slots whose path was /proximity,
-	// /eye/openness, etc., and slots whose serial hash was still 0.
-	const inputhealth::PresenceCounts counts =
-		inputhealth::CountInputHealthPresence(reader_.EntriesByHandle());
-
-	WKOpenVR::PresenceUpdate u;
-	if (counts.compensation_paths == 0) {
-		u.priority = 0;
-		u.details  = "Input Health";
-		u.state    = "no input watched";
-	} else if (counts.warnings > 0) {
-		u.priority = 100;
-		u.details  = "Input Health";
-		u.state    = std::to_string(counts.devices) + " devices | " +
-		             std::to_string(counts.compensation_paths) + " paths | " +
-		             std::to_string(counts.warnings) + " warnings";
-	} else {
-		u.priority = 50;
-		u.details  = "Watching controller inputs";
-		u.state    = std::to_string(counts.devices) + " devices | " +
-		             std::to_string(counts.compensation_paths) + " paths";
-	}
-
-	composer.Submit("Input Health", std::move(u));
-
-	// Debug-mode count audit: one line when the count summary changes. The
-	// fields zero_hash_slots and unsupported_slots are diagnostic flags --
-	// non-zero on a steady-state session points at a driver-side publisher
-	// bug, not a presence-side counting bug.
-	if (openvr_pair::common::IsDebugLoggingEnabled()) {
-		const auto &prev = last_presence_counts_;
-		const bool changed =
-			!last_presence_counts_logged_ ||
-			prev.devices            != counts.devices ||
-			prev.compensation_paths != counts.compensation_paths ||
-			prev.diagnostic_paths   != counts.diagnostic_paths ||
-			prev.warnings           != counts.warnings ||
-			prev.zero_hash_slots    != counts.zero_hash_slots ||
-			prev.unsupported_slots  != counts.unsupported_slots;
-		if (changed) {
-			LOG("[inputhealth-presence] devices=%d paths=%d diag=%d unsup=%d "
-			    "warnings=%d zero_hash_slots=%d",
-			    counts.devices, counts.compensation_paths,
-			    counts.diagnostic_paths, counts.unsupported_slots,
-			    counts.warnings, counts.zero_hash_slots);
-			last_presence_counts_        = counts;
-			last_presence_counts_logged_ = true;
-		}
-	}
 }
 
 namespace openvr_pair::overlay {
