@@ -583,13 +583,46 @@ try
     // Start control pipe thread.
     std::thread ctrl_thread(ControlPipeThread);
 
-    // Initialise OpenVR (try; non-fatal if SteamVR isn't up yet).
+    // Initialise OpenVR with a short retry loop. The host can launch slightly
+    // ahead of SteamVR's IPC being ready, in which case the very first
+    // VR_Init returns VRInitError_Init_HmdNotFoundPresenceFailed (121) and
+    // PTT was silently unavailable for the rest of the session. Retry every
+    // 2 s for up to 30 s; bail out immediately on shutdown.
     bool vr_ok = false;
     {
-        vr::EVRInitError vr_err = vr::VRInitError_None;
-        vr::VR_Init(&vr_err, vr::VRApplication_Background);
-        vr_ok = (vr_err == vr::VRInitError_None);
-        if (!vr_ok) TH_LOG("[main] VR_Init failed (%d); PTT will be unavailable", (int)vr_err);
+        constexpr int kMaxAttempts          = 15;
+        constexpr auto kAttemptInterval     = std::chrono::seconds(2);
+        vr::EVRInitError vr_err             = vr::VRInitError_None;
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            vr_err = vr::VRInitError_None;
+            vr::VR_Init(&vr_err, vr::VRApplication_Background);
+            if (vr_err == vr::VRInitError_None) {
+                vr_ok = true;
+                if (attempt > 1) {
+                    TH_LOG("[main] VR_Init succeeded on attempt %d/%d",
+                           attempt, kMaxAttempts);
+                }
+                break;
+            }
+            TH_LOG("[main] VR_Init attempt %d/%d failed (%d: %s); will retry in %ds",
+                   attempt, kMaxAttempts, (int)vr_err,
+                   vr::VR_GetVRInitErrorAsSymbol(vr_err),
+                   (int)std::chrono::duration_cast<std::chrono::seconds>(kAttemptInterval).count());
+            if (g_shutdown.load(std::memory_order_acquire)) break;
+            // Sleep in 100 ms slices so a shutdown signal cuts the wait short.
+            const auto deadline = std::chrono::steady_clock::now() + kAttemptInterval;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (g_shutdown.load(std::memory_order_acquire)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (g_shutdown.load(std::memory_order_acquire)) break;
+        }
+        if (!vr_ok) {
+            TH_LOG("[main] VR_Init gave up after %d attempts (last err=%d: %s); "
+                   "PTT will be unavailable for this session",
+                   kMaxAttempts, (int)vr_err,
+                   vr::VR_GetVRInitErrorAsSymbol(vr_err));
+        }
     }
     status.SetPttStatus(vr_ok, false, "", vr_ok ? "" : "VR_Init failed; push-to-talk unavailable.");
     if (vr_ok) RegisterCaptionsManifest();
