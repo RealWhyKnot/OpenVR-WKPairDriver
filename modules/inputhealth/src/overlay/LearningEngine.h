@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class IPCClient;
@@ -78,10 +79,18 @@ private:
 	std::unordered_map<std::string, PathState> states_;
 	std::unordered_map<uint64_t, uint64_t> device_button_quiet_until_us_;
 
+	// Paths the engine has already declared unsupported. The Tick loop runs
+	// at ~10 Hz and a single /proximity slot on each device produced ~7
+	// lines per second when this set didn't exist; one session log was
+	// 88% this one message. Keyed by the path string (not serial+path) so
+	// every device's /proximity collapses into a single line.
+	std::unordered_set<std::string> warned_unsupported_paths_;
+
 	PathState &StateFor(uint64_t serial_hash, const std::string &path);
 	const PathState *FindState(uint64_t serial_hash, const std::string &path) const;
 	void SyncProfile(uint64_t serial_hash, PathState &state, bool immediate);
 	void PushCompensation(uint64_t serial_hash, const PathState &state, bool enabled);
+	void WarnUnsupportedOnce(const char *kind, const std::string &path);
 	// Wraps profiles_.Save() in try/catch; logs on failure and returns false.
 	bool TrySaveProfile(const DeviceProfile &profile);
 };

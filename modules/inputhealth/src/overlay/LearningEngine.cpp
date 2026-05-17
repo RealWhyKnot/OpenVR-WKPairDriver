@@ -198,7 +198,7 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 
 		const inputhealth::PathClass pathClass = inputhealth::ClassifyInputPath(path);
 		if (pathClass == inputhealth::PathClass::Unsupported) {
-			LOG("[inputhealth] unsupported path ignored (boolean): '%s'", path.c_str());
+			WarnUnsupportedOnce("boolean", path);
 			continue;
 		}
 		if (!inputhealth::IsCompensationPath(pathClass)) {
@@ -248,7 +248,7 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 
 		const inputhealth::PathClass pathClass = inputhealth::ClassifyInputPath(path);
 		if (pathClass == inputhealth::PathClass::Unsupported) {
-			LOG("[inputhealth] unsupported path ignored (scalar): '%s'", path.c_str());
+			WarnUnsupportedOnce("scalar", path);
 			continue;
 		}
 		if (!inputhealth::IsCompensationPath(pathClass)) {
@@ -338,6 +338,12 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 		const double stddev = inputhealth::SampleStdDev(state.rest);
 		const double limit = isTrigger ? 0.05 : 0.02;
 		if (state.rest.count >= ReadyThreshold(state.kind) && stddev < limit) {
+			// Only treat this as an immediate-save trigger on the actual
+			// not-ready -> ready transition. Without this guard the branch
+			// re-fires every tick once the threshold holds, bypassing
+			// SyncProfile's 5 s throttle and writing the profile to disk
+			// per-tick per-path (one session log showed 25k saves).
+			const bool was_not_ready = !state.ready;
 			state.ready = true;
 			state.drift_shift_pending = false;
 			state.learned_rest_offset = state.rest.mean;
@@ -350,7 +356,7 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 				state.learned_deadzone_radius = ClampDouble(stddev * 3.0, 0.01, 0.08);
 			}
 			state.last_updated_unix = UnixSeconds();
-			SyncProfile(b.device_serial_hash, state, true);
+			SyncProfile(b.device_serial_hash, state, was_not_ready);
 			PushCompensation(b.device_serial_hash, state, true);
 		} else {
 			SyncProfile(b.device_serial_hash, state, false);
@@ -573,6 +579,14 @@ bool LearningEngine::TrySaveProfile(const DeviceProfile &profile)
 			(unsigned long long)profile.serial_hash);
 	}
 	return false;
+}
+
+void LearningEngine::WarnUnsupportedOnce(const char *kind, const std::string &path)
+{
+	if (warned_unsupported_paths_.insert(path).second) {
+		LOG("[inputhealth] unsupported path ignored (%s, logged once): '%s'",
+			kind, path.c_str());
+	}
 }
 
 void LearningEngine::Flush()
