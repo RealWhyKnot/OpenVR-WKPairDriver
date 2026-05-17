@@ -25,6 +25,18 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **facetracking:** Move VRCFT shape remap from host to driver (1ed0eb4)
 - **facetracking:** Wedge detection via shmem heartbeat + host_state (6a52694)
 - **supervisor:** Require singleton mutex + sweep stale hosts before spawn (9dc05d4)
+- **phantom:** Submit presence with per-slot dropout tally (e1837cc)
+- **overlay:** Add Discord rich-presence toggle to Themes tab (f7460b2)
+- **overlay:** Audit-log presence winner changes in debug mode (5124a68)
+- **overlay:** Persist Discord rich-presence toggle and add session log (baccbf7)
+- **inputhealth:** Extract presence counting into shared header (7aba2e7)
+- **oscrouter:** Wire send_port UI edit to disk and driver (bdbdbce)
+- **captions:** Persist mutable settings to profiles/captions.txt (705bd5a)
+- **driver:** Hide WKOpenVR-emitted devices from SC input picker (4430a56)
+- **phantom:** Inference sidecar scaffold (Phase 3) (5c10856)
+- **phantom:** Absent-mode virtual body trackers (Phase 2) (a3ce058)
+- **phantom:** Rigid IK fallback past dead-reckon window (Phase 1.5) (d0a3c62)
+- **phantom:** Add Phantom Trackers module for dropout bridging (7daa1de)
 
 ### Changed
 - host(facetracking): extend shmem to v2 with head data (2813401)
@@ -45,6 +57,9 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **driver:** Drop hot-path string allocations in detours (cad7ace)
 - **inputhealth:** Drop try_lock from detours; single-pass StageSnapshots (dfa388f)
 - **captions:** Rename translator module to captions (edf78cc)
+- **captions:** Reuse downmix scratch across WASAPI capture packets (97fd32e)
+- **rename:** Align C# face-tracking projects with WKOpenVR brand (e0d998e)
+- **facetracking:** Rename OPENVR_PAIR_FACE_* env vars to WKOPENVR_FACE_* (21833da)
 
 ### Fixed
 - **smoothing:** Lock out per-tracker prediction on the calibration anchor (e87f318)
@@ -74,6 +89,19 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **ipc:** Null DriverPoseShmem handles after Close to prevent double-free (e1ff392)
 - **facetracking:** Sanitize NaN/Inf face data at host and driver boundary (982592c)
 - **calibration:** Clamp acos input and dedupe AngleFromRotationMatrix3 (160e8b0)
+- **captions:** Retry VR_Init on host startup against SteamVR IPC race (cfbfc9b)
+- **oscrouter:** Suppress presence when no routes; abbreviate packet counts (63af8ce)
+- **smoothing:** Emit idle priority when no smoothing is configured (c544add)
+- **facetracking:** Gate presence priority on fresh non-zero shapes (46492fa)
+- **captions:** Drop presence priority when host is stale or idle (43a3335)
+- **inputhealth:** Correct presence-card device tally (db5e6c6)
+- **inputhealth:** Dedupe unsupported-path log; guard ready-edge save (92800a9)
+- **calibration:** Park hidden tracker at static y=-1000 (f699c83)
+- **smoothing:** Atomic write for smoothing.txt; deprecate dead wire field (54f0f01)
+- **smoothing:** Reseed per-finger state on enable + transition diagnostics (70d4ce7)
+- **driver:** Keep hidden tracker connected with TrackingResult_OutOfRange (09ee202)
+- **supervisor:** Log unexpected TerminateProcess failures (882beb3)
+- **facetracking:** Defense-in-depth NaN/Inf guard on OSC publish (e450835)
 
 ---
 
