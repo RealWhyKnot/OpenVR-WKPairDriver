@@ -1,4 +1,5 @@
 #include "CaptionsPlugin.h"
+#include "CaptionsConfig.h"
 #include "DiscordPresenceComposer.h"
 #include "ShellContext.h"
 #include "CaptionsIpcClient.h"
@@ -72,7 +73,35 @@ bool FileExists(const std::wstring &path)
 CaptionsPlugin::CaptionsPlugin()
 {
     observed_ipc_generation_ = ipc_.ConnectionGeneration();
+    // Hydrate runtime-mutable settings from disk. Missing file -> defaults
+    // (the constructor in the header already seeds reasonable defaults).
+    CaptionsConfig loaded         = LoadCaptionsConfig();
+    mode_                         = loaded.mode;
+    always_on_consented_          = loaded.always_on_consented;
+    source_lang_                  = loaded.source_lang;
+    target_lang_                  = loaded.target_lang;
+    chatbox_address_              = loaded.chatbox_address;
+    notify_sound_                 = loaded.notify_sound;
 }
+
+void CaptionsPlugin::Persist()
+{
+    CaptionsConfig cfg;
+    cfg.mode                = mode_;
+    cfg.always_on_consented = always_on_consented_;
+    cfg.source_lang         = source_lang_;
+    cfg.target_lang         = target_lang_;
+    cfg.chatbox_address     = chatbox_address_;
+    cfg.notify_sound        = notify_sound_;
+    SaveCaptionsConfig(cfg);
+}
+
+void CaptionsPlugin::SetMode(int m)                        { mode_ = m;            Persist(); }
+void CaptionsPlugin::SetAlwaysOnConsented(bool v)          { always_on_consented_ = v; Persist(); }
+void CaptionsPlugin::SetSourceLang(const std::string &s)   { source_lang_ = s;     Persist(); }
+void CaptionsPlugin::SetTargetLang(const std::string &s)   { target_lang_ = s;     Persist(); }
+void CaptionsPlugin::SetChatboxAddress(const std::string &s) { chatbox_address_ = s; Persist(); }
+void CaptionsPlugin::SetNotifySound(bool v)                { notify_sound_ = v;    Persist(); }
 
 void CaptionsPlugin::OnStart(openvr_pair::overlay::ShellContext &ctx)
 {

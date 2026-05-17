@@ -7,6 +7,8 @@ add_library(openvr_pair_feature_captions_overlay STATIC
     HostStatusPoller.h
     CaptionsIpcClient.cpp
     CaptionsIpcClient.h
+    CaptionsConfig.cpp
+    CaptionsConfig.h
     CaptionsPlugin.cpp
     CaptionsPlugin.h
     CaptionsTab.cpp

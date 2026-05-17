@@ -52,19 +52,19 @@ public:
     captions::HostStatusPoller &HostStatus() { return host_status_; }
 
     int         GetMode()            const { return mode_; }
-    void        SetMode(int m)             { mode_ = m; }
+    void        SetMode(int m);
     bool        HasAlwaysOnConsent() const { return always_on_consented_; }
-    void        SetAlwaysOnConsented(bool v) { always_on_consented_ = v; }
+    void        SetAlwaysOnConsented(bool v);
 
     const std::string &GetSourceLang()      const { return source_lang_; }
     const std::string &GetTargetLang()      const { return target_lang_; }
     const std::string &GetChatboxAddress()  const { return chatbox_address_; }
     bool               GetNotifySound()     const { return notify_sound_; }
 
-    void SetSourceLang(const std::string &s)     { source_lang_    = s; }
-    void SetTargetLang(const std::string &s)     { target_lang_    = s; }
-    void SetChatboxAddress(const std::string &s) { chatbox_address_= s; }
-    void SetNotifySound(bool v)                  { notify_sound_   = v; }
+    void SetSourceLang(const std::string &s);
+    void SetTargetLang(const std::string &s);
+    void SetChatboxAddress(const std::string &s);
+    void SetNotifySound(bool v);
 
 private:
     friend void captions::ui::DrawCaptionsTab(CaptionsPlugin &plugin);
@@ -94,4 +94,9 @@ private:
     void RefreshPackResourcePaths(const openvr_pair::overlay::ShellContext &ctx);
     void StartPackAction(const std::string &pack_id, bool uninstall);
     void PollPackAction();
+
+    // Persist the current settings snapshot to profiles/captions.txt.
+    // Called from every Set* method so the next launch reads the same state.
+    // Atomic write via Move-temp pattern (see CaptionsConfig.cpp).
+    void Persist();
 };
