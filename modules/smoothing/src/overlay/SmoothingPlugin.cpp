@@ -167,8 +167,10 @@ void SmoothingPlugin::ReplayDevicePredictions(const char *reason)
 		std::string serial = buffer;
 		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_ModelNumber_String, buffer, sizeof buffer, &err);
 		std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
+		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
+		std::string trackingSystem = (err == vr::TrackedProp_Success) ? buffer : "";
 		if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(
-				deviceClass, serial, model)) {
+				deviceClass, serial, model, trackingSystem)) {
 			if (cfg_.trackerSmoothness.find(serial) != cfg_.trackerSmoothness.end()) {
 				SendDevicePrediction(id, 0);
 				SM_LOG("[prediction] replay reason=%s id=%u serial='%s' value=0 hidden/internal",

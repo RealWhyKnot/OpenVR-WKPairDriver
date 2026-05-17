@@ -182,8 +182,12 @@ void SmoothingPlugin::DrawPredictionTab()
 		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String, buffer, sizeof buffer, &err);
 		std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
 
+		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
+		std::string rawSystem = (err == vr::TrackedProp_Success) ? buffer : "";
+		std::string sys = !rawSystem.empty() ? PrettyTrackingSystem(rawSystem.c_str()) : "";
+
 		if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(
-				deviceClass, serial, model)) {
+				deviceClass, serial, model, rawSystem)) {
 			auto stale = cfg_.trackerSmoothness.find(serial);
 			if (stale != cfg_.trackerSmoothness.end()) {
 				cfg_.trackerSmoothness.erase(stale);
@@ -192,9 +196,6 @@ void SmoothingPlugin::DrawPredictionTab()
 			}
 			continue;
 		}
-
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
-		std::string sys = (err == vr::TrackedProp_Success) ? PrettyTrackingSystem(buffer) : "";
 
 		const bool isHmd = (deviceClass == vr::TrackedDeviceClass_HMD);
 		openvr_pair::overlay::CalibrationDeviceLockKind lockKind{};

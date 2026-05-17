@@ -11,10 +11,12 @@ bool IsInternalAuxiliaryTrackedDevice(const std::string &serial,
 
 bool ShouldShowInCalibrationDeviceList(vr::TrackedDeviceClass deviceClass,
 	const std::string &serial,
-	const std::string &model);
+	const std::string &model,
+	const std::string &trackingSystem = {});
 
 bool ShouldShowInSmoothingPredictionList(vr::TrackedDeviceClass deviceClass,
 	const std::string &serial,
-	const std::string &model);
+	const std::string &model,
+	const std::string &trackingSystem = {});
 
 } // namespace openvr_pair::overlay

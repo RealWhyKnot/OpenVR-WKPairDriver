@@ -73,7 +73,7 @@ VRState VRState::Load()
 				device.controllerRole = (vr::ETrackedControllerRole)vr::VRSystem()->GetInt32TrackedDeviceProperty(id, vr::Prop_ControllerRoleHint_Int32, &err);
 
 				if (!openvr_pair::overlay::ShouldShowInCalibrationDeviceList(
-					device.deviceClass, device.serial, device.model)) {
+					device.deviceClass, device.serial, device.model, device.trackingSystem)) {
 					continue;
 				}
 

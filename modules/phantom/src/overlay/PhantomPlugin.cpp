@@ -182,8 +182,12 @@ void PhantomPlugin::DrawDropoutsTab()
             buffer, sizeof(buffer), &err);
         const std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
 
+        vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String,
+            buffer, sizeof(buffer), &err);
+        const std::string trackingSystem = (err == vr::TrackedProp_Success) ? buffer : "";
+
         if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(
-                deviceClass, serial, model)) {
+                deviceClass, serial, model, trackingSystem)) {
             continue;
         }
 
@@ -569,7 +573,11 @@ void PhantomPlugin::DrawCalibrationTab()
             buffer, sizeof(buffer), &err);
         const std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
 
-        if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(cls, serial, model)) {
+        vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String,
+            buffer, sizeof(buffer), &err);
+        const std::string trackingSystem = (err == vr::TrackedProp_Success) ? buffer : "";
+
+        if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(cls, serial, model, trackingSystem)) {
             continue;
         }
 

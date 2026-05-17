@@ -63,21 +63,39 @@ bool IsInternalAuxiliaryTrackedDevice(const std::string &serial,
 	return IsFaceTrackingSink(serial, model);
 }
 
+namespace {
+
+// WKOpenVR-emitted devices (phantom virtual trackers, future synthetic
+// sources) declare themselves via Prop_TrackingSystemName_String == "wkopenvr".
+// Calibrating against a synthetic source is nonsensical -- and a phantom-
+// emitted virtual tracker sitting at its IK fallback position would
+// otherwise appear in SC's input picker as a valid calibration anchor.
+bool IsOwnTrackingSystem(const std::string &trackingSystem)
+{
+	return EqualsNoCase(trackingSystem, "wkopenvr");
+}
+
+} // namespace
+
 bool ShouldShowInCalibrationDeviceList(vr::TrackedDeviceClass deviceClass,
 	const std::string &serial,
-	const std::string &model)
+	const std::string &model,
+	const std::string &trackingSystem)
 {
 	if (!IsUserPoseDeviceClass(deviceClass)) return false;
 	if (IsInternalAuxiliaryTrackedDevice(serial, model)) return false;
+	if (IsOwnTrackingSystem(trackingSystem)) return false;
 	return true;
 }
 
 bool ShouldShowInSmoothingPredictionList(vr::TrackedDeviceClass deviceClass,
 	const std::string &serial,
-	const std::string &model)
+	const std::string &model,
+	const std::string &trackingSystem)
 {
 	if (!IsUserPoseDeviceClass(deviceClass)) return false;
 	if (IsInternalAuxiliaryTrackedDevice(serial, model)) return false;
+	if (IsOwnTrackingSystem(trackingSystem)) return false;
 	return true;
 }
 
