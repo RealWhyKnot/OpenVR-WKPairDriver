@@ -21,6 +21,7 @@ add_executable(inputhealth_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_stick_deadzone.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_inputhealth_config_roundtrip.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_profile_prune.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_presence_counting.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp
     # Config round-trip tests compile Config.cpp directly to avoid pulling in the
     # full overlay (ImGui, OpenVR runtime, IPC) into the test binary.
