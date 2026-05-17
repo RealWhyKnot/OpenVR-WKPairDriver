@@ -293,6 +293,7 @@ void DrawThemes(openvr_pair::overlay::ShellContext & /*context*/)
 {
 	using namespace openvr_pair::overlay::ui;
 
+	DrawSectionHeading("Color theme");
 	DrawTextWrapped("Choose a color theme. Changes apply immediately and persist across launches.");
 	ImGui::Spacing();
 
@@ -307,6 +308,38 @@ void DrawThemes(openvr_pair::overlay::ShellContext & /*context*/)
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", ThemeCaption(id));
 		ImGui::PopID();
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	DrawSectionHeading("Discord Rich Presence");
+	DrawTextWrapped(
+		"Show 'WKOpenVR' activity on Discord. Turn this off if you use VRCX or another "
+		"rich-presence tool -- both fight for the same Discord IPC pipe and only one "
+		"wins. Events are logged to discord_log.*.txt in the Logs folder regardless of "
+		"this setting.");
+	ImGui::Spacing();
+
+	bool enabled = WKOpenVR::DiscordPresence_IsEnabled();
+	if (CheckboxWithTooltip(
+			"Enable Discord Rich Presence", &enabled,
+			"Off relinquishes the Discord IPC pipe so VRCX (or other tools) can use it.\n"
+			"State persists in profiles\\discord.txt across launches.")) {
+		WKOpenVR::DiscordPresence_SetEnabled(enabled);
+	}
+
+	ImGui::SameLine();
+	if (enabled) {
+		const bool connected = WKOpenVR::DiscordPresence_IsConnected();
+		const auto &palette = GetPalette();
+		ImGui::TextColored(
+			connected ? palette.statusOk : palette.statusPending,
+			"%s",
+			connected ? "(connected)" : "(waiting for Discord)");
+	} else {
+		ImGui::TextDisabled("(disabled)");
 	}
 }
 
@@ -476,7 +509,7 @@ int main(int argc, char **argv)
 		plugin->OnStart(context);
 	}
 
-	WKOpenVR::DiscordPresence_Init();
+	WKOpenVR::DiscordPresence_Init(context);
 
 	WKOpenVR::PresenceComposer presenceComposer;
 
