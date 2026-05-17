@@ -20,6 +20,7 @@ public:
     void OnStart(openvr_pair::overlay::ShellContext& context) override;
     void Tick(openvr_pair::overlay::ShellContext& context) override;
     void DrawTab(openvr_pair::overlay::ShellContext& context) override;
+    void ProvidePresence(WKOpenVR::PresenceComposer& composer) override;
 
 private:
     PhantomConfig    cfg_   = LoadPhantomConfig();
