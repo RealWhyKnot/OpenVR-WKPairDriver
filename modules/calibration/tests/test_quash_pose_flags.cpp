@@ -4,82 +4,112 @@
 
 namespace {
 
-vr::DriverPose_t MakePose(double x, double y, double z, bool valid, bool conn,
-                          vr::ETrackingResult result = vr::TrackingResult_Running_OK)
+// Build a pose with non-default values across as many fields as practical
+// so each test can verify ApplyQuashToPose overwrites all of them rather
+// than only the trivially-defaulted ones.
+vr::DriverPose_t MakeBusyPose()
 {
     vr::DriverPose_t p{};
-    p.qWorldFromDriverRotation = { 1, 0, 0, 0 };
-    p.qDriverFromHeadRotation  = { 1, 0, 0, 0 };
-    p.qRotation                = { 1, 0, 0, 0 };
-    p.vecPosition[0]           = x;
-    p.vecPosition[1]           = y;
-    p.vecPosition[2]           = z;
-    p.poseIsValid              = valid;
-    p.deviceIsConnected        = conn;
-    p.result                   = result;
+    p.qWorldFromDriverRotation = { 0.5, 0.5, 0.5, 0.5 };
+    p.qDriverFromHeadRotation  = { 0.0, 1.0, 0.0, 0.0 };
+    p.qRotation                = { 0.7, 0.0, 0.7, 0.0 };
+    p.vecWorldFromDriverTranslation[0] = 1.0;
+    p.vecWorldFromDriverTranslation[1] = 2.0;
+    p.vecWorldFromDriverTranslation[2] = 3.0;
+    p.vecDriverFromHeadTranslation[0] = 4.0;
+    p.vecDriverFromHeadTranslation[1] = 5.0;
+    p.vecDriverFromHeadTranslation[2] = 6.0;
+    p.vecPosition[0]           = 10.0;
+    p.vecPosition[1]           = 5.0;
+    p.vecPosition[2]           = -3.0;
+    p.vecVelocity[0]           = 2.0;
+    p.vecVelocity[1]           = -1.0;
+    p.vecVelocity[2]           = 0.5;
+    p.vecAcceleration[0]       = 0.1;
+    p.vecAcceleration[1]       = 9.81;
+    p.vecAcceleration[2]       = -0.2;
+    p.vecAngularVelocity[0]    = 0.3;
+    p.vecAngularVelocity[1]    = 0.4;
+    p.vecAngularVelocity[2]    = 1.5;
+    p.vecAngularAcceleration[0] = 0.01;
+    p.vecAngularAcceleration[1] = 0.02;
+    p.vecAngularAcceleration[2] = 0.03;
+    p.poseTimeOffset           = 0.05;
+    p.poseIsValid              = false;
+    p.deviceIsConnected        = false;
+    p.result                   = vr::TrackingResult_Uninitialized;
+    p.shouldApplyHeadModel     = true;
+    p.willDriftInYaw           = true;
     return p;
 }
 
 } // namespace
 
-// First quash with no cached last-good pose: incoming pose flows through
-// (so the very first frame after a fresh device appears in a quashed slot
-// has *something* to show), but the validity / connection flags are clamped
-// to the OutOfRange contract.
-TEST(QuashPoseTest, FirstQuashWithNoLastGoodHoldsIncomingButMarksOutOfRange)
+TEST(QuashPoseTest, ParksAtFixedFarAwayPosition)
 {
-    vr::DriverPose_t pose = MakePose(1.0, 1.5, 0.5, false, false,
-                                     vr::TrackingResult_Running_OutOfRange);
-    vr::DriverPose_t lastGood{};
+    vr::DriverPose_t pose = MakeBusyPose();
+    openvr_pair::common::quash::ApplyQuashToPose(pose);
 
-    openvr_pair::common::quash::ApplyQuashToPose(pose, lastGood, /*lastGoodValid=*/false);
-
-    EXPECT_TRUE(pose.deviceIsConnected);
-    EXPECT_TRUE(pose.poseIsValid);
-    EXPECT_EQ(pose.result, vr::TrackingResult_Calibrating_OutOfRange);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[0], 1.0);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[1], 1.5);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[2], 0.5);
+    EXPECT_DOUBLE_EQ(pose.vecPosition[0], 0.0);
+    EXPECT_DOUBLE_EQ(pose.vecPosition[1], openvr_pair::common::quash::kQuashParkY);
+    EXPECT_DOUBLE_EQ(pose.vecPosition[2], 0.0);
 }
 
-// Steady-state quash with a cached last-good pose: the cached value
-// replaces the incoming raw pose (which is what avoids the "ghost at the
-// vendor origin" symptom), and the connection / validity flags are forced
-// into the OutOfRange contract.
-TEST(QuashPoseTest, QuashSubstitutesLastGoodAndMarksOutOfRange)
+TEST(QuashPoseTest, ZeroesDerivativesAndDriverTransforms)
 {
-    // Incoming raw vendor pose -- typically a floor-level point if the
-    // driver hasn't applied the calibration matrix.
-    vr::DriverPose_t pose = MakePose(10.0, 0.0, -5.0, true, true);
-    // Cached last-good pose -- where the user actually expects to see the
-    // tracker (calibrated, in roomspace).
-    vr::DriverPose_t lastGood = MakePose(0.5, 1.6, 0.2, true, true);
+    vr::DriverPose_t pose = MakeBusyPose();
+    openvr_pair::common::quash::ApplyQuashToPose(pose);
 
-    openvr_pair::common::quash::ApplyQuashToPose(pose, lastGood, /*lastGoodValid=*/true);
-
-    EXPECT_TRUE(pose.deviceIsConnected);
-    EXPECT_TRUE(pose.poseIsValid);
-    EXPECT_EQ(pose.result, vr::TrackingResult_Calibrating_OutOfRange);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[0], 0.5);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[1], 1.6);
-    EXPECT_DOUBLE_EQ(pose.vecPosition[2], 0.2);
+    EXPECT_DOUBLE_EQ(pose.qRotation.w, 1.0);
+    EXPECT_DOUBLE_EQ(pose.qRotation.x, 0.0);
+    EXPECT_DOUBLE_EQ(pose.qRotation.y, 0.0);
+    EXPECT_DOUBLE_EQ(pose.qRotation.z, 0.0);
+    EXPECT_DOUBLE_EQ(pose.qWorldFromDriverRotation.w, 1.0);
+    EXPECT_DOUBLE_EQ(pose.qWorldFromDriverRotation.x, 0.0);
+    EXPECT_DOUBLE_EQ(pose.qDriverFromHeadRotation.w, 1.0);
+    EXPECT_DOUBLE_EQ(pose.qDriverFromHeadRotation.x, 0.0);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_DOUBLE_EQ(pose.vecVelocity[i], 0.0);
+        EXPECT_DOUBLE_EQ(pose.vecAcceleration[i], 0.0);
+        EXPECT_DOUBLE_EQ(pose.vecAngularVelocity[i], 0.0);
+        EXPECT_DOUBLE_EQ(pose.vecAngularAcceleration[i], 0.0);
+        EXPECT_DOUBLE_EQ(pose.vecWorldFromDriverTranslation[i], 0.0);
+        EXPECT_DOUBLE_EQ(pose.vecDriverFromHeadTranslation[i], 0.0);
+    }
+    EXPECT_DOUBLE_EQ(pose.poseTimeOffset, 0.0);
 }
 
-// Even when the cached last-good pose was itself reported with disconnected
-// or invalid flags (it should not be, but defend against accidents), the
-// quash mutation must clamp the resulting flags to keep SteamVR seeing the
-// device as connected.
-TEST(QuashPoseTest, QuashClampsFlagsRegardlessOfLastGoodFlags)
+TEST(QuashPoseTest, ForcesConnectedValidOutOfRange)
 {
-    vr::DriverPose_t pose = MakePose(0.0, 0.0, 0.0, false, false,
-                                     vr::TrackingResult_Uninitialized);
-    vr::DriverPose_t lastGood = MakePose(0.5, 1.6, 0.2,
-                                         /*valid=*/false, /*conn=*/false,
-                                         vr::TrackingResult_Uninitialized);
+    vr::DriverPose_t pose{};
+    pose.deviceIsConnected = false;
+    pose.poseIsValid       = false;
+    pose.result            = vr::TrackingResult_Uninitialized;
 
-    openvr_pair::common::quash::ApplyQuashToPose(pose, lastGood, /*lastGoodValid=*/true);
+    openvr_pair::common::quash::ApplyQuashToPose(pose);
 
     EXPECT_TRUE(pose.deviceIsConnected);
     EXPECT_TRUE(pose.poseIsValid);
     EXPECT_EQ(pose.result, vr::TrackingResult_Calibrating_OutOfRange);
+}
+
+TEST(QuashPoseTest, OutputIsConstantAcrossArbitraryInputs)
+{
+    vr::DriverPose_t a = MakeBusyPose();
+    vr::DriverPose_t b{};
+    b.vecPosition[0] = 999.0;
+    b.vecPosition[1] = 999.0;
+    b.vecPosition[2] = 999.0;
+    b.qRotation = { 0.0, 0.0, 0.0, 1.0 };
+
+    openvr_pair::common::quash::ApplyQuashToPose(a);
+    openvr_pair::common::quash::ApplyQuashToPose(b);
+
+    EXPECT_DOUBLE_EQ(a.vecPosition[0], b.vecPosition[0]);
+    EXPECT_DOUBLE_EQ(a.vecPosition[1], b.vecPosition[1]);
+    EXPECT_DOUBLE_EQ(a.vecPosition[2], b.vecPosition[2]);
+    EXPECT_DOUBLE_EQ(a.qRotation.w, b.qRotation.w);
+    EXPECT_EQ(a.deviceIsConnected, b.deviceIsConnected);
+    EXPECT_EQ(a.poseIsValid, b.poseIsValid);
+    EXPECT_EQ(a.result, b.result);
 }

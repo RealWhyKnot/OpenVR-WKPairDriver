@@ -4,30 +4,23 @@
 
 namespace openvr_pair::common::quash {
 
-// Mutate `pose` for a tracker hidden by SpaceCalibrator's "Hide tracker
-// (during cal)" toggle. Keeps the device connected to SteamVR (no
-// disconnect storm), freezes the visible pose at the last calibrated
-// value (so the user never sees raw uncalibrated vendor pose leaking
-// through as a ghost device at the wrong position), and marks the
-// result as Calibrating_OutOfRange. SteamVR's standard behavior for
-// OutOfRange dims the device in its UI without removing it, and apps
-// like VRChat keep their bindings.
-//
-// When `lastGoodValid` is false (first frame after a device appears
-// in a quashed state, with no calibrated pose cached yet), the
-// incoming pose flows through unchanged except for the flag adjustments
-// below. Subsequent quashed frames then freeze on the cached value as
-// soon as one non-quashed frame populates it.
-inline void ApplyQuashToPose(vr::DriverPose_t& pose,
-                             const vr::DriverPose_t& lastGood,
-                             bool lastGoodValid)
+// Park position for a hidden tracker: 1 km below the floor.
+constexpr double kQuashParkY = -1000.0;
+
+// Force a tracker's pose to a fixed off-screen park position while
+// keeping the device connection alive so downstream consumers (VRChat
+// etc.) retain their bindings. result=Calibrating_OutOfRange so
+// SteamVR dims the entry instead of treating it as live.
+inline void ApplyQuashToPose(vr::DriverPose_t& pose)
 {
-    if (lastGoodValid) {
-        pose = lastGood;
-    }
-    pose.deviceIsConnected = true;
-    pose.poseIsValid       = true;
-    pose.result            = vr::TrackingResult_Calibrating_OutOfRange;
+    pose = vr::DriverPose_t{};
+    pose.qWorldFromDriverRotation = { 1.0, 0.0, 0.0, 0.0 };
+    pose.qDriverFromHeadRotation  = { 1.0, 0.0, 0.0, 0.0 };
+    pose.qRotation                = { 1.0, 0.0, 0.0, 0.0 };
+    pose.vecPosition[1]           = kQuashParkY;
+    pose.deviceIsConnected        = true;
+    pose.poseIsValid              = true;
+    pose.result                   = vr::TrackingResult_Calibrating_OutOfRange;
 }
 
 } // namespace openvr_pair::common::quash

@@ -844,10 +844,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	tf.prevQuash = tf.quash;
 
 	if (tf.quash) {
-		// Replay the cached calibrated pose with TrackingResult_Calibrating_OutOfRange.
-		// Keeps deviceIsConnected=true so SteamVR doesn't tear the device down
-		// and downstream consumers (VRChat etc.) keep their bindings.
-		openvr_pair::common::quash::ApplyQuashToPose(pose, tf.lastGoodPose, tf.lastGoodPoseValid);
+		openvr_pair::common::quash::ApplyQuashToPose(pose);
 		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_QUASH_APPLY);
 
 		if (quashTransition) {
@@ -862,8 +859,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						snprintf(serial, sizeof serial, "%s", s.c_str());
 				}
 			}
-			LOG("[calibration] hide-tracker active for %s; pose marked Calibrating_OutOfRange (held last good)",
-				serial[0] ? serial : "(unknown)");
+			LOG("[calibration] hide-tracker active for %s; pose parked at y=%g (Calibrating_OutOfRange)",
+				serial[0] ? serial : "(unknown)",
+				openvr_pair::common::quash::kQuashParkY);
 			lock.lock();
 		}
 	} else if (tf.enabled)
@@ -1009,14 +1007,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			tf.currentRate = DeltaSize::TINY;
 			QueryPerformanceCounter(&tf.lastPoll);
 		}
-	}
-
-	// Cache the fully-calibrated pose for quash to replay on subsequent
-	// frames. Captured before phantom synthesis so the cache holds the
-	// real calibrated pose rather than a dead-reckoned / IK fallback.
-	if (!tf.quash) {
-		tf.lastGoodPose      = pose;
-		tf.lastGoodPoseValid = true;
 	}
 
 #if OPENVR_PAIR_HAS_PHANTOM_DRIVER
