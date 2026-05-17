@@ -104,6 +104,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **driver:** Keep hidden tracker connected with TrackingResult_OutOfRange (09ee202)
 - **supervisor:** Log unexpected TerminateProcess failures (882beb3)
 - **facetracking:** Defense-in-depth NaN/Inf guard on OSC publish (e450835)
+- **ci:** Stamp generated headers + retry gl3w before configure (b2d1367)
 
 ---
 

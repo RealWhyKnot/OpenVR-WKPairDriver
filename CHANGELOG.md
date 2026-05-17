@@ -106,6 +106,7 @@ The `release.yml` body for each tag is composed mechanically from the slice betw
 - **driver:** Keep hidden tracker connected with TrackingResult_OutOfRange (09ee202)
 - **supervisor:** Log unexpected TerminateProcess failures (882beb3)
 - **facetracking:** Defense-in-depth NaN/Inf guard on OSC publish (e450835)
+- **ci:** Stamp generated headers + retry gl3w before configure (b2d1367)
 
 ---
 
