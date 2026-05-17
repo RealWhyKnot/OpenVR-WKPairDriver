@@ -370,25 +370,39 @@ void SmoothingPlugin::ProvidePresence(WKOpenVR::PresenceComposer &composer)
 		u.priority = 100;
 		u.details  = "Smoothing trackers";
 		u.state    = "external smoothing detected";
-	} else {
-		// Count trackers configured with prediction smoothness (non-zero map
-		// entries). Count active finger curves: any bit in finger_mask where
-		// the global smoothness or per-finger override is non-zero.
-		const int trackers = static_cast<int>(cfg_.trackerSmoothness.size());
+		composer.Submit("Smoothing", std::move(u));
+		return;
+	}
 
-		int fingerCurves = 0;
-		for (int i = 0; i < 10; ++i) {
-			if ((cfg_.finger_mask >> i) & 1) {
-				const int strength = cfg_.per_finger_smoothness[i] > 0
-				    ? cfg_.per_finger_smoothness[i]
-				    : cfg_.smoothness;
-				if (strength > 0) ++fingerCurves;
-			}
+	// Count trackers with non-zero prediction smoothness AND active finger
+	// curves. The persisted map can include serials that are no longer
+	// connected, so an entry at 0 is treated as inactive. When nothing is
+	// configured we fall to idle priority instead of claiming activity --
+	// previously this submitted priority 50 ("Smoothing trackers | 0/0") even
+	// on a fresh install with nothing turned on.
+	int activeTrackers = 0;
+	for (const auto &kv : cfg_.trackerSmoothness) {
+		if (kv.second > 0) ++activeTrackers;
+	}
+
+	int fingerCurves = 0;
+	for (int i = 0; i < 10; ++i) {
+		if ((cfg_.finger_mask >> i) & 1) {
+			const int strength = cfg_.per_finger_smoothness[i] > 0
+			    ? cfg_.per_finger_smoothness[i]
+			    : cfg_.smoothness;
+			if (strength > 0) ++fingerCurves;
 		}
+	}
 
+	if (activeTrackers == 0 && fingerCurves == 0) {
+		u.priority = 0;
+		u.details  = "Smoothing";
+		u.state    = "idle";
+	} else {
 		u.priority = 50;
 		u.details  = "Smoothing trackers";
-		u.state    = std::to_string(trackers) + " trackers | " +
+		u.state    = std::to_string(activeTrackers) + " trackers | " +
 		             std::to_string(fingerCurves) + " finger curves";
 	}
 
