@@ -2,10 +2,13 @@ cmake_minimum_required(VERSION 3.14)
 
 # Keep test registration in one place. Module-owned unit tests remain beside the
 # code they cover, while cross-module scenarios live under this tests/ tree.
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/calibration/tests" "${CMAKE_BINARY_DIR}/tests/calibration")
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/facetracking/tests" "${CMAKE_BINARY_DIR}/tests/facetracking")
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/inputhealth/tests" "${CMAKE_BINARY_DIR}/tests/inputhealth")
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/oscrouter/tests" "${CMAKE_BINARY_DIR}/tests/oscrouter")
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/captions/tests" "${CMAKE_BINARY_DIR}/tests/captions")
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/phantom/tests" "${CMAKE_BINARY_DIR}/tests/phantom")
+# Per-module test subdirs are gated through cmake/WKOpenVRModules.cmake so that
+# a release build with disabled-in-release modules doesn't try to link tests
+# against feature libs that were skipped.
+wkopenvr_add_module_tests(calibration)
+wkopenvr_add_module_tests(facetracking)
+wkopenvr_add_module_tests(inputhealth)
+wkopenvr_add_module_tests(oscrouter)
+wkopenvr_add_module_tests(captions)
+wkopenvr_add_module_tests(phantom)
 add_subdirectory(e2e)

@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 
+# Cross-module e2e tests exercise the facetracking + oscrouter driver libs
+# directly. Release builds may skip either module via its disabled-in-release
+# marker, in which case the matching driver lib never gets a target and the
+# link step would fail with LNK1181. Bail out cleanly when that happens.
+if(NOT TARGET openvr_pair_feature_facetracking_driver
+		OR NOT TARGET openvr_pair_feature_oscrouter_driver)
+	message(STATUS "Skipping e2e_tests (facetracking or oscrouter disabled-in-release)")
+	return()
+endif()
+
 include(FetchContent)
 FetchContent_Declare(
     googletest

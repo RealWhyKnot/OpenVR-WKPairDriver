@@ -7,37 +7,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(OPENVR_PAIRDRIVER_ROOT ${CMAKE_SOURCE_DIR} CACHE PATH "WKOpenVR checkout" FORCE)
 set(OPENVR_PAIR_BUILD_UMBRELLA ON CACHE BOOL "Build feature overlay plugins for OpenVR-Pair" FORCE)
 
-# Feature modules are always present in the monorepo; add unconditionally.
+# Feature modules are gated through cmake/WKOpenVRModules.cmake: each helper
+# call adds the module's overlay subdir, registers its lib for linking, and
+# emits its OPENVR_PAIR_HAS_*_OVERLAY define -- unless the module ships a
+# modules/<slug>/disabled-in-release.flag marker AND the build was configured
+# with -DWKOPENVR_RELEASE_BUILD=ON, in which case it's skipped silently.
 set(OPENVR_PAIR_OVERLAY_FEATURE_LIBS "")
 set(OPENVR_PAIR_OVERLAY_DEFINES "")
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/inputhealth/src/overlay" "${CMAKE_BINARY_DIR}/modules/inputhealth-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_inputhealth_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_INPUTHEALTH_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/smoothing/src/overlay" "${CMAKE_BINARY_DIR}/modules/smoothing-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_smoothing_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_SMOOTHING_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/calibration/src/overlay" "${CMAKE_BINARY_DIR}/modules/calibration-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_calibration_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_CALIBRATION_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/facetracking/src/overlay" "${CMAKE_BINARY_DIR}/modules/facetracking-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_facetracking_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_FACETRACKING_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/oscrouter/src/overlay" "${CMAKE_BINARY_DIR}/modules/oscrouter-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_oscrouter_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_OSCROUTER_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/captions/src/overlay" "${CMAKE_BINARY_DIR}/modules/captions-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_captions_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_CAPTIONS_OVERLAY=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/phantom/src/overlay" "${CMAKE_BINARY_DIR}/modules/phantom-overlay")
-list(APPEND OPENVR_PAIR_OVERLAY_FEATURE_LIBS openvr_pair_feature_phantom_overlay)
-list(APPEND OPENVR_PAIR_OVERLAY_DEFINES OPENVR_PAIR_HAS_PHANTOM_OVERLAY=1)
+wkopenvr_add_overlay_module(inputhealth)
+wkopenvr_add_overlay_module(smoothing)
+wkopenvr_add_overlay_module(calibration)
+wkopenvr_add_overlay_module(facetracking)
+wkopenvr_add_overlay_module(oscrouter)
+wkopenvr_add_overlay_module(captions)
+wkopenvr_add_overlay_module(phantom)
 
 if(WIN32)
 	enable_language(RC)

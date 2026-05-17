@@ -1,18 +1,23 @@
 # This workflow publishes a release on this repo AND mirrors per-feature
-# zips to the five sibling repos (WKOpenVR-SpaceCalibrator,
+# zips to the seven sibling repos (WKOpenVR-SpaceCalibrator,
 # WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-# WKOpenVR-Captions, WKOpenVR-Phantom). The mirror step needs a token with
-# contents:write on all six repos, stored as the secret MIRROR_RELEASE_TOKEN.
-# Provision via:
+# WKOpenVR-OSCRouter, WKOpenVR-Captions, WKOpenVR-Phantom). The mirror step
+# needs a token with contents:write on all seven repos, stored as the
+# secret MIRROR_RELEASE_TOKEN. Provision via:
 #   1. github.com -> Settings -> Developer settings -> Fine-grained PAT
 #   2. Resource owner: RealWhyKnot. Repos: WKOpenVR-SpaceCalibrator,
 #      WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-#      WKOpenVR-Captions, WKOpenVR-Phantom.
+#      WKOpenVR-OSCRouter, WKOpenVR-Captions, WKOpenVR-Phantom.
 #   3. Permissions: Contents = Read and write.
 #   4. Copy token, then in this repo: Settings -> Secrets and variables
 #      -> Actions -> New repository secret -> name MIRROR_RELEASE_TOKEN.
 # Without this secret, the umbrella release publishes successfully but
 # the mirror steps fail (acceptable for a smoke test; fix before promoting).
+#
+# Modules carrying modules/<slug>/disabled-in-release.flag are filtered
+# out of the per-feature zip and installer loops below and their mirror
+# step is skipped via an `if:` guard, so an unstable feature never lands
+# on its sibling repo even when MIRROR_RELEASE_TOKEN covers it.
 
 name: Release
 
@@ -127,7 +132,7 @@ jobs:
         # The minhook submodule declares cmake_minimum_required(2.8.12) which
         # CMake 4.x rejects. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 lets us configure
         # without forking. -Wno-dev silences developer-mode warnings from minhook.
-        run: cmake -G "Visual Studio 17 2022" -A x64 -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DWKOPENVR_CAPTIONS_CUDA=OFF -Wno-dev
+        run: cmake -G "Visual Studio 17 2022" -A x64 -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DWKOPENVR_CAPTIONS_CUDA=OFF -DWKOPENVR_RELEASE_BUILD=ON -Wno-dev
 
       - name: Stamp version and build
         shell: pwsh
@@ -190,6 +195,7 @@ jobs:
           }
 
       - name: Run captions host self-test
+        if: ${{ hashFiles('modules/captions/disabled-in-release.flag') == '' }}
         shell: pwsh
         run: |
           $hostExe = 'build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe'
@@ -260,20 +266,30 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           Copy-Item "$artifacts/resources/face-module-sync.ps1" "$stage/resources/face-module-sync.ps1"
 
+          # Disabled-in-release markers gate every per-module artifact below.
+          # A disabled module's CMake helper short-circuited add_subdirectory,
+          # so the build never produced the host exes / input profiles to stage.
+          $faceTrackingEnabled = -not (Test-Path -LiteralPath 'modules/facetracking/disabled-in-release.flag')
+          $captionsEnabled     = -not (Test-Path -LiteralPath 'modules/captions/disabled-in-release.flag')
+          $phantomEnabled      = -not (Test-Path -LiteralPath 'modules/phantom/disabled-in-release.flag')
+
           # Stage the C# face-tracking host. CMake publishes it to
-          # build/artifacts/FaceModuleHost/; build.ps1 copies that into the
-          # driver tree locally, but the workflow runs cmake directly so we
-          # do the same copy here. The driver's HostSupervisor resolves the
-          # host exe relative to the driver's own resources directory.
-          $faceHostBuildDir = "build/artifacts/FaceModuleHost"
-          $faceHostStageDir = "$stage/driver_wkopenvr/resources/facetracking/host"
-          if (-not (Test-Path $faceHostBuildDir)) {
-            throw "Face-tracking host build output missing at $faceHostBuildDir (was OPENVR_PAIR_BUILD_FACE_HOST=OFF or did dotnet publish fail?)"
-          }
-          New-Item -ItemType Directory -Force -Path $faceHostStageDir | Out-Null
-          Copy-Item -Recurse -Force -Path "$faceHostBuildDir\*" -Destination $faceHostStageDir
-          if (-not (Test-Path "$faceHostStageDir/WKOpenVR.FaceModuleHost.exe")) {
-            throw "Staged WKOpenVR.FaceModuleHost.exe missing under $faceHostStageDir."
+          # build/artifacts/FaceModuleHost/; the workflow runs cmake directly
+          # so we copy it into the stage here. The driver's HostSupervisor
+          # resolves the host exe relative to the driver's own resources directory.
+          if ($faceTrackingEnabled) {
+            $faceHostBuildDir = "build/artifacts/FaceModuleHost"
+            $faceHostStageDir = "$stage/driver_wkopenvr/resources/facetracking/host"
+            if (-not (Test-Path $faceHostBuildDir)) {
+              throw "Face-tracking host build output missing at $faceHostBuildDir (was OPENVR_PAIR_BUILD_FACE_HOST=OFF or did dotnet publish fail?)"
+            }
+            New-Item -ItemType Directory -Force -Path $faceHostStageDir | Out-Null
+            Copy-Item -Recurse -Force -Path "$faceHostBuildDir\*" -Destination $faceHostStageDir
+            if (-not (Test-Path "$faceHostStageDir/WKOpenVR.FaceModuleHost.exe")) {
+              throw "Staged WKOpenVR.FaceModuleHost.exe missing under $faceHostStageDir."
+            }
+          } else {
+            Write-Host "Face-tracking host staging skipped (modules/facetracking/disabled-in-release.flag)."
           }
 
           # Stage the native captions host. CMake emits it to
@@ -281,19 +297,23 @@ jobs:
           # layout that quick.ps1 deploys). The $srcTr block above already
           # copied the captions resources tree into the stage; this block
           # verifies the host exe landed correctly so a missing CaptionsHost
-          # build (OPENVR_PAIR_BUILD_CAPTIONS_HOST=OFF) is caught early with
-          # a clear message rather than a silent gap in the release zip.
-          $trHostStageExe = "$stage/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe"
-          if (-not (Test-Path $trHostStageExe)) {
-            throw "WKOpenVR.CaptionsHost.exe missing from stage at $trHostStageExe. Check that OPENVR_PAIR_BUILD_CAPTIONS_HOST is ON and the captions host CMake target built successfully."
-          }
-          $trHostOpenVr = "$stage/driver_wkopenvr/resources/captions/host/openvr_api.dll"
-          if (-not (Test-Path $trHostOpenVr)) {
-            throw "openvr_api.dll missing beside CaptionsHost at $trHostOpenVr."
-          }
-          $trPackManifest = "$stage/driver_wkopenvr/resources/captions/host/resources/captions-packs.json"
-          if (-not (Test-Path $trPackManifest)) {
-            throw "Captions pack manifest missing from stage at $trPackManifest."
+          # build is caught early with a clear message rather than a silent
+          # gap in the release zip.
+          if ($captionsEnabled) {
+            $trHostStageExe = "$stage/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe"
+            if (-not (Test-Path $trHostStageExe)) {
+              throw "WKOpenVR.CaptionsHost.exe missing from stage at $trHostStageExe. Check that OPENVR_PAIR_BUILD_CAPTIONS_HOST is ON and the captions host CMake target built successfully."
+            }
+            $trHostOpenVr = "$stage/driver_wkopenvr/resources/captions/host/openvr_api.dll"
+            if (-not (Test-Path $trHostOpenVr)) {
+              throw "openvr_api.dll missing beside CaptionsHost at $trHostOpenVr."
+            }
+            $trPackManifest = "$stage/driver_wkopenvr/resources/captions/host/resources/captions-packs.json"
+            if (-not (Test-Path $trPackManifest)) {
+              throw "Captions pack manifest missing from stage at $trPackManifest."
+            }
+          } else {
+            Write-Host "Captions host staging skipped (modules/captions/disabled-in-release.flag)."
           }
 
           New-Item -ItemType Directory -Force -Path "release" | Out-Null
@@ -332,14 +352,28 @@ jobs:
           # Each mirror zip is identical to the umbrella plus one flag file
           # pre-dropped in driver_wkopenvr/resources/ so the user's SteamVR
           # picks up that feature immediately after extracting into the driver dir.
-          $features = @(
-            [pscustomobject]@{ Name = 'Calibration';  Flag = 'enable_calibration.flag';  Repo = 'RealWhyKnot/WKOpenVR-SpaceCalibrator' }
-            [pscustomobject]@{ Name = 'Smoothing';    Flag = 'enable_smoothing.flag';    Repo = 'RealWhyKnot/WKOpenVR-Smoothing' }
-            [pscustomobject]@{ Name = 'InputHealth';  Flag = 'enable_inputhealth.flag';  Repo = 'RealWhyKnot/WKOpenVR-InputHealth' }
-            [pscustomobject]@{ Name = 'FaceTracking'; Flag = 'enable_facetracking.flag'; Repo = 'RealWhyKnot/WKOpenVR-VRCFT' }
-            [pscustomobject]@{ Name = 'Captions';     Flag = 'enable_captions.flag';     Repo = 'RealWhyKnot/WKOpenVR-Captions' }
-            [pscustomobject]@{ Name = 'Phantom';      Flag = 'enable_phantom.flag';      Repo = 'RealWhyKnot/WKOpenVR-Phantom' }
+          # Slug = modules/<slug>/ folder name (and the marker filename root).
+          # Any feature whose source tree carries disabled-in-release.flag is
+          # filtered out below so it never gets a zip, installer, or mirror
+          # push -- the same marker the CMake helper uses to skip linking the
+          # module into the release binary.
+          $allFeatures = @(
+            [pscustomobject]@{ Name = 'Calibration';  Slug = 'calibration';  Flag = 'enable_calibration.flag';  Repo = 'RealWhyKnot/WKOpenVR-SpaceCalibrator' }
+            [pscustomobject]@{ Name = 'Smoothing';    Slug = 'smoothing';    Flag = 'enable_smoothing.flag';    Repo = 'RealWhyKnot/WKOpenVR-Smoothing' }
+            [pscustomobject]@{ Name = 'InputHealth';  Slug = 'inputhealth';  Flag = 'enable_inputhealth.flag';  Repo = 'RealWhyKnot/WKOpenVR-InputHealth' }
+            [pscustomobject]@{ Name = 'FaceTracking'; Slug = 'facetracking'; Flag = 'enable_facetracking.flag'; Repo = 'RealWhyKnot/WKOpenVR-VRCFT' }
+            [pscustomobject]@{ Name = 'OSCRouter';    Slug = 'oscrouter';    Flag = 'enable_oscrouter.flag';    Repo = 'RealWhyKnot/WKOpenVR-OSCRouter' }
+            [pscustomobject]@{ Name = 'Captions';     Slug = 'captions';     Flag = 'enable_captions.flag';     Repo = 'RealWhyKnot/WKOpenVR-Captions' }
+            [pscustomobject]@{ Name = 'Phantom';      Slug = 'phantom';      Flag = 'enable_phantom.flag';      Repo = 'RealWhyKnot/WKOpenVR-Phantom' }
           )
+          $features = $allFeatures | Where-Object {
+            $marker = "modules/$($_.Slug)/disabled-in-release.flag"
+            if (Test-Path -LiteralPath $marker) {
+              Write-Host "Skipping mirror zip for $($_.Name) ($marker present)"
+              return $false
+            }
+            return $true
+          }
 
           $mirrorPaths = @{}
           foreach ($feat in $features) {
@@ -354,7 +388,9 @@ jobs:
 
           Remove-Item -Recurse -Force $stage
 
-          # Emit outputs for downstream steps.
+          # Emit outputs for downstream steps. Disabled features land as empty
+          # strings; the matching Mirror release step uses `if:` to skip when
+          # the output is empty.
           "umbrella_path=$($umbrella.Path)"         >> $env:GITHUB_OUTPUT
           "umbrella_name=$($umbrella.Name)"         >> $env:GITHUB_OUTPUT
           "umbrella_size=$($umbrella.Size)"         >> $env:GITHUB_OUTPUT
@@ -364,6 +400,7 @@ jobs:
           "mirror_smoothing=$($mirrorPaths['Smoothing'])"       >> $env:GITHUB_OUTPUT
           "mirror_inputhealth=$($mirrorPaths['InputHealth'])"   >> $env:GITHUB_OUTPUT
           "mirror_facetracking=$($mirrorPaths['FaceTracking'])" >> $env:GITHUB_OUTPUT
+          "mirror_oscrouter=$($mirrorPaths['OSCRouter'])"       >> $env:GITHUB_OUTPUT
           "mirror_captions=$($mirrorPaths['Captions'])"         >> $env:GITHUB_OUTPUT
           "mirror_phantom=$($mirrorPaths['Phantom'])"           >> $env:GITHUB_OUTPUT
 
@@ -374,7 +411,7 @@ jobs:
         # instead of leaving the user to read the makensis output.
         shell: pwsh
         run: |
-          $required = @(
+          $required = [System.Collections.Generic.List[string]]@(
             'build/artifacts/Release/WKOpenVR.exe',
             'build/artifacts/Release/openvr_api.dll',
             'build/artifacts/Release/manifest.vrmanifest',
@@ -383,17 +420,27 @@ jobs:
             'build/driver_wkopenvr/driver.vrdrivermanifest',
             'build/driver_wkopenvr/resources/driver.vrresources',
             'build/driver_wkopenvr/resources/settings/default.vrsettings',
-            'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll',
-            'build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe',
-            'build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe',
-            'build/driver_wkopenvr/resources/captions/host/openvr_api.dll',
-            'build/driver_wkopenvr/resources/captions/host/resources/captions-packs.json',
-            'build/driver_wkopenvr/resources/captions/host/resources/install-captions-pack.ps1',
-            'build/driver_wkopenvr/resources/phantom/host/WKOpenVRPhantomSidecar.exe',
-            'build/driver_wkopenvr/resources/input/vive_tracker_waist_profile.json',
-            'build/driver_wkopenvr/resources/input/vive_tracker_left_foot_profile.json',
-            'build/driver_wkopenvr/resources/input/vive_tracker_right_foot_profile.json'
+            'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll'
           )
+          # Per-module artifacts: only verify the ones whose modules are
+          # actually built into this release (the disabled-in-release marker
+          # tells the CMake helper to skip add_subdirectory for those, so
+          # their host exes / input profiles never get produced).
+          if (-not (Test-Path -LiteralPath 'modules/facetracking/disabled-in-release.flag')) {
+            $required.Add('build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe')
+          }
+          if (-not (Test-Path -LiteralPath 'modules/captions/disabled-in-release.flag')) {
+            $required.Add('build/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe')
+            $required.Add('build/driver_wkopenvr/resources/captions/host/openvr_api.dll')
+            $required.Add('build/driver_wkopenvr/resources/captions/host/resources/captions-packs.json')
+            $required.Add('build/driver_wkopenvr/resources/captions/host/resources/install-captions-pack.ps1')
+          }
+          if (-not (Test-Path -LiteralPath 'modules/phantom/disabled-in-release.flag')) {
+            $required.Add('build/driver_wkopenvr/resources/phantom/host/WKOpenVRPhantomSidecar.exe')
+            $required.Add('build/driver_wkopenvr/resources/input/vive_tracker_waist_profile.json')
+            $required.Add('build/driver_wkopenvr/resources/input/vive_tracker_left_foot_profile.json')
+            $required.Add('build/driver_wkopenvr/resources/input/vive_tracker_right_foot_profile.json')
+          }
           $missing = @()
           foreach ($p in $required) {
             if (-not (Test-Path -LiteralPath $p)) { $missing += $p }
@@ -452,7 +499,25 @@ jobs:
           $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) { $makensis = "C:\Program Files\NSIS\makensis.exe" }
           if (-not (Test-Path $makensis)) { throw "makensis.exe not found." }
-          $features = @('Calibration', 'Smoothing', 'InputHealth', 'FaceTracking', 'Captions', 'Phantom')
+          # Same disabled-in-release filter the zip step uses, so a feature
+          # marked unstable doesn't get a per-feature installer either.
+          $allFeatures = @(
+            [pscustomobject]@{ Name = 'Calibration';  Slug = 'calibration' }
+            [pscustomobject]@{ Name = 'Smoothing';    Slug = 'smoothing' }
+            [pscustomobject]@{ Name = 'InputHealth';  Slug = 'inputhealth' }
+            [pscustomobject]@{ Name = 'FaceTracking'; Slug = 'facetracking' }
+            [pscustomobject]@{ Name = 'OSCRouter';    Slug = 'oscrouter' }
+            [pscustomobject]@{ Name = 'Captions';     Slug = 'captions' }
+            [pscustomobject]@{ Name = 'Phantom';      Slug = 'phantom' }
+          )
+          $features = $allFeatures | Where-Object {
+            $marker = "modules/$($_.Slug)/disabled-in-release.flag"
+            if (Test-Path -LiteralPath $marker) {
+              Write-Host "Skipping per-feature installer for $($_.Name) ($marker present)"
+              return $false
+            }
+            return $true
+          } | ForEach-Object { $_.Name }
           $outputs = @{}
           foreach ($feat in $features) {
             Push-Location install
@@ -473,6 +538,7 @@ jobs:
           "installer_smoothing=$($outputs['Smoothing'])"       >> $env:GITHUB_OUTPUT
           "installer_inputhealth=$($outputs['InputHealth'])"   >> $env:GITHUB_OUTPUT
           "installer_facetracking=$($outputs['FaceTracking'])" >> $env:GITHUB_OUTPUT
+          "installer_oscrouter=$($outputs['OSCRouter'])"       >> $env:GITHUB_OUTPUT
           "installer_captions=$($outputs['Captions'])"         >> $env:GITHUB_OUTPUT
           "installer_phantom=$($outputs['Phantom'])"           >> $env:GITHUB_OUTPUT
 
@@ -628,6 +694,7 @@ jobs:
           gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
 
       - name: Mirror release to WKOpenVR-VRCFT
+        if: ${{ steps.zips.outputs.mirror_facetracking != '' }}
         env:
           GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
@@ -640,7 +707,22 @@ jobs:
           $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_facetracking.flag so face and eye tracking activate immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
           gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
 
+      - name: Mirror release to WKOpenVR-OSCRouter
+        if: ${{ steps.zips.outputs.mirror_oscrouter != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+        shell: pwsh
+        run: |
+          $tag       = "${{ github.ref_name }}"
+          $zip       = "${{ steps.zips.outputs.mirror_oscrouter }}"
+          $installer = "${{ steps.feature_installers.outputs.installer_oscrouter }}"
+          $repo  = "RealWhyKnot/WKOpenVR-OSCRouter"
+          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_oscrouter.flag so OSC fan-out activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
+          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
+
       - name: Mirror release to WKOpenVR-Captions
+        if: ${{ steps.zips.outputs.mirror_captions != '' }}
         env:
           GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
@@ -654,6 +736,7 @@ jobs:
           gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes
 
       - name: Mirror release to WKOpenVR-Phantom
+        if: ${{ steps.zips.outputs.mirror_phantom != '' }}
         env:
           GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
@@ -782,6 +865,7 @@ jobs:
               'RealWhyKnot/WKOpenVR-Smoothing',
               'RealWhyKnot/WKOpenVR-InputHealth',
               'RealWhyKnot/WKOpenVR-VRCFT',
+              'RealWhyKnot/WKOpenVR-OSCRouter',
               'RealWhyKnot/WKOpenVR-Captions',
               'RealWhyKnot/WKOpenVR-Phantom'
           )

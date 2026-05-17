@@ -58,34 +58,18 @@ set(OPENVR_PAIRDRIVER_ROOT ${CMAKE_SOURCE_DIR} CACHE PATH "WKOpenVR checkout" FO
 set(OPENVR_PAIR_FEATURE_LIBS "")
 set(OPENVR_PAIR_FEATURE_DEFINES "")
 
-# Feature modules are always present in the monorepo; add unconditionally.
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/inputhealth/src/driver" "${CMAKE_BINARY_DIR}/modules/inputhealth-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_inputhealth_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_INPUTHEALTH_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/smoothing/src/driver" "${CMAKE_BINARY_DIR}/modules/smoothing-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_smoothing_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_SMOOTHING_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/calibration/src/driver" "${CMAKE_BINARY_DIR}/modules/calibration-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_calibration_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_CALIBRATION_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/facetracking/src/driver" "${CMAKE_BINARY_DIR}/modules/facetracking-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_facetracking_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_FACETRACKING_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/oscrouter/src/driver" "${CMAKE_BINARY_DIR}/modules/oscrouter-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_oscrouter_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_OSCROUTER_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/captions/src/driver" "${CMAKE_BINARY_DIR}/modules/captions-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_captions_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_CAPTIONS_DRIVER=1)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/modules/phantom/src/driver" "${CMAKE_BINARY_DIR}/modules/phantom-driver")
-list(APPEND OPENVR_PAIR_FEATURE_LIBS openvr_pair_feature_phantom_driver)
-list(APPEND OPENVR_PAIR_FEATURE_DEFINES OPENVR_PAIR_HAS_PHANTOM_DRIVER=1)
+# Feature modules are gated through cmake/WKOpenVRModules.cmake: each helper
+# call adds the module's driver subdir, registers its lib for linking, and
+# emits its OPENVR_PAIR_HAS_*_DRIVER define -- unless the module ships a
+# modules/<slug>/disabled-in-release.flag marker AND the build was configured
+# with -DWKOPENVR_RELEASE_BUILD=ON, in which case it's skipped silently.
+wkopenvr_add_driver_module(inputhealth)
+wkopenvr_add_driver_module(smoothing)
+wkopenvr_add_driver_module(calibration)
+wkopenvr_add_driver_module(facetracking)
+wkopenvr_add_driver_module(oscrouter)
+wkopenvr_add_driver_module(captions)
+wkopenvr_add_driver_module(phantom)
 
 file(GLOB_RECURSE SOURCES_DRIVER ${CMAKE_SOURCE_DIR}/core/src/driver "*.c" "*.h" "*.hpp" "*.cpp")
 file(GLOB_RECURSE SOURCES_COMMON ${CMAKE_SOURCE_DIR}/core/src/common "*.h" "*.hpp")

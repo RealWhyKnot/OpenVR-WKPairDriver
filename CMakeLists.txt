@@ -4,6 +4,14 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 project("OpenVR-WKPair")
 
+# Release-channel build flag. When ON, feature modules with a
+# modules/<slug>/disabled-in-release.flag marker are skipped end-to-end
+# (overlay, driver, host, tests). Dev builds (the default) link every
+# module so contributors can still test the unstable ones. build.ps1
+# wires this to its own -Release switch.
+option(WKOPENVR_RELEASE_BUILD "Skip modules marked disabled-in-release" OFF)
+include(${CMAKE_SOURCE_DIR}/cmake/WKOpenVRModules.cmake)
+
 # ---------------------------------------------------------------------------
 # Compiler cache (sccache preferred, ccache fallback).
 # Set CMAKE_C/CXX_COMPILER_LAUNCHER so every C/C++ target benefits.
@@ -55,18 +63,13 @@ add_subdirectory(lib)
 # module driver/overlay subdirectories directly.
 add_subdirectory(core/src)
 
-# Face-tracking C# host sidecar. Built via `dotnet publish` and staged into the
-# artifacts tree by build.ps1. Toggleable via OPENVR_PAIR_BUILD_FACE_HOST so a
-# C++-only contributor doesn't need the .NET SDK to build the driver+overlay.
-add_subdirectory(modules/facetracking/src/host)
-
-# Captions native C++ host sidecar. Toggleable via OPENVR_PAIR_BUILD_CAPTIONS_HOST.
-add_subdirectory(modules/captions/src/host)
-
-# Phantom inference sidecar (Phase 3 scaffold). Toggleable via
-# OPENVR_PAIR_BUILD_PHANTOM_SIDECAR; off lets contributors who only touch
-# the driver/overlay skip the sidecar build.
-add_subdirectory(modules/phantom/src/host)
+# Per-module sidecars (C# face host, native captions host, phantom inference
+# host). Each is skipped end-to-end in release builds when its module ships a
+# disabled-in-release.flag marker, so a release with face-tracking turned off
+# doesn't ship a face host with no driver to talk to.
+wkopenvr_add_host_module(facetracking)
+wkopenvr_add_host_module(captions)
+wkopenvr_add_host_module(phantom)
 
 # Test suites. Unit tests stay in their owning module folders; cross-module E2E
 # tests live under tests/e2e and are registered alongside the rest.

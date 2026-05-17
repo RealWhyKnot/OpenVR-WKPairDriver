@@ -78,6 +78,13 @@ if ($Version -eq "") {
 Set-Content -Path "version.txt" -Value $Version -NoNewline
 Write-Host "Build version: $Version"
 
+# Channel string baked into BuildChannel.h / BuildStamp.h. -Release flips
+# this to "release" so DebugLogging stops forcing verbose output and the
+# CMake module gate (-DWKOPENVR_RELEASE_BUILD=ON, set below) honours the
+# disabled-in-release.flag markers on the four unstable feature modules.
+$ChannelName = if ($Release) { "release" } else { "dev" }
+Write-Host "Build channel: $ChannelName"
+
 # Stamp the common build channel header consumed by shared diagnostics code.
 $CommonBuildChannel = Join-Path $PSScriptRoot "core/src/common/BuildChannel.h"
 if (Test-Path (Split-Path -Parent $CommonBuildChannel)) {
@@ -87,7 +94,7 @@ if (Test-Path (Split-Path -Parent $CommonBuildChannel)) {
 #pragma once
 
 #define WKOPENVR_BUILD_STAMP "$Version"
-#define WKOPENVR_BUILD_CHANNEL "dev"
+#define WKOPENVR_BUILD_CHANNEL "$ChannelName"
 "@
 }
 
@@ -105,7 +112,7 @@ if (Test-Path (Split-Path -Parent $ScBuildStamp)) {
 #pragma once
 
 #define SPACECAL_BUILD_STAMP "$Version"
-#define SPACECAL_BUILD_CHANNEL "dev"
+#define SPACECAL_BUILD_CHANNEL "$ChannelName"
 "@
 }
 
@@ -125,7 +132,7 @@ if (Test-Path (Split-Path -Parent $FtBuildStamp)) {
 #pragma once
 
 #define FACETRACKING_BUILD_STAMP "$Version"
-#define FACETRACKING_BUILD_CHANNEL "dev"
+#define FACETRACKING_BUILD_CHANNEL "$ChannelName"
 "@
 }
 
@@ -165,12 +172,14 @@ if (-not $SkipConfigure) {
 	if ($CaptionsCuda -or $env:WKOPENVR_CAPTIONS_CUDA -eq "ON") {
 		$captionsCudaValue = "ON"
 	}
+	$releaseBuildValue = if ($Release) { "ON" } else { "OFF" }
 	$configureArgs = @(
 		"-S", ".",
 		"-B", "build",
 		"-A", "x64",
 		"-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
 		"-DWKOPENVR_CAPTIONS_CUDA=$captionsCudaValue",
+		"-DWKOPENVR_RELEASE_BUILD=$releaseBuildValue",
 		"-Wno-dev"
 	)
 	Invoke-NativeQuiet { cmake @configureArgs }
