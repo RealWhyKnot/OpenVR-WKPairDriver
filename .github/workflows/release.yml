@@ -758,6 +758,11 @@ jobs:
         # Use the GraphQL createCommitOnBranch mutation so the promotion
         # commit is signed server-side with GitHub's bot key. Done last so a
         # build or release failure does not push a phantom-promoted CHANGELOG.
+        # `continue-on-error` because this is post-publish housekeeping --
+        # the umbrella release is already up by this point, so a stale-OID
+        # race against changelog-append landing on main mid-build must not
+        # cascade into the cleanup step deleting an otherwise-valid release.
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
