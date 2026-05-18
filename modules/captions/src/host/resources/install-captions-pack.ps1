@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 function Get-LocalAppDataLow {
+    if ($env:WKOPENVR_LOCALAPPDATA_OVERRIDE) {
+        return $env:WKOPENVR_LOCALAPPDATA_OVERRIDE
+    }
     $shell = New-Object -ComObject Shell.Application
     $folder = $shell.Namespace("shell:Local AppDataLow")
     if ($folder -and $folder.Self -and $folder.Self.Path) {

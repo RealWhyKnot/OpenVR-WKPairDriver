@@ -1,3 +1,4 @@
+#include "BuildChannel.h"
 #include "FeaturePlugin.h"
 #include "ManifestRegistration.h"
 #include "Migration.h"
@@ -7,6 +8,10 @@
 #include "UpdateNotice.h"
 #include "VrOverlayHost.h"
 #include "DebugLogging.h"
+
+#if WKOPENVR_BUILD_IS_DEV
+#include "testharness/TestHarnessRunner.h"
+#endif
 
 #include <GL/gl3w.h>
 #include <GLFW/glfw3.h>
@@ -322,11 +327,25 @@ int main(int argc, char **argv)
 	// pointer at a deleted binary. Both exit before GLFW touches the screen.
 	bool registerOnly = false;
 	bool unregisterOnly = false;
+	bool testHarness = false;
 	for (int i = 1; i < argc; ++i) {
 		const std::string_view arg(argv[i]);
 		if (arg == "--register-only")   registerOnly = true;
 		if (arg == "--unregister-only") unregisterOnly = true;
+		if (arg == "--test-harness")    testHarness = true;
 	}
+
+#if WKOPENVR_BUILD_IS_DEV
+	if (testHarness) {
+		return openvr_pair::overlay::testharness::Run(argc, argv);
+	}
+#else
+	if (testHarness) {
+		fprintf(stderr, "--test-harness is only available on dev builds (current channel: %s)\n",
+			WKOPENVR_BUILD_CHANNEL);
+		return 2;
+	}
+#endif
 
 	if (unregisterOnly) {
 		UnregisterApplicationManifest();

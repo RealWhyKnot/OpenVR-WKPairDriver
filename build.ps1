@@ -87,6 +87,7 @@ Write-Host "Build channel: $ChannelName"
 
 # Stamp the common build channel header consumed by shared diagnostics code.
 $CommonBuildChannel = Join-Path $PSScriptRoot "core/src/common/BuildChannel.h"
+$IsDevValue = if ($ChannelName -eq "dev") { 1 } else { 0 }
 if (Test-Path (Split-Path -Parent $CommonBuildChannel)) {
 	Set-Content -Path $CommonBuildChannel -Value @"
 // Overwritten by WKOpenVR/build.ps1 with the umbrella binary's
@@ -95,6 +96,7 @@ if (Test-Path (Split-Path -Parent $CommonBuildChannel)) {
 
 #define WKOPENVR_BUILD_STAMP "$Version"
 #define WKOPENVR_BUILD_CHANNEL "$ChannelName"
+#define WKOPENVR_BUILD_IS_DEV $IsDevValue
 "@
 }
 

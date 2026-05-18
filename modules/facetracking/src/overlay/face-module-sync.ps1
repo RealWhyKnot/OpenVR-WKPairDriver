@@ -20,7 +20,13 @@ param(
     [string] $Kind       = '',
     [string] $SourceData = '',
     [string] $SourceId   = '',
-    [Parameter(Mandatory)][string] $ResultPath
+    [Parameter(Mandatory)][string] $ResultPath,
+
+    # Optional override for the public registry URL. Used by the local test
+    # harness to point the registry-kind branch at a 127.0.0.1 fixture
+    # server. When unset the SourceData JSON's "url" field controls the
+    # registry, matching production behavior.
+    [string] $RegistryUrlOverride = ''
 )
 
 Set-StrictMode -Version Latest
@@ -45,10 +51,17 @@ function Write-Result([bool]$ok, [string]$msg, [string]$uuid = '', [string]$ver 
 }
 
 function Get-FtModulesDir {
-    $base = [System.Environment]::GetFolderPath('LocalApplicationData')
-    # LocalApplicationData is %AppData%\..\..\LocalLow on some systems; use the
-    # registry key to get the real LocalAppDataLow path.
-    $low = [System.Environment]::GetFolderPath('ApplicationData') -replace 'Roaming$','LocalLow'
+    if ($env:WKOPENVR_LOCALAPPDATA_OVERRIDE) {
+        # Test harness redirect: route every module install under a sandbox
+        # directory so the real %LocalAppDataLow%\WKOpenVR tree is never
+        # touched. The harness sets this env var before running scenarios.
+        $low = $env:WKOPENVR_LOCALAPPDATA_OVERRIDE
+    } else {
+        $base = [System.Environment]::GetFolderPath('LocalApplicationData')
+        # LocalApplicationData is %AppData%\..\..\LocalLow on some systems; use
+        # the registry key to get the real LocalAppDataLow path.
+        $low = [System.Environment]::GetFolderPath('ApplicationData') -replace 'Roaming$','LocalLow'
+    }
     $dir = Join-Path $low 'WKOpenVR\facetracking\modules'
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     return $dir

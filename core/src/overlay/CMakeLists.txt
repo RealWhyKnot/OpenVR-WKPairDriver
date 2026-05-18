@@ -81,6 +81,14 @@ target_link_libraries(OpenVRPairOverlay PRIVATE
 	advapi32
 	${OPENVR_PAIR_OVERLAY_FEATURE_LIBS})
 
+# Dev-channel test harness (--test-harness). Linked into WKOpenVR.exe only when
+# the build is not flagged as a release build, so release binaries cannot
+# dispatch to or even reference the harness symbols.
+if(NOT WKOPENVR_RELEASE_BUILD)
+	add_subdirectory(testharness)
+	target_link_libraries(OpenVRPairOverlay PRIVATE wkopenvr_testharness)
+endif()
+
 file(READ "${CMAKE_SOURCE_DIR}/version.txt" OPENVR_PAIR_VERSION_RAW)
 string(STRIP "${OPENVR_PAIR_VERSION_RAW}" OPENVR_PAIR_VERSION_STAMP)
 
