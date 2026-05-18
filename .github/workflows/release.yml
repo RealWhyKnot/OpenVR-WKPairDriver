@@ -802,39 +802,66 @@ jobs:
             exit 0
           fi
 
-          changelog_b64=$(base64 -w 0 .changelog-stash/CHANGELOG.md)
-          wiki_b64=$(base64 -w 0 .changelog-stash/wiki/Changelog.md)
-          expected_oid=$(git rev-parse origin/main)
+          # Build the GraphQL payload in Python so neither bash nor jq
+          # ever sees the base64-encoded CHANGELOG bytes as argv. The
+          # earlier `jq -n --arg changelog "$changelog_b64" --arg wiki
+          # "$wiki_b64"` form hit /c/ProgramData/Chocolatey/bin/jq:
+          # Argument list too long on a v2026.5.17.0 attempt when
+          # CHANGELOG.md + wiki/Changelog.md exceeded Git Bash's Win32
+          # argv ceiling. Python reads each file, base64-encodes, dumps
+          # the JSON to a temp file, then `gh api graphql --input <file>`
+          # so the payload never travels through argv.
+          python3 - <<'PY' > "$RUNNER_TEMP/changelog-payload.json"
+          import base64, json, os, subprocess, sys
 
-          headline="docs(changelog): promote Unreleased -> ${TAG_NAME} [skip changelog]"
-          body="Promoted by .github/workflows/release.yml after publishing ${TAG_NAME}."
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag  = os.environ["TAG_NAME"]
+          expected_oid = subprocess.check_output(
+              ["git", "rev-parse", "origin/main"], text=True
+          ).strip()
 
-          payload=$(jq -n \
-            --arg repo "$GITHUB_REPOSITORY" \
-            --arg branch "main" \
-            --arg headline "$headline" \
-            --arg body "$body" \
-            --arg oid "$expected_oid" \
-            --arg changelog "$changelog_b64" \
-            --arg wiki "$wiki_b64" \
-            '{
-              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
-              variables: {
-                input: {
-                  branch: { repositoryNameWithOwner: $repo, branchName: $branch },
-                  message: { headline: $headline, body: $body },
-                  fileChanges: {
-                    additions: [
-                      { path: "CHANGELOG.md",      contents: $changelog },
-                      { path: "wiki/Changelog.md", contents: $wiki }
-                    ]
+          def b64(path):
+              with open(path, "rb") as f:
+                  return base64.b64encode(f.read()).decode("ascii")
+
+          changelog_b64 = b64(".changelog-stash/CHANGELOG.md")
+          wiki_b64      = b64(".changelog-stash/wiki/Changelog.md")
+          print(
+              f"payload sizes (base64 chars): changelog={len(changelog_b64)} wiki={len(wiki_b64)}",
+              file=sys.stderr,
+          )
+
+          payload = {
+              "query": (
+                  "mutation($input: CreateCommitOnBranchInput!) {"
+                  " createCommitOnBranch(input: $input)"
+                  " { commit { oid url } } }"
+              ),
+              "variables": {
+                  "input": {
+                      "branch": {
+                          "repositoryNameWithOwner": repo,
+                          "branchName": "main",
+                      },
+                      "message": {
+                          "headline": f"docs(changelog): promote Unreleased -> {tag} [skip changelog]",
+                          "body":     f"Promoted by .github/workflows/release.yml after publishing {tag}.",
+                      },
+                      "fileChanges": {
+                          "additions": [
+                              {"path": "CHANGELOG.md",      "contents": changelog_b64},
+                              {"path": "wiki/Changelog.md", "contents": wiki_b64},
+                          ],
+                      },
+                      "expectedHeadOid": expected_oid,
                   },
-                  expectedHeadOid: $oid
-                }
-              }
-            }')
+              },
+          }
+          json.dump(payload, sys.stdout)
+          PY
 
-          response=$(printf '%s' "$payload" | gh api graphql --input -)
+          response=$(gh api graphql --input "$RUNNER_TEMP/changelog-payload.json")
+          rm -f "$RUNNER_TEMP/changelog-payload.json"
           echo "$response" | jq .
 
           if echo "$response" | jq -e '.errors // empty' >/dev/null; then
