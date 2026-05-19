@@ -67,6 +67,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - diag(calibration): instrument restart-loop suspects (cf67f99)
 - diag(observability): cal heartbeat, ipc retry-status, inputhealth coalesce (64cf6d3)
 - diag(calibration): latency throttle + stuck-cal watchdog (ec6ceff)
+- diag(calibration): tracker pose-freshness + profile-save anomaly warn (f5b1423)
 
 ### Fixed
 - **smoothing:** Lock out per-tracker prediction on the calibration anchor (e87f318)
