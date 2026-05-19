@@ -40,6 +40,8 @@ The `release.yml` body for each tag is composed mechanically from the slice betw
 - **phantom:** Rigid IK fallback past dead-reckon window (Phase 1.5) (d0a3c62)
 - **phantom:** Add Phantom Trackers module for dropout bridging (7daa1de)
 - **release:** Per-module disable-in-release gate (edfca53)
+- **calibration:** Persistent Hide list, AUTO Lock hysteresis, locked-reconnect skip (a322a4a)
+- **protocol:** V23 updateQuash flag; quash translates pose instead of parking (5219b25)
 
 ### Changed
 - host(facetracking): extend shmem to v2 with head data (2813401)
