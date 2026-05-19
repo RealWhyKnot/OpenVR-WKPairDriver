@@ -241,8 +241,18 @@ void CCal_BasicInfo() {
 		for (int i = 0; i < 3; ++i) {
 			if (i > 0) ImGui::SameLine();
 			if (ImGui::RadioButton(lockLabels[i], CalCtx.lockRelativePositionMode == lockModes[i])) {
+				const auto prev = CalCtx.lockRelativePositionMode;
 				CalCtx.lockRelativePositionMode = lockModes[i];
 				SaveProfile(CalCtx);
+				// Diagnostic: trace user toggles of the Lock-mode tristate. The
+				// Basic tab is the more common toggle path; we trace both so a
+				// post-session log shows when the user attempted to change Lock
+				// and what the previous mode was.
+				char lmbuf[160];
+				snprintf(lmbuf, sizeof lmbuf,
+					"lock_mode_ui_write: site=basic prev=%d now=%d",
+					(int)prev, (int)CalCtx.lockRelativePositionMode);
+				Metrics::WriteLogAnnotation(lmbuf);
 			}
 		}
 		if (ImGui::IsItemHovered()) {

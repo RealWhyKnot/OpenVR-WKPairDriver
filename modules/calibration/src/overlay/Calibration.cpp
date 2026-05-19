@@ -306,10 +306,24 @@ bool CommitPendingAutoLockFlipIfStationary(CalibrationContext& ctx, double hmdSp
 
 void CalibrationContext::ResolveLockMode()
 {
+	const bool prev = lockRelativePosition;
 	switch (lockRelativePositionMode) {
 	case LockMode::OFF:  lockRelativePosition = false; break;
 	case LockMode::ON:   lockRelativePosition = true;  break;
 	case LockMode::AUTO: lockRelativePosition = autoLockEffectivelyLocked; break;
+	}
+	// Diagnostic: annotate every resolved-value change. The UI-side toggle of
+	// "Lock relative position" is invisible in post-session logs unless we
+	// trace the resolve step; without this a user-reported "I toggled Lock
+	// and nothing happened" cannot be distinguished from "the toggle did
+	// take effect but didn't help."
+	if (prev != lockRelativePosition) {
+		char buf[200];
+		snprintf(buf, sizeof buf,
+			"lockRelativePosition_change: prev=%d now=%d mode=%d autoLockEffectivelyLocked=%d",
+			(int)prev, (int)lockRelativePosition,
+			(int)lockRelativePositionMode, (int)autoLockEffectivelyLocked);
+		Metrics::WriteLogAnnotation(buf);
 	}
 }
 
@@ -586,6 +600,38 @@ namespace {
 
 		reference = ctx.devicePoses[ctx.referenceID];
 		target = ctx.devicePoses[ctx.targetID];
+
+		// Defensive: detect quash-pose bleed. The +10 km X/Z offset that
+		// HideList applies to hidden trackers happens in the driver AFTER
+		// the shmem write of the augmented pose. The cal math reads from
+		// shmem, so it should see PRE-quash positions. If a position
+		// magnitude exceeds 100 m, something is feeding the cal a quash-
+		// translated pose by mistake (or the driver itself is producing
+		// runaway values for a different reason). Log once per (which, kind)
+		// pair so a real bleed doesn't drown the log -- but log enough to
+		// see the pattern.
+		{
+			static std::set<std::pair<int,int>> s_seenAnomalies;
+			auto checkMag = [&](const vr::DriverPose_t& p, int whichKind, const char* label) {
+				const double mag2 = p.vecPosition[0]*p.vecPosition[0]
+					+ p.vecPosition[1]*p.vecPosition[1]
+					+ p.vecPosition[2]*p.vecPosition[2];
+				if (mag2 > 10000.0) { // > 100 m
+					auto key = std::make_pair(whichKind, (int)p.result);
+					if (s_seenAnomalies.insert(key).second) {
+						char abuf[280];
+						snprintf(abuf, sizeof abuf,
+							"[quash-bleed-suspect] %s pose magnitude unusually large:"
+							" pos=(%.1f,%.1f,%.1f) result=%d poseIsValid=%d",
+							label, p.vecPosition[0], p.vecPosition[1], p.vecPosition[2],
+							(int)p.result, (int)p.poseIsValid);
+						Metrics::WriteLogAnnotation(abuf);
+					}
+				}
+			};
+			checkMag(reference, 0, "reference");
+			checkMag(target, 1, "target");
+		}
 
 		// Validity gate. Previously this was `if (!poseIsValid && result != Running_OK)`,
 		// i.e. "fail only when BOTH signals say bad" -- permissive. The case the
@@ -2899,6 +2945,7 @@ void CalibrationTick(double time)
 		static int s_consecutiveBadTicks = 0;
 		static double s_lastErrorTs = 0.0;
 		static spacecal::geometry_shift::CusumState s_cusumState;
+		static double s_lastSpikeLogTime = -1e9;  // throttle per-tick spike-candidate logging to ~1/s
 		const auto& errSeries = Metrics::error_currentCal;
 		const int N = errSeries.size();
 		if (N >= 5 && calibration.isValid()) {
@@ -2914,8 +2961,11 @@ void CalibrationTick(double time)
 				std::sort(tail.begin(), tail.end());
 				double median = tail[tail.size() / 2];
 				double current = errSeries[N - 1].second;
+				const double ratio = (median > spacecal::geometry_shift::kMedianFloor)
+					? current / median : 0.0;
 
 				bool fire = false;
+				bool isSpike = false;
 				if (ctx.useCusumGeometryShift) {
 					// Page CUSUM: accumulates (current - baseline - drift) per
 					// tick, fires when the running sum crosses threshold. Median
@@ -2928,7 +2978,8 @@ void CalibrationTick(double time)
 					// so a toggle flip mid-session doesn't leave stale state.
 					s_consecutiveBadTicks = 0;
 				} else {
-					if (spacecal::geometry_shift::IsCurrentErrorSpike(current, median)) {
+					isSpike = spacecal::geometry_shift::IsCurrentErrorSpike(current, median);
+					if (isSpike) {
 						s_consecutiveBadTicks++;
 					} else {
 						s_consecutiveBadTicks = 0;
@@ -2940,7 +2991,68 @@ void CalibrationTick(double time)
 					s_cusumState.S = 0.0;
 				}
 
+				// Diagnostic: per-tick spike candidate trace. Throttled to ~1/s
+				// so a sustained spike storm produces a readable trail rather
+				// than a per-tick flood. Logs early-warning data (current vs
+				// median + cusum state + reanchor proximity) so the next
+				// session log can show what was building toward a fire that
+				// did or did not happen.
+				const bool spikeWorthLogging = isSpike || s_cusumState.S > 0.5;
+				if (spikeWorthLogging && (time - s_lastSpikeLogTime) >= 1.0) {
+					s_lastSpikeLogTime = time;
+					const bool reanchorFrozen =
+						spacecal::reanchor_chi::IsFrozen(g_reanchorChiState, time);
+					const double secSinceReanchor = (g_reanchorChiLastLogTime > -1e8)
+						? (time - g_reanchorChiLastLogTime) : -1.0;
+					char spikeBuf[320];
+					snprintf(spikeBuf, sizeof spikeBuf,
+						"[geometry-shift][spike-candidate] current_mm=%.3f median_mm=%.3f"
+						" ratio=%.2fx sustained=%d/%d cusum_S=%.3f cusum_h=%.3f mode=%s"
+						" reanchor_frozen=%d sec_since_reanchor=%.3f",
+						current, median, ratio,
+						s_consecutiveBadTicks, spacecal::geometry_shift::kMinSustainedSpikes,
+						s_cusumState.S, spacecal::geometry_shift::kCusumThreshold,
+						ctx.useCusumGeometryShift ? "cusum" : "legacy",
+						(int)reanchorFrozen, secSinceReanchor);
+					Metrics::WriteLogAnnotation(spikeBuf);
+				}
+
 				if (fire) {
+					// Diagnostic: fire annotation. The user-facing CalCtx.Log
+					// below goes to the UI message buffer, not the spacecal log.
+					// Without this annotation, every geometry-shift demote
+					// (which is the proximate cause of every
+					// continuous_standby_transition restart) is invisible to
+					// post-session triage. Dump the inputs that triggered the
+					// fire + a short tail of the error history so a reader can
+					// see the buildup, not just the conclusion.
+					std::string tailStr;
+					tailStr.reserve(160);
+					const int tailLen = std::min<int>(10, N);
+					for (int i = N - tailLen; i < N; ++i) {
+						char tbuf[24];
+						snprintf(tbuf, sizeof tbuf, "%.2f%s",
+							errSeries[i].second, (i + 1 < N) ? "," : "");
+						tailStr += tbuf;
+					}
+					const bool reanchorFrozen =
+						spacecal::reanchor_chi::IsFrozen(g_reanchorChiState, time);
+					const double secSinceReanchor = (g_reanchorChiLastLogTime > -1e8)
+						? (time - g_reanchorChiLastLogTime) : -1.0;
+					char fireBuf[480];
+					snprintf(fireBuf, sizeof fireBuf,
+						"[geometry-shift][fire] current_mm=%.3f median_mm=%.3f"
+						" ratio=%.2fx sustained=%d cusum_S=%.3f mode=%s"
+						" reanchor_frozen=%d sec_since_reanchor=%.3f"
+						" lockRelativePosition=%d lockMode=%d errTail=[%s]",
+						current, median, ratio,
+						s_consecutiveBadTicks, s_cusumState.S,
+						ctx.useCusumGeometryShift ? "cusum" : "legacy",
+						(int)reanchorFrozen, secSinceReanchor,
+						(int)ctx.lockRelativePosition, (int)ctx.lockRelativePositionMode,
+						tailStr.c_str());
+					Metrics::WriteLogAnnotation(fireBuf);
+
 					CalCtx.Log("Tracking geometry shifted -- restarting calibration\n");
 					calibration.Clear();
 					ctx.state = CalibrationState::ContinuousStandby;
