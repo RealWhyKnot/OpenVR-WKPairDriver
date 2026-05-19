@@ -45,6 +45,20 @@ constexpr double kLeaveRotRad  = 1.5 * EIGEN_PI / 180.0; // 1.5 deg
 // a paused user (looking around, holding still to read) does.
 constexpr double kStationaryHmdMps = 0.05;
 
+// When a chi-square reanchor fires, the underlying re-anchor briefly spikes
+// translation stddev past the leave threshold (kLeaveTranslM = 8 mm), which
+// alone would trip an unlock for ~1 tick before stddev settles back. The
+// detector's swing-back logic at UpdateAutoLockDetector drops the pending
+// flip if the verdict reverts inside this window -- but only if the commit
+// hasn't already fired. This gate holds the commit for kReanchorSuppressSeconds
+// after each reanchor, giving the swing-back path time to absorb the spike.
+//
+// 2.0 s comfortably covers the existing reanchor freeze window (~0.5 s) plus
+// the ~1-2 sample-history ticks needed for the autolock detector's variance
+// to re-converge. Tightening this risks re-opening the flap; loosening it
+// risks delaying a legitimate state change by a noticeable interval.
+constexpr double kReanchorSuppressSeconds = 2.0;
+
 // Returns the verdict the detector should produce given the current
 // (translStdDev, rotMaxAngle) and the previously committed lock state.
 // Single owner of the hysteresis decision; unit tests pin the contract.
@@ -67,6 +81,15 @@ inline bool VerdictWithHysteresis(double translStdDev,
 inline bool HmdIsStationary(double hmdSpeedMps)
 {
     return hmdSpeedMps < kStationaryHmdMps;
+}
+
+// Returns true while a pending AUTO Lock flip should be held off because a
+// chi-square reanchor recently fired. `now` is the current tick time in the
+// same units as `suppressUntil` (the deadline timestamp written when the
+// reanchor fired). A zero/unset suppressUntil never suppresses.
+inline bool ShouldSuppressForReanchor(double now, double suppressUntil)
+{
+    return now < suppressUntil;
 }
 
 } // namespace spacecal::autolock

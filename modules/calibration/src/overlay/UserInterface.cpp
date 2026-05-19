@@ -711,7 +711,7 @@ void BuildMenu(bool runningInOverlay)
 		if (ImGui::Button("Start Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
 		{
 			ImGui::OpenPopup("Calibration Progress");
-			StartCalibration();
+			StartCalibration("ui_start_button");
 		}
 		ImGui::EndDisabled();
 		if (!IsVRReady() && ImGui::IsItemHovered()) {
@@ -721,7 +721,7 @@ void BuildMenu(bool runningInOverlay)
 		ImGui::SameLine();
 		ImGui::BeginDisabled(!IsVRReady());
 		if (ImGui::Button("Continuous Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
-			StartContinuousCalibration();
+			StartContinuousCalibration("ui_continuous_button");
 		}
 		ImGui::EndDisabled();
 		if (!IsVRReady() && ImGui::IsItemHovered()) {
@@ -784,7 +784,7 @@ void BuildMenu(bool runningInOverlay)
 			ImGui::BeginDisabled(!IsVRReady());
 			if (ImGui::Button("Recalibrate")) {
 				ImGui::OpenPopup("Calibration Progress");
-				StartCalibration();
+				StartCalibration("ui_recalibrate_button");
 			}
 			ImGui::EndDisabled();
 			if (!IsVRReady() && ImGui::IsItemHovered()) {

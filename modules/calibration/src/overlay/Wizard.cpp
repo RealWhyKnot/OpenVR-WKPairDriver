@@ -16,8 +16,8 @@
 // creating circular header dependencies.
 extern "C++" const char* GetPrettyTrackingSystemName(const std::string& value);
 
-void StartCalibration();
-void StartContinuousCalibration();
+void StartCalibration(const char* reason);
+void StartContinuousCalibration(const char* reason);
 void EndContinuousCalibration();
 void SaveProfile(CalibrationContext& ctx);
 
@@ -282,7 +282,7 @@ void DrawPickTarget() {
 			CalCtx.targetStandby.serial = d.serial;
 			CalCtx.referenceID = hmd.id;
 			CalCtx.targetID = d.id;
-			StartContinuousCalibration();
+			StartContinuousCalibration("wizard_complete");
 		} else {
 			// Append a new entry. The continuous tick processes it in
 			// parallel with the primary.

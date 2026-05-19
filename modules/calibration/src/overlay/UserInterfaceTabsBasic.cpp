@@ -58,7 +58,7 @@ static bool DrawProfileMismatchBanner() {
 		// Same trigger BuildMenu uses for "Start Calibration" -- kicks the state
 		// machine into Begin via StartCalibration. The popup isn't relevant here
 		// since the user is already inside the continuous-cal window.
-		StartCalibration();
+		StartCalibration("ui_inprogress_recal");
 	}
 	ImGui::Separator();
 	return true;

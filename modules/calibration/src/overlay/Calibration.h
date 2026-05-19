@@ -383,6 +383,15 @@ struct CalibrationContext
 	bool autoLockHasPendingFlip = false;
 	bool autoLockPendingFlipTo = false;
 
+	// AUTO Lock post-reanchor suppression deadline (seconds, same clock as
+	// CalibrationTick's `time` parameter). Set when chi-square reanchor fires;
+	// while CalibrationTick's `time` is less than this, queued AUTO Lock flips
+	// are held off (the reanchor briefly spikes stddev past the leave
+	// threshold, which alone would trip an unlock for a few ticks before the
+	// swing-back path absorbs it). Zero means no active suppression. Like
+	// the pending-flip fields above this is reset on Clear().
+	double autoLockReanchorSuppressUntil = 0.0;
+
 	// Persistent per-serial hide list, applied independently of cal state.
 	// Keyed by Prop_SerialNumber_String value (never by openVRID -- IDs are
 	// reassigned across SteamVR restarts and device reconnects). When a
@@ -582,6 +591,7 @@ struct CalibrationContext
 		autoLockEffectivelyLocked = false;
 		autoLockHasPendingFlip = false;
 		autoLockPendingFlipTo = false;
+		autoLockReanchorSuppressUntil = 0.0;
 		// alwaysHideSerials is a user preference, NOT calibration data --
 		// intentionally NOT reset here. A profile-clear shouldn't un-hide
 		// trackers the user has explicitly marked as always-hidden.
@@ -690,15 +700,23 @@ extern CalibrationContext CalCtx;
 
 // Commits a queued AUTO-Lock-mode flip (held by UpdateAutoLockDetector to
 // hide visible jumps) when the HMD is nearly still. No-op when the queue is
-// empty or the user is currently moving. See AutoLockHysteresis.h for the
-// stationary-speed threshold; called once per CalibrationTick in
-// continuous-cal mode. Public so unit tests can drive it directly.
-bool CommitPendingAutoLockFlipIfStationary(CalibrationContext& ctx, double hmdSpeedMps);
+// empty, the user is currently moving, or a chi-square reanchor recently
+// fired (see AutoLockHysteresis.h::kReanchorSuppressSeconds). `now` is the
+// CalibrationTick time stamp, used by the post-reanchor suppression gate.
+// Called once per CalibrationTick in continuous-cal mode. Public so unit
+// tests can drive it directly.
+bool CommitPendingAutoLockFlipIfStationary(CalibrationContext& ctx, double hmdSpeedMps, double now);
 
 void InitCalibrator();
 void CalibrationTick(double time);
-void StartCalibration();
-void StartContinuousCalibration();
+
+// `reason` is a short tag (e.g. "ui_start_button", "continuous_standby",
+// "tracker_liveness_reconnect", "auto_recovery_snap") that lands in the
+// StartCalibration_state_reset log annotation. Lets a post-session grep
+// distinguish the few documented entry points; a default of "unknown"
+// catches any caller that hasn't been updated yet so the build stays green.
+void StartCalibration(const char* reason = "unknown");
+void StartContinuousCalibration(const char* reason = "unknown");
 void EndContinuousCalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();

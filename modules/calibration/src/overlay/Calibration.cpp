@@ -48,7 +48,8 @@ CalibrationContext CalCtx;
 // near the bottom of the file but called from TickHmdRelocalizationDetector
 // (Quest re-localization auto-recovery) and CalibrationTick (runtime wedge
 // detector), both of which sit above the definition.
-static void RecoverFromWedgedCalibration(const char* userFacingMessage);
+static void RecoverFromWedgedCalibration(const char* userFacingMessage,
+                                         const char* recoverReason = "auto_recovery_snap");
 
 // Runtime wedge detector state. Persists across CalibrationTick calls;
 // updated by spacecal::wedge::ShouldFireRuntimeWedgeRecovery (header-only,
@@ -281,10 +282,15 @@ void CalibrationContext::UpdateAutoLockDetector(
 // Commit a queued AUTO Lock flip when the user is still enough that the
 // resulting calibration jump won't be jarring. Returns true if a commit
 // happened this call (caller may want to log / kick the calibration math).
-bool CommitPendingAutoLockFlipIfStationary(CalibrationContext& ctx, double hmdSpeedMps)
+//
+// `now` is the CalibrationTick time stamp. Used to gate commits during the
+// post-reanchor suppression window -- see kReanchorSuppressSeconds for why
+// reanchor noise needs to be held off the lock-state decision.
+bool CommitPendingAutoLockFlipIfStationary(CalibrationContext& ctx, double hmdSpeedMps, double now)
 {
 	if (!ctx.autoLockHasPendingFlip) return false;
 	if (!spacecal::autolock::HmdIsStationary(hmdSpeedMps)) return false;
+	if (spacecal::autolock::ShouldSuppressForReanchor(now, ctx.autoLockReanchorSuppressUntil)) return false;
 
 	const bool prev = ctx.autoLockEffectivelyLocked;
 	ctx.autoLockEffectivelyLocked = ctx.autoLockPendingFlipTo;
@@ -1914,7 +1920,7 @@ namespace {
 			snprintf(uimsg, sizeof uimsg,
 				"Quest re-localized (%.0f cm jump). Recalibrating...\n",
 				hmdDelta * 100.0);
-			RecoverFromWedgedCalibration(uimsg);
+			RecoverFromWedgedCalibration(uimsg, "quest_relocalization_recovery");
 
 			s.lastAutoRecoverTime = now;
 		}
@@ -2179,14 +2185,25 @@ static bool TickReanchorChiSquare(double now) {
 
 	const bool fired = spacecal::reanchor_chi::TickAndCheckCandidate(
 		g_reanchorChiState, worldT, worldR, now, dt);
+	if (fired) {
+		// The reanchor itself briefly spikes the relative-pose stddev past the
+		// AUTO Lock leave threshold; hold off any queued lock-flip commits for
+		// kReanchorSuppressSeconds so the detector's swing-back path can drop
+		// the pending flip rather than committing it mid-spike. Update every
+		// fire so back-to-back reanchors extend the deadline rather than
+		// stopping at the first one.
+		CalCtx.autoLockReanchorSuppressUntil =
+			now + spacecal::autolock::kReanchorSuppressSeconds;
+	}
 	if (fired && (now - g_reanchorChiLastLogTime) >= 1.0) {
 		g_reanchorChiLastLogTime = now;
-		char buf[200];
+		char buf[240];
 		snprintf(buf, sizeof buf,
-			"[drift][reanchor-chi-square] fire chi_sq=%.3f threshold=%.3f freeze_until=%.3f",
+			"[drift][reanchor-chi-square] fire chi_sq=%.3f threshold=%.3f freeze_until=%.3f autolock_suppress_until=%.3f",
 			g_reanchorChiState.lastChiSquared,
 			spacecal::reanchor_chi::kChiSquare6DoF_p1e4,
-			g_reanchorChiState.freezeUntil);
+			g_reanchorChiState.freezeUntil,
+			CalCtx.autoLockReanchorSuppressUntil);
 		Metrics::WriteLogAnnotation(buf);
 	}
 	return spacecal::reanchor_chi::IsFrozen(g_reanchorChiState, now);
@@ -2707,7 +2724,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
-void StartCalibration() {
+void StartCalibration(const char* reason) {
 	CalCtx.hasAppliedCalibrationResult = false;
 	AssignTargets();
 	CalCtx.state = CalibrationState::Begin;
@@ -2725,14 +2742,17 @@ void StartCalibration() {
 	// drive the translation solver to a NaN result.
 	CalCtx.pairedMotionPrevRefPos = Eigen::Vector3d::Zero();
 	CalCtx.pairedMotionPrevTgtPos = Eigen::Vector3d::Zero();
-	Metrics::WriteLogAnnotation(
-		"StartCalibration_state_reset: pairedMotionPrevRefPos pairedMotionPrevTgtPos");
+	char resetBuf[200];
+	snprintf(resetBuf, sizeof resetBuf,
+		"StartCalibration_state_reset: reason=%s pairedMotionPrevRefPos pairedMotionPrevTgtPos",
+		(reason && reason[0]) ? reason : "unknown");
+	Metrics::WriteLogAnnotation(resetBuf);
 }
 
-void StartContinuousCalibration() {
+void StartContinuousCalibration(const char* reason) {
 	CalCtx.hasAppliedCalibrationResult = false;
 	AssignTargets();
-	StartCalibration();
+	StartCalibration(reason);
 	CalCtx.state = CalibrationState::Continuous;
 	calibration.setRelativeTransformation(CalCtx.refToTargetPose, CalCtx.relativePosCalibrated);
 	calibration.lockRelativePosition = CalCtx.lockRelativePosition;
@@ -2750,7 +2770,11 @@ void StartContinuousCalibration() {
 	spacecal::liveness::Reset(g_tgtLiveness);
 	g_refWasOffline = false;
 	g_tgtWasOffline = false;
-	Metrics::WriteLogAnnotation("StartContinuousCalibration");
+	char startBuf[200];
+	snprintf(startBuf, sizeof startBuf,
+		"StartContinuousCalibration: reason=%s",
+		(reason && reason[0]) ? reason : "unknown");
+	Metrics::WriteLogAnnotation(startBuf);
 }
 
 void EndContinuousCalibration() {
@@ -3091,7 +3115,7 @@ void CalibrationTick(double time)
 
 	if (ctx.state == CalibrationState::ContinuousStandby) {
 		if (AssignTargets()) {
-			StartContinuousCalibration();
+			StartContinuousCalibration("continuous_standby_transition");
 		}
 		else {
 			ctx.wantedUpdateInterval = 0.5;
@@ -3219,8 +3243,9 @@ void CalibrationTick(double time)
 		// Commit any queued AUTO-Lock flip if the user is paused enough to
 		// hide the resulting calibration jump. Re-resolve lockRelativePosition
 		// afterward so the same tick's downstream `calibration.lockRelativePosition`
-		// write below reflects the new state.
-		if (CommitPendingAutoLockFlipIfStationary(ctx, hmdSpeedMps)) {
+		// write below reflects the new state. `time` participates in the
+		// post-reanchor suppression gate inside the commit helper.
+		if (CommitPendingAutoLockFlipIfStationary(ctx, hmdSpeedMps, time)) {
 			ctx.ResolveLockMode();
 		}
 
@@ -3321,7 +3346,7 @@ void CalibrationTick(double time)
 				// StartContinuousCalibration internally Resets both liveness
 				// states + the edge-tracking flags, so the next tick starts
 				// from a clean baseline.
-				StartContinuousCalibration();
+				StartContinuousCalibration("tracker_liveness_reconnect");
 				return;
 			}
 		}
@@ -3819,7 +3844,8 @@ void DismissAutoRecoveryBanner() {
 // per the 2026-05-04 "user notices nothing" directive). The metrics
 // annotation is the caller's responsibility -- this helper deliberately
 // doesn't write one so each caller's grep key can differ.
-static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
+static void RecoverFromWedgedCalibration(const char* userFacingMessage,
+                                         const char* recoverReason) {
 	// Capture the prior cal state BEFORE we discard it, so the log line
 	// records what we just threw away. Anyone reading the session log
 	// later can reconstruct "the cal we cleared was X cm with Y mm RMS"
@@ -3855,7 +3881,7 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	// defeats the point of recovery (we WANT a discontinuity here).
 	g_snapNextProfileApply = true;
 
-	StartContinuousCalibration();
+	StartContinuousCalibration(recoverReason);
 
 	if (userFacingMessage != nullptr) {
 		CalCtx.Log(userFacingMessage);

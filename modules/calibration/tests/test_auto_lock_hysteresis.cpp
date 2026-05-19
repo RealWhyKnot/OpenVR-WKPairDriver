@@ -142,3 +142,42 @@ TEST(AutoLockHysteresisTest, StationaryThresholdIsStrictLessThan)
 {
     EXPECT_FALSE(al::HmdIsStationary(al::kStationaryHmdMps));
 }
+
+// --- Reanchor suppression --------------------------------------------------
+
+// Default unset deadline (0.0) never suppresses, regardless of current time.
+// Important so a fresh session before any reanchor has fired doesn't
+// accidentally hold every queued flip.
+TEST(AutoLockHysteresisTest, ReanchorSuppressionUnsetByDefault)
+{
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/0.0, /*suppressUntil=*/0.0));
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/100.0, /*suppressUntil=*/0.0));
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/1e9, /*suppressUntil=*/0.0));
+}
+
+// While `now` sits inside the window (now < suppressUntil), the gate holds.
+// The reanchor that armed the window was emitted at suppressUntil - 2.0 s
+// per kReanchorSuppressSeconds; we exercise both fresh-after-reanchor and
+// nearly-expired points inside the band.
+TEST(AutoLockHysteresisTest, ReanchorSuppressionHoldsInsideWindow)
+{
+    const double armedAt = 1000.0;
+    const double until   = armedAt + al::kReanchorSuppressSeconds;
+
+    EXPECT_TRUE(al::ShouldSuppressForReanchor(/*now=*/armedAt, until));
+    EXPECT_TRUE(al::ShouldSuppressForReanchor(/*now=*/armedAt + 0.5, until));
+    EXPECT_TRUE(al::ShouldSuppressForReanchor(/*now=*/until - 1e-6, until));
+}
+
+// Once `now >= suppressUntil`, the gate releases. Boundary uses `<` so the
+// exact-equal sample is the first allowed tick; the next tick onward also
+// passes. A legitimate flip queued during the window must be commit-able
+// the moment the window expires.
+TEST(AutoLockHysteresisTest, ReanchorSuppressionReleasesAtAndAfterDeadline)
+{
+    const double until = 1000.0;
+
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/until, until));
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/until + 1e-6, until));
+    EXPECT_FALSE(al::ShouldSuppressForReanchor(/*now=*/until + 10.0, until));
+}
