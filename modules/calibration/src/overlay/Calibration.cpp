@@ -3054,6 +3054,36 @@ void CalibrationTick(double time)
 		}
 	}
 
+	// Stuck-cal watchdog. If we've been in Continuous state for >60 s but
+	// error_currentCal has not received a new sample in the last 30 s, the
+	// cal solver is not actually running -- ComputeIncremental isn't being
+	// called, or is rejecting every input, or the time series has otherwise
+	// stopped advancing. Edge-triggered, one log per detection, re-armed
+	// when error_currentCal advances again.
+	if (ctx.state == CalibrationState::Continuous) {
+		static double s_lastCalActiveTs = 0.0;
+		static double s_lastStuckLogTime = -1e9;
+		const double errLastTs = Metrics::error_currentCal.lastTs();
+		if (errLastTs > s_lastCalActiveTs) {
+			s_lastCalActiveTs = errLastTs;
+		}
+		const bool stuck = (Metrics::error_currentCal.size() > 0
+			&& time - Metrics::CurrentTime > -1e-6  // safety: clocks aligned
+			&& Metrics::CurrentTime - s_lastCalActiveTs >= 30.0);
+		if (stuck && (time - s_lastStuckLogTime) >= 30.0) {
+			s_lastStuckLogTime = time;
+			char stuckBuf[280];
+			snprintf(stuckBuf, sizeof stuckBuf,
+				"[cal-stuck] no_compute_for_sec=%.2f state=%d lockRel=%d"
+				" err_samples=%d refID=%d targetID=%d",
+				Metrics::CurrentTime - s_lastCalActiveTs,
+				(int)ctx.state, (int)ctx.lockRelativePosition,
+				Metrics::error_currentCal.size(),
+				ctx.referenceID, ctx.targetID);
+			Metrics::WriteLogAnnotation(stuckBuf);
+		}
+	}
+
 	// Periodic cal heartbeat. Throttled to once per 10 s while in Continuous
 	// or ContinuousStandby. Emits a one-line "you are here" snapshot so a
 	// post-session reader can scrub the log without grepping multiple event
@@ -3443,16 +3473,29 @@ void CalibrationTick(double time)
 					// `intervals` is bounded by buffer size, producing a
 					// deflated sample rate and inflating lagMs. The 200 ms
 					// clamp above bounds this, but the EMA can still drift
-					// for a few cycles. Log every successful update with
-					// dur and sampleRateHz so post-stall anomalies show up
-					// in the data. Throttled by the existing 1 s gate at
-					// line 2167 (timeLastLatencyEstimate).
-					char latbuf[224];
-					snprintf(latbuf, sizeof latbuf,
-						"latency_ema_update: lagMs=%.2f sampleRateHz=%.2f intervals=%zu dur=%.2fs prev=%.2f new=%.2f",
-						lagMs, sampleRateHz, intervals, dur,
-						prevEma, ctx.estimatedLatencyOffsetMs);
-					Metrics::WriteLogAnnotation(latbuf);
+					// for a few cycles.
+					//
+					// Log policy: emit every time when the EMA moves more than
+					// 0.5 ms vs the last logged value, OR when it's been more
+					// than 30 s since the last log (heartbeat). Otherwise the
+					// loop produces ~290 lines/session of essentially-identical
+					// rows. Anomalies (negative EMA, rate dropout) are logged
+					// separately below regardless of throttle.
+					static double s_lastLoggedEma = -1e9;
+					static double s_lastLatencyLogTime = -1e9;
+					const bool changed = std::fabs(ctx.estimatedLatencyOffsetMs - s_lastLoggedEma) > 0.5;
+					const bool heartbeat = (time - s_lastLatencyLogTime) >= 30.0;
+					if (changed || heartbeat || s_lastLoggedEma == -1e9) {
+						s_lastLoggedEma = ctx.estimatedLatencyOffsetMs;
+						s_lastLatencyLogTime = time;
+						char latbuf[280];
+						snprintf(latbuf, sizeof latbuf,
+							"latency_ema_update: lagMs=%.2f sampleRateHz=%.2f intervals=%zu dur=%.2fs prev=%.2f new=%.2f reason=%s",
+							lagMs, sampleRateHz, intervals, dur,
+							prevEma, ctx.estimatedLatencyOffsetMs,
+							changed ? "ema_changed" : "heartbeat");
+						Metrics::WriteLogAnnotation(latbuf);
+					}
 
 					// Latency anomaly: physically lagMs cannot be negative
 					// (samples can't arrive before their reference timestamp).
