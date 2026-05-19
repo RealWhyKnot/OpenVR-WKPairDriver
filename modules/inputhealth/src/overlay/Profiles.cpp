@@ -16,11 +16,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -224,6 +227,36 @@ bool ProfileStore::Save(const DeviceProfile &profile)
 	std::wstring dir = ProfilesDir();
 	if (dir.empty()) return false;
 
+	// Coalesce by content hash. Save is invoked on every input-state delta
+	// per device (~8 saves/sec in observed bursts, ~1100 saves/session) and
+	// the vast majority write byte-identical content. Compute an FNV-1a-64
+	// hash of the JSON-encoded profile and skip the entire write path if
+	// it matches the previous successful save for this device. Keeps a
+	// throttled summary log so the suppression rate is auditable.
+	std::string preBody = Encode(profile);
+	uint64_t hash = 0xcbf29ce484222325ULL;
+	for (unsigned char c : preBody) {
+		hash ^= c;
+		hash *= 0x100000001b3ULL;
+	}
+	static std::unordered_map<uint64_t, uint64_t> s_lastSavedHashByDevice;
+	static std::unordered_map<uint64_t, int> s_skipCountByDevice;
+	static std::chrono::steady_clock::time_point s_lastSkipLog{};
+	auto it = s_lastSavedHashByDevice.find(profile.serial_hash);
+	if (it != s_lastSavedHashByDevice.end() && it->second == hash) {
+		++s_skipCountByDevice[profile.serial_hash];
+		const auto nowTp = std::chrono::steady_clock::now();
+		if (nowTp - s_lastSkipLog >= std::chrono::seconds(30)) {
+			s_lastSkipLog = nowTp;
+			int totalSkipped = 0;
+			for (const auto &kv : s_skipCountByDevice) totalSkipped += kv.second;
+			LOG("[profiles] checkpoint coalesced: skipped=%d in last ~30s",
+				totalSkipped);
+			s_skipCountByDevice.clear();
+		}
+		return true;
+	}
+
 	std::wstring path    = dir + L"\\" + openvr_pair::common::Utf8ToWide(FilenameForHash(profile.serial_hash));
 	std::wstring tmpPath = path + L".tmp";
 
@@ -244,7 +277,7 @@ bool ProfileStore::Save(const DeviceProfile &profile)
 		return false;
 	}
 
-	std::string body = Encode(profile);
+	const std::string& body = preBody;
 	DWORD written = 0;
 	BOOL ok = WriteFile(hFile, body.data(), static_cast<DWORD>(body.size()), &written, nullptr);
 	if (ok) ok = FlushFileBuffers(hFile);
@@ -266,8 +299,10 @@ bool ProfileStore::Save(const DeviceProfile &profile)
 	}
 
 	profiles_[profile.serial_hash] = profile;
-	LOG("[profiles] saved profile checkpoint: serial_hash=0x%016llx paths=%zu",
-		(unsigned long long)profile.serial_hash, profile.learned_paths.size());
+	s_lastSavedHashByDevice[profile.serial_hash] = hash;
+	LOG("[profiles] saved profile checkpoint: serial_hash=0x%016llx paths=%zu hash=0x%016llx",
+		(unsigned long long)profile.serial_hash, profile.learned_paths.size(),
+		(unsigned long long)hash);
 	return true;
 }
 

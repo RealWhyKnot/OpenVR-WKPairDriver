@@ -324,6 +324,15 @@ void FacetrackingPlugin::ReconcileEnabledModulesWithInstalled(const std::string 
 
 void FacetrackingPlugin::MaintainDriverConnection()
 {
+    // Track consecutive heartbeat failures and connect attempts so chronic
+    // disconnects produce a periodic `[ipc][retry-status]` summary rather
+    // than per-tick failure spam, AND so a successful reconnection emits a
+    // matching `[ipc][retry-status] recovered` line indicating how long the
+    // connection was down. Cleared on successful handshake.
+    static int s_consecutiveFailures = 0;
+    static std::chrono::steady_clock::time_point s_lastRetryStatusLog{};
+    static std::chrono::steady_clock::time_point s_firstFailureTp{};
+
     try {
         if (!ipc_.IsConnected()) {
             ipc_.Connect();
@@ -353,9 +362,35 @@ void FacetrackingPlugin::MaintainDriverConnection()
             last_error_.find("Driver connection:") == 0) {
             last_error_.clear();
         }
+        // Recovery edge: emit a recovered annotation if we just came off a
+        // failure streak. Captures the down-duration so a triage reader can
+        // see how long the driver-side was unreachable.
+        if (s_consecutiveFailures > 0) {
+            const auto downSec = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - s_firstFailureTp).count();
+            FT_LOG_OVL("[ipc][retry-status] recovered after %d failed attempts, down ~%.1fs",
+                s_consecutiveFailures, downSec);
+            s_consecutiveFailures = 0;
+        }
     } catch (const std::exception &e) {
         last_error_ = std::string("Driver connection: ") + e.what();
-        FT_LOG_OVL("[ipc] heartbeat failed: %s", e.what());
+        if (s_consecutiveFailures == 0) {
+            s_firstFailureTp = std::chrono::steady_clock::now();
+        }
+        ++s_consecutiveFailures;
+        // First failure logs verbatim; subsequent failures throttle to a
+        // single line per 10 s containing attempt count + elapsed downtime.
+        const auto nowTp = std::chrono::steady_clock::now();
+        if (s_consecutiveFailures == 1) {
+            FT_LOG_OVL("[ipc] heartbeat failed: %s", e.what());
+            s_lastRetryStatusLog = nowTp;
+        } else if (nowTp - s_lastRetryStatusLog >= std::chrono::seconds(10)) {
+            const auto downSec = std::chrono::duration<double>(
+                nowTp - s_firstFailureTp).count();
+            FT_LOG_OVL("[ipc][retry-status] %d consecutive failures (down ~%.1fs): %s",
+                s_consecutiveFailures, downSec, e.what());
+            s_lastRetryStatusLog = nowTp;
+        }
         ipc_.Close();
     }
 }

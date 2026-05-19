@@ -3054,6 +3054,41 @@ void CalibrationTick(double time)
 		}
 	}
 
+	// Periodic cal heartbeat. Throttled to once per 10 s while in Continuous
+	// or ContinuousStandby. Emits a one-line "you are here" snapshot so a
+	// post-session reader can scrub the log without grepping multiple event
+	// types just to learn the cal's current state. Fields chosen to maximize
+	// signal-per-character: state, lock resolution (mode + resolved + detector
+	// internal), recent error level, sample-buffer size, time since last
+	// reset / reanchor.
+	if (ctx.state == CalibrationState::Continuous
+		|| ctx.state == CalibrationState::ContinuousStandby)
+	{
+		static double s_lastHeartbeatTime = -1e9;
+		if ((time - s_lastHeartbeatTime) >= 10.0) {
+			s_lastHeartbeatTime = time;
+			const auto& errSeries = Metrics::error_currentCal;
+			const double errLast = errSeries.size() > 0 ? errSeries.last() : 0.0;
+			const double secSinceReanchor = (g_reanchorChiLastLogTime > -1e8)
+				? (time - g_reanchorChiLastLogTime) : -1.0;
+			char hbBuf[400];
+			snprintf(hbBuf, sizeof hbBuf,
+				"[cal-heartbeat] state=%d lockMode=%d lockRel=%d autoLockEff=%d"
+				" autoLockHistory=%zu/%zu err_last_mm=%.2f err_samples=%d"
+				" sec_since_reanchor=%.2f autolock_suppress_until=%.3f"
+				" reloc_cooldown_until=%.3f grace_until=%.3f"
+				" relPosCal=%d hmdStalls=%d",
+				(int)ctx.state, (int)ctx.lockRelativePositionMode,
+				(int)ctx.lockRelativePosition, (int)ctx.autoLockEffectivelyLocked,
+				ctx.autoLockHistory.size(), spacecal::autolock::kSamplesNeeded,
+				errLast, errSeries.size(),
+				secSinceReanchor, ctx.autoLockReanchorSuppressUntil,
+				ctx.relocalizationCooldownUntil, ctx.geometryShiftGraceUntil,
+				(int)ctx.relativePosCalibrated, ctx.consecutiveHmdStalls);
+			Metrics::WriteLogAnnotation(hbBuf);
+		}
+	}
+
 	// One-shot session-start config dump. Fires on the first non-skipped
 	// CalibrationTick after the profile has been loaded, so the annotation
 	// reflects the user's actual saved settings. Captures every experimental
