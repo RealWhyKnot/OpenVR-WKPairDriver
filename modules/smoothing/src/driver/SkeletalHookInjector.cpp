@@ -44,6 +44,24 @@ struct HandState
     // before the slerp loop resumes its normal blend.
     bool                  reseed_pending[5] = {};
     vr::VRBoneTransform_t previous[31] = {};
+
+    // Steady-state motion diagnostic. Track worst per-bone output delta across
+    // the 30 s stats window so the next jitter report has a signature in the
+    // log without needing a fresh repro. Captures continuous artefacts (stream
+    // interleave, slerp amplifying upstream noise, stale state.previous causing
+    // repeated snap-blend) that the enable-transition diagnostic doesn't see,
+    // because that one stops 30 frames after the false->true toggle and the
+    // user's jitter typically shows up much later in a session.
+    //
+    // posDelta is the magnitude of position change between the freshly slerped
+    // output and the prior frame's output. quatDot is the absolute dot product
+    // of the same two orientations (1 = identical, <0.95 = >18 deg single-frame
+    // rotation which finger bones can't physically produce). Reset by
+    // MaybeLogStats at each stats line emission.
+    float    windowMaxPosDelta = 0.0f;
+    int      windowMaxPosDeltaBone = -1;
+    float    windowMinQuatDot  = 1.0f;
+    int      windowMinQuatDotBone = -1;
 };
 static HandState g_handState[2];
 
@@ -174,6 +192,37 @@ static void MaybeLogStats(const char *callerTag)
         (unsigned long long)l_total, (unsigned long long)l_smooth, (unsigned long long)l_pass,
         (unsigned long long)r_total, (unsigned long long)r_smooth, (unsigned long long)r_pass,
         (unsigned long long)unknown, (unsigned long long)invalid);
+
+    // Steady-state motion diagnostic. Worst per-bone output deltas over the
+    // same window. Healthy slerp running on a still hand: pos delta near zero,
+    // quat dot near 1. Interleaved streams or stale state.previous: pos delta
+    // jumps (centimetres per frame) and quat dot drops (single-frame rotations
+    // tens of degrees). Zero/identity values mean smoothing didn't run on any
+    // bone in the window (smoothness=0 or finger mask all clear). Reset under
+    // g_handStateMutex so the next window starts fresh.
+    float l_posDelta, r_posDelta, l_quatDot, r_quatDot;
+    int   l_posBone,  r_posBone,  l_quatBone, r_quatBone;
+    {
+        std::lock_guard<std::mutex> lk(g_handStateMutex);
+        l_posDelta = g_handState[0].windowMaxPosDelta;
+        l_posBone  = g_handState[0].windowMaxPosDeltaBone;
+        l_quatDot  = g_handState[0].windowMinQuatDot;
+        l_quatBone = g_handState[0].windowMinQuatDotBone;
+        r_posDelta = g_handState[1].windowMaxPosDelta;
+        r_posBone  = g_handState[1].windowMaxPosDeltaBone;
+        r_quatDot  = g_handState[1].windowMinQuatDot;
+        r_quatBone = g_handState[1].windowMinQuatDotBone;
+        for (int h = 0; h < 2; ++h) {
+            g_handState[h].windowMaxPosDelta     = 0.0f;
+            g_handState[h].windowMaxPosDeltaBone = -1;
+            g_handState[h].windowMinQuatDot      = 1.0f;
+            g_handState[h].windowMinQuatDotBone  = -1;
+        }
+    }
+    LOG("[skeletal] motion(%s, %.1fs window) L:maxPosDelta=%.4fm(bone=%d) minQuatDot=%.4f(bone=%d)  R:maxPosDelta=%.4fm(bone=%d) minQuatDot=%.4f(bone=%d)",
+        callerTag, elapsedSec,
+        l_posDelta, l_posBone, l_quatDot, l_quatBone,
+        r_posDelta, r_posBone, r_quatDot, r_quatBone);
 }
 
 // Forward-declare for use in MaybeLogDeepState below -- defined later in this
@@ -407,6 +456,35 @@ static vr::EVRInputError DetourPublicCreateSkeletonComponent(
             // Lock order: handedness before state.
             std::unique_lock<std::shared_mutex> hlk(g_handednessMutex);
             std::lock_guard<std::mutex>         slk(g_handStateMutex);
+
+            // Evict any prior handles already mapped to this hand. The
+            // lighthouse driver can register a second skeletal source
+            // mid-session for a hand whose path was already mapped --
+            // observed scenarios: controller reconnect, hot-plugged glove
+            // or finger-tracking accessory coming online after the
+            // original controller, internal driver-side input-source
+            // reset. Without eviction both handles stay in the map, both
+            // pass the UpdateSkeleton lookup, and the two bone streams
+            // interleave through one g_handState[handedness] EMA filter:
+            // the slerp blends frames from stream A against the prior
+            // output from stream B, the smoothed output oscillates, and
+            // the user sees finger jitter that disappears with
+            // smoothness=0 (passthrough does not consult state.previous,
+            // so there's no interleave to amplify).
+            size_t evicted = 0;
+            for (auto it = g_handleToHandedness.begin(); it != g_handleToHandedness.end(); ) {
+                if (it->second == handedness && it->first != *pHandle) {
+                    LOG("[skeletal] CreateSkeleton EVICTED stale handle=%llu (%s hand) -- superseded by handle=%llu",
+                        (unsigned long long)it->first,
+                        handedness == 0 ? "left" : "right",
+                        (unsigned long long)*pHandle);
+                    it = g_handleToHandedness.erase(it);
+                    ++evicted;
+                } else {
+                    ++it;
+                }
+            }
+
             g_handleToHandedness[*pHandle] = handedness;
             // A re-create for the same hand needs to re-seed from incoming.
             // Mark uninitialised so the first UpdateSkeleton after this snaps
@@ -415,11 +493,12 @@ static vr::EVRInputError DetourPublicCreateSkeletonComponent(
             // Reset the verbose-call counter for this hand so the user sees
             // detailed dumps after a re-create (driver reload, hand reconnect).
             g_verboseCallsRemaining[handedness].store(kVerboseFirstCalls);
-            LOG("[skeletal] CreateSkeleton MAPPED handle=%llu -> %s (path=%s name=%s map_size_now=%zu)",
+            LOG("[skeletal] CreateSkeleton MAPPED handle=%llu -> %s (path=%s name=%s evicted=%zu map_size_now=%zu)",
                 (unsigned long long)*pHandle,
                 handedness == 0 ? "left" : "right",
                 pchSkeletonPath,
                 pchName ? pchName : "(null)",
+                evicted,
                 g_handleToHandedness.size());
         } else {
             // Path didn't match left/right -- log so we can see what other
@@ -644,6 +723,30 @@ static vr::EVRInputError DetourPublicUpdateSkeletonComponent(
                 out.position.v[2] = Lerpf(prev.position.v[2], in.position.v[2], alpha);
                 out.position.v[3] = in.position.v[3];
                 out.orientation   = SlerpQuat(prev.orientation, in.orientation, alpha);
+
+                // Steady-state delta tracking: compute before we overwrite
+                // state.previous[i] with `out` below, so `prev` is still the
+                // last frame's output. Posdelta in metres, quatdot is |dot|.
+                // Already inside g_handStateMutex so the running max is safe
+                // to update with plain stores.
+                const float dx = out.position.v[0] - prev.position.v[0];
+                const float dy = out.position.v[1] - prev.position.v[1];
+                const float dz = out.position.v[2] - prev.position.v[2];
+                const float posDelta = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (posDelta > state.windowMaxPosDelta) {
+                    state.windowMaxPosDelta     = posDelta;
+                    state.windowMaxPosDeltaBone = (int)i;
+                }
+                const float qd = out.orientation.w * prev.orientation.w
+                               + out.orientation.x * prev.orientation.x
+                               + out.orientation.y * prev.orientation.y
+                               + out.orientation.z * prev.orientation.z;
+                const float absQd = qd < 0.0f ? -qd : qd;
+                if (absQd < state.windowMinQuatDot) {
+                    state.windowMinQuatDot     = absQd;
+                    state.windowMinQuatDotBone = (int)i;
+                }
+
                 smoothed[i]       = out;
                 state.previous[i] = out;
             }
@@ -732,6 +835,10 @@ void Init(ServerTrackedDeviceProvider *driver)
             g_handState[h].initialized = false;
             std::memset(g_handState[h].previous, 0, sizeof(g_handState[h].previous));
             std::memset(g_handState[h].reseed_pending, 0, sizeof(g_handState[h].reseed_pending));
+            g_handState[h].windowMaxPosDelta     = 0.0f;
+            g_handState[h].windowMaxPosDeltaBone = -1;
+            g_handState[h].windowMinQuatDot      = 1.0f;
+            g_handState[h].windowMinQuatDotBone  = -1;
             g_postEnableSnap[h].valid = false;
             g_postEnableFramesLeft[h].store(0, std::memory_order_relaxed);
             g_lastAnySmoothing[h].store(false, std::memory_order_relaxed);
