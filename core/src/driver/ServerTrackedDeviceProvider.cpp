@@ -606,7 +606,12 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	if (newTransform.updateScale)
 		tf.scale = newTransform.scale;
 
-	tf.quash = newTransform.quash;
+	// v23 (2026-05-19): only mutate stored hide when the caller explicitly
+	// signals intent. Prior unconditional assignment let any partial-init
+	// payload (e.g. ResetAndDisableOffsets) silently wipe a user-marked
+	// always-hidden tracker.
+	if (newTransform.updateQuash)
+		tf.quash = newTransform.quash;
 
 	// On enable transition, the slot's `transform` may be stale from a prior session
 	// or never initialized. Snap to the target so we don't ramp in from a junk state.
@@ -859,9 +864,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						snprintf(serial, sizeof serial, "%s", s.c_str());
 				}
 			}
-			LOG("[calibration] hide-tracker active for %s; pose parked at y=%g (Calibrating_OutOfRange)",
+			LOG("[calibration] hide-tracker active for %s; pose offset by (%.0f,%.0f,%.0f) m -- model lives outside play space",
 				serial[0] ? serial : "(unknown)",
-				openvr_pair::common::quash::kQuashParkY);
+				openvr_pair::common::quash::kQuashOffsetX,
+				openvr_pair::common::quash::kQuashOffsetY,
+				openvr_pair::common::quash::kQuashOffsetZ);
 			lock.lock();
 		}
 	} else if (tf.enabled)
@@ -1017,7 +1024,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	// dead-reckoned / IK / ML synthesis, or return false to suppress the
 	// downstream pose update entirely (LOST state -> SteamVR treats the
 	// device as disconnected after its own timeout).
-	if (featureFlags & pairdriver::kFeaturePhantom) {
+	//
+	// Skip the phantom pipeline entirely for quashed (hidden) devices. The
+	// hide path has already translated the pose by ~14 km; recording that
+	// offset position in the dropout history would corrupt the IK fallback
+	// the moment the user toggles hide off. Phantom's job is masking real
+	// dropouts on visible trackers, not babysitting an intentionally-hidden
+	// one.
+	if ((featureFlags & pairdriver::kFeaturePhantom) && !tf.quash) {
 		LARGE_INTEGER qpcNow{};
 		QueryPerformanceCounter(&qpcNow);
 		phantom::OnRealPoseObserved(openVRID, qpcNow.QuadPart, pose);

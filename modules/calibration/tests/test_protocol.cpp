@@ -22,10 +22,27 @@
 // require a deliberate two-touch acknowledgement, not to gate releases.
 // ---------------------------------------------------------------------------
 TEST(ProtocolTest, VersionPinnedToCurrent) {
-    EXPECT_EQ(protocol::Version, 22u)
+    EXPECT_EQ(protocol::Version, 23u)
         << "Protocol version changed without updating the test pin. If this is "
            "intentional: bump the literal here and add a row to wiki/Driver-"
            "Protocol.md describing the new version's wire-format changes.";
+}
+
+// v23 added `updateQuash` to SetDeviceTransform. The wire-layout gate is the
+// version handshake, but the default-construction contract matters too: any
+// payload built through the partial constructors must default updateQuash to
+// false so an unrelated update can't accidentally wipe a tracker's hide.
+TEST(ProtocolTest, SetDeviceTransformDefaultUpdateQuashFalse) {
+    using protocol::SetDeviceTransform;
+    vr::HmdVector3d_t t{};
+    vr::HmdQuaternion_t r{1, 0, 0, 0};
+
+    EXPECT_FALSE(SetDeviceTransform(0u, false).updateQuash);
+    EXPECT_FALSE(SetDeviceTransform(0u, false, t).updateQuash);
+    EXPECT_FALSE(SetDeviceTransform(0u, false, r).updateQuash);
+    EXPECT_FALSE(SetDeviceTransform(0u, false, 1.0).updateQuash);
+    EXPECT_FALSE(SetDeviceTransform(0u, false, t, r).updateQuash);
+    EXPECT_FALSE(SetDeviceTransform(0u, false, t, r, 1.0).updateQuash);
 }
 
 // ---------------------------------------------------------------------------

@@ -268,7 +268,19 @@ namespace protocol
 	// tripping through the profile-migration code at next driver init.
 	// Backwards-compatible at the wire level; drivers that ignore the new
 	// request continue to read send_port from oscrouter.json at startup.
-	const uint32_t Version = 22;
+	//
+	// v23 (2026-05-19): SetDeviceTransform gains an updateQuash flag that
+	// gates the driver-side write to `tf.quash`. Previously the driver
+	// unconditionally assigned `tf.quash = newTransform.quash;` on every
+	// IPC merge -- callers that built a payload via the partial-init
+	// constructors (e.g. ResetAndDisableOffsets) defaulted quash to false
+	// and silently wiped a tracker's hide state. New semantics match the
+	// existing updateTranslation / updateRotation / updateScale pattern:
+	// the driver only mutates the stored quash when updateQuash is true.
+	// Layout grows by one byte; padded to natural alignment. Bump forces
+	// paired install so a stale driver doesn't read updateQuash from a
+	// garbage byte and flap unpredictably.
+	const uint32_t Version = 23;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -418,6 +430,14 @@ namespace protocol
 		double scale;
 		bool lerp;
 		bool quash;
+		// v23 (2026-05-19): gates the driver's write to its stored `tf.quash`.
+		// When false, the driver leaves the existing hide state untouched.
+		// Lets callers that disable cal for unrelated reasons (e.g.
+		// ResetAndDisableOffsets) avoid clobbering a tracker the user has
+		// marked as always-hidden. All in-tree constructors below default this
+		// to false; sites that intend to set the hide bit write true here AND
+		// fill `quash` to the desired value.
+		bool updateQuash;
 
 		// Tracking system name of the device with this OpenVR ID, populated by the
 		// overlay so the driver can match it against per-system fallbacks without
@@ -450,22 +470,22 @@ namespace protocol
 		bool recalibrateOnMovement;
 
 		SetDeviceTransform(uint32_t id, bool enabled) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), updateQuash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 	};
 
 	// Per-finger enable mask layout for FingerSmoothingConfig::finger_mask.
