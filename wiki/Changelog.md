@@ -110,6 +110,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **ci:** Keep release intact when the post-publish changelog push hits a stale OID (869192f)
 - **ci:** Write placeholder BuildChannel.h + BuildStamp.h at configure (064d7ca)
 - **ci:** Build release changelog payload in Python to dodge jq argv limit (d0ec477)
+- **smoothing:** Evict superseded skeletal handles for the same hand (a7cf30c)
 
 ---
 
