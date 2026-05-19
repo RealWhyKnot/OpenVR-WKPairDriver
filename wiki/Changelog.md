@@ -117,6 +117,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **calibration:** Hold AUTO Lock across reanchor; tag reset cause (d69d2b5)
 - **ci:** Wait for SUBSYSTEM:WINDOWS captions-host self-test (301374a)
 - **calibration:** Break the AUTO Lock blackout and the restart loop (fcd8816)
+- **calibration:** Post-recovery quality, unlock-gate symmetry, save thrash (dccad7c)
 
 ---
 
