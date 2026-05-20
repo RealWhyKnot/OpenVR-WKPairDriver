@@ -4,6 +4,12 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 
 ## Unreleased
 
+_No notable changes since the last release._
+
+---
+
+## [v2026.5.20.0](https://github.com/RealWhyKnot/WKOpenVR/releases/tag/v2026.5.20.0) — 2026-05-20
+
 ### Added
 - **diagnostics:** Add OSC + translator + host-supervisor instrumentation (b0fa13d)
 - **hosts:** Singleton mutex + connect-first spawn for face and translator hosts (cd69dac)
@@ -67,7 +73,6 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - diag(calibration): instrument restart-loop suspects (cf67f99)
 - diag(observability): cal heartbeat, ipc retry-status, inputhealth coalesce (64cf6d3)
 - diag(calibration): latency throttle + stuck-cal watchdog (ec6ceff)
-- diag(calibration): tracker pose-freshness + profile-save anomaly warn (f5b1423)
 
 ### Fixed
 - **smoothing:** Lock out per-tracker prediction on the calibration anchor (e87f318)
