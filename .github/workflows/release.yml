@@ -933,15 +933,28 @@ jobs:
           $umbrellaRepo = "${{ github.repository }}"
           Remove-ReleaseIfPresent -Repo $umbrellaRepo -Token $env:GH_TOKEN_UMBRELLA -Label "umbrella"
 
+          # Mirror list mirrors the gating on each publish step: a sibling
+          # repo only gets a release when its corresponding feature zip
+          # output is non-empty. Reading the same source of truth here
+          # avoids the cleanup pinging repos that never had anything
+          # published (and could never have an orphan to delete).
           $mirrors = @(
-              'RealWhyKnot/WKOpenVR-SpaceCalibrator',
-              'RealWhyKnot/WKOpenVR-Smoothing',
-              'RealWhyKnot/WKOpenVR-InputHealth',
-              'RealWhyKnot/WKOpenVR-VRCFT',
-              'RealWhyKnot/WKOpenVR-OSCRouter',
-              'RealWhyKnot/WKOpenVR-Captions',
-              'RealWhyKnot/WKOpenVR-Phantom'
+              @{ Repo = 'RealWhyKnot/WKOpenVR-SpaceCalibrator'; Zip = '${{ steps.zips.outputs.mirror_calibration }}'  },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-Smoothing';       Zip = '${{ steps.zips.outputs.mirror_smoothing }}'    },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-InputHealth';     Zip = '${{ steps.zips.outputs.mirror_inputhealth }}'  },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-VRCFT';           Zip = '${{ steps.zips.outputs.mirror_facetracking }}' },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-OSCRouter';       Zip = '${{ steps.zips.outputs.mirror_oscrouter }}'    },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-Captions';        Zip = '${{ steps.zips.outputs.mirror_captions }}'     },
+              @{ Repo = 'RealWhyKnot/WKOpenVR-Phantom';         Zip = '${{ steps.zips.outputs.mirror_phantom }}'      }
           )
-          foreach ($repo in $mirrors) {
-              Remove-ReleaseIfPresent -Repo $repo -Token $env:GH_TOKEN_MIRROR -Label "mirror"
+          foreach ($m in $mirrors) {
+              if (-not $m.Zip) { continue }
+              Remove-ReleaseIfPresent -Repo $m.Repo -Token $env:GH_TOKEN_MIRROR -Label "mirror"
           }
+
+          # `gh release view` on a non-existent release returns 1; the
+          # function uses that as a present/absent signal, but PowerShell
+          # would otherwise propagate the trailing 1 as the step's exit
+          # status. Reset so a clean cleanup pass is reported as a clean
+          # step even when every release was already absent.
+          $global:LASTEXITCODE = 0
