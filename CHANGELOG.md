@@ -11,6 +11,7 @@ The `release.yml` body for each tag is composed mechanically from the slice betw
 - diag(calibration): surface AUTO Lock MAD + geometry-shift state in heartbeat (1a6638a)
 - **calibration:** Unify AdditionalCalibration extras AUTO Lock with primary (988bbf8)
 - **calibration:** Centralise HMD speed + forward-declare leaf autolock helpers (9c721b1)
+- diag(facetracking): per-phase startup log so a slow cold-start narrows itself (04ab330)
 
 ### Fixed
 - **calibration:** Geometry-shift CUSUM sustain gate + post-fire cooldown (d41c811)
