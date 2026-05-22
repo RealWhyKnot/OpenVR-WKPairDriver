@@ -13,6 +13,7 @@ The `release.yml` body for each tag is composed mechanically from the slice betw
 ### Fixed
 - **calibration:** Geometry-shift CUSUM sustain gate + post-fire cooldown (d41c811)
 - **calibration:** MAD-based AUTO Lock deviation metric (32a7d2e)
+- **calibration:** Panic-unlock AUTO Lock on extreme MAD deviation (d1a7e9e)
 
 ---
 

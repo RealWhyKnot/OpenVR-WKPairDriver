@@ -11,6 +11,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 ### Fixed
 - **calibration:** Geometry-shift CUSUM sustain gate + post-fire cooldown (d41c811)
 - **calibration:** MAD-based AUTO Lock deviation metric (32a7d2e)
+- **calibration:** Panic-unlock AUTO Lock on extreme MAD deviation (d1a7e9e)
 
 ---
 
