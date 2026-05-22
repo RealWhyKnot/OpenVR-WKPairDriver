@@ -498,6 +498,11 @@ TEST(E2E, FaceHostFakeFramesReachFakeVrchat)
 
     auto statusPath = temp / L"face_status.json";
     auto logPath = temp / L"face_host.log";
+    // 60s budget covers .NET cold start + Defender real-time scanning of a
+    // freshly-extracted module on GitHub-hosted Windows runners, which has
+    // been observed taking 7-10s for the singleton+pipe phase alone. Healthy
+    // local runs finish in <5s; the headroom catches real hangs without
+    // false-failing on runner load.
     ProcessResult result = RunProcess(FaceHostPath(), {
         L"--e2e-fake-face-output",
         L"--shmem-name", Utf8ToWide(shmemName),
@@ -506,9 +511,9 @@ TEST(E2E, FaceHostFakeFramesReachFakeVrchat)
         L"--status-file", statusPath.wstring(),
         L"--log-file", logPath.wstring(),
         L"--debug-logging", L"1",
-    }, 15000);
+    }, 60000);
 
-    ASSERT_FALSE(result.timedOut);
+    ASSERT_FALSE(result.timedOut) << "face host log: " << ReadFileUtf8(logPath);
     ASSERT_EQ(result.exitCode, 0u) << "face host log: " << ReadFileUtf8(logPath);
 
     std::string status = ReadFileUtf8(statusPath);
@@ -605,9 +610,13 @@ TEST(E2E, FaceHostReloadsInstalledModulesAndDisablesSelection)
         L"--debug-logging", L"1",
     })) << "CreateProcess failed: " << host.ExitCode();
 
+    // 30s covers the same cold-startup tail that FaceHostFakeFramesReachFakeVrchat
+    // bumped above; this WaitUntil only fires the first status write, which
+    // happens after module discovery, so it's the tightest window on the
+    // host's cold-start path.
     ASSERT_TRUE(WaitUntil([&] {
         return std::filesystem::exists(statusPath);
-    }, 10000ms)) << "face host did not write status. log: "
+    }, 30000ms)) << "face host did not write status. log: "
                  << ReadFileUtf8(logPath);
 
     const std::string uuid = "11111111-2222-3333-4444-555555555555";

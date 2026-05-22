@@ -74,29 +74,58 @@ if (!File.Exists(subprocessExe))
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
 
+// Phase logs are flushed per step so the next reader of a hung-host log
+// sees exactly where the main thread last reached. The constructors and
+// awaits below have historically all been "instant" but Windows Defender
+// real-time scanning of a freshly-extracted .NET process can stretch any
+// of them into multi-second waits.
+logger.Info("[startup] phase=signal-handlers-wired");
+logger.Flush();
+
 var registry = RegistryClient.Create();
+logger.Info("[startup] phase=registry-client-created");
+logger.Flush();
+
 var loader   = new SubprocessManager(opts, logger);
+logger.Info("[startup] phase=subprocess-manager-created");
+logger.Flush();
+
 var writer   = new FrameWriter(opts.ShmemName, logger);
+logger.Info("[startup] phase=frame-writer-created");
+logger.Flush();
 
 logger.Info($"[startup] phase=opening-ipc-pipe pipe={opts.DriverHandshakePipe}");
+logger.Flush();
 // Pass the same CTS so MsgShutdown cancels all workers.
 var pipe     = new HostControlPipeServer(opts.DriverHandshakePipe, loader, logger, cts);
+logger.Info("[startup] phase=ipc-pipe-created");
+logger.Flush();
+
 var status   = new HostStatusWriter(opts.StatusFilePath, loader, logger, opts);
+logger.Info("[startup] phase=status-writer-created");
+logger.Flush();
 
 logger.Info($"WKOpenVR.FaceModuleHost starting. shmem={opts.ShmemName} pipe={opts.DriverHandshakePipe}");
 
 var oscQuery = new OscQueryAdvertiser();
+logger.Info("[startup] phase=osc-query-advertiser-created");
+logger.Flush();
 
 try
 {
     await writer.OpenAsync(ct);
-    logger.Info("Shmem ring opened for write.");
+    logger.Info("[startup] phase=shmem-ring-opened");
+    logger.Flush();
 
     await oscQuery.StartAsync(logger, ct);
+    logger.Info("[startup] phase=osc-query-started");
+    logger.Flush();
 
     logger.Info($"[startup] phase=discovering-modules path={opts.ModulesInstallDir}");
+    logger.Flush();
     var loadedModules = await loader.LoadAllAsync();
     logger.Info($"[startup] phase=modules-loaded count={loadedModules.Count}");
+    logger.Flush();
     // (Expression remap moved to the driver; the host now forwards the
     // upstream UnifiedExpressions array on the wire.)
 
@@ -209,13 +238,20 @@ static async Task<int> RunE2eFakeFramesAsync(
 {
     long framesWritten = 0;
     logger.Info($"[e2e] fake face output starting shmem={opts.ShmemName} frames={opts.E2eFakeFrameCount}");
+    logger.Flush();
     HostStatusWriter.WriteE2eStatus(
         opts.StatusFilePath, "e2e-fake-running", framesWritten, opts, logger);
+    logger.Info("[e2e] phase=initial-status-written");
+    logger.Flush();
 
     try
     {
         using var writer = new FrameWriter(opts.ShmemName, logger);
+        logger.Info("[e2e] phase=frame-writer-created");
+        logger.Flush();
         await writer.OpenAsync(ct);
+        logger.Info("[e2e] phase=shmem-ring-opened");
+        logger.Flush();
 
         var eye = new EyeFrameSink
         {
@@ -242,6 +278,8 @@ static async Task<int> RunE2eFakeFramesAsync(
         upstreamShapes[kUpstreamJawOpenIndex]           = 0.75f;
         upstreamShapes[kUpstreamMouthCornerPullLeftIdx] = 0.25f;
 
+        logger.Info("[e2e] phase=publishing-frames");
+        logger.Flush();
         for (int i = 0; i < opts.E2eFakeFrameCount; ++i)
         {
             await writer.PublishAsync(
@@ -259,6 +297,7 @@ static async Task<int> RunE2eFakeFramesAsync(
         HostStatusWriter.WriteE2eStatus(
             opts.StatusFilePath, "e2e-fake-complete", framesWritten, opts, logger);
         logger.Info($"[e2e] fake face output complete frames_written={framesWritten}");
+        logger.Flush();
         return 0;
     }
     catch (Exception ex)
