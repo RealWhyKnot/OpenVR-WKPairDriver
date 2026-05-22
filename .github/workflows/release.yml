@@ -62,12 +62,21 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Detect beta tag
+      - name: Detect prerelease tag
         id: beta
         shell: pwsh
+        # Any semver-style prerelease suffix marks the tag as prerelease:
+        # -rc.N, -beta.N, -alpha.N, -pre, -snapshot, etc. The regex matches
+        # vYYYY.M.D.N followed by a hyphen and a non-digit (semver
+        # prerelease identifiers start with a letter). Stable releases are
+        # the bare vYYYY.M.D.N form and stay false.
+        #
+        # Output name kept as `is_beta` for backward compatibility with the
+        # downstream gates in this workflow.
         run: |
-          $isBeta = '${{ github.ref_name }}' -like '*-beta*'
-          "is_beta=$($isBeta.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          $tag = '${{ github.ref_name }}'
+          $isPrerelease = $tag -match '^v[\d.]+-[A-Za-z]'
+          "is_beta=$($isPrerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       - name: Validate workflow / script PowerShell syntax
         # Fails the run in seconds if any committed .ps1 or inline pwsh
