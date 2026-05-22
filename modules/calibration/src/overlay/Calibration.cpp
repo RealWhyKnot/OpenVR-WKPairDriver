@@ -245,6 +245,28 @@ void CalibrationContext::UpdateAutoLockDetector(
 	g_lastAutoLockTranslMad = translStdDev;
 	g_lastAutoLockRotMad = rotMaxAngle;
 
+	// Panic-unlock: at clearly-broken deviation, skip the pending-flip queue
+	// and drop the effective lock immediately so downstream cal output stops
+	// using the stale rigid attachment. ResolveLockMode runs inline because
+	// the normal commit path's ResolveLockMode (CalibrationTick after
+	// CommitPendingAutoLockFlipIfStationary) won't fire -- we bypass that
+	// helper entirely. The stationary-HMD gate guards against UX-visible cal
+	// jumps mid-motion, but at this magnitude the jump has already happened.
+	if (autoLockEffectivelyLocked &&
+		spacecal::autolock::IsPanicLevelDeviation(translStdDev, rotMaxAngle)) {
+		autoLockEffectivelyLocked = false;
+		autoLockHasPendingFlip = false;
+		autoLockPendingFlipFirstSeen = 0.0;
+		autoLockGateHeldWarned = false;
+		ResolveLockMode();
+		char buf[224];
+		snprintf(buf, sizeof buf,
+			"auto_lock_panic_unlock: translMad=%.4fm rotMad=%.4frad",
+			translStdDev, rotMaxAngle);
+		Metrics::WriteLogAnnotation(buf);
+		return;
+	}
+
 	const bool verdict = spacecal::autolock::VerdictWithHysteresis(
 		translStdDev, rotMaxAngle, autoLockEffectivelyLocked);
 
@@ -3130,9 +3152,20 @@ void CalibrationTick(double time)
 					: 0.0;
 			const double translMadMm = g_lastAutoLockTranslMad * 1000.0;
 			const double rotMadDeg = g_lastAutoLockRotMad * 180.0 / EIGEN_PI;
-			char hbBuf[560];
+			// Pending-flip held duration. Zero when no flip is queued so a
+			// reader can distinguish a stable autoLockEff from one that is
+			// about to commit a transition. autoLockPendingFlipFirstSeen
+			// is set the first tick a pending flip appears and reset on
+			// commit / abandon, so a non-zero value during pending means
+			// the held-duration is meaningful.
+			const double autoLockHeldSec =
+				(ctx.autoLockHasPendingFlip && ctx.autoLockPendingFlipFirstSeen > 0.0)
+					? (time - ctx.autoLockPendingFlipFirstSeen)
+					: 0.0;
+			char hbBuf[640];
 			snprintf(hbBuf, sizeof hbBuf,
 				"[cal-heartbeat] state=%d lockMode=%d lockRel=%d autoLockEff=%d"
+				" autoLockPending=%d autoLockPendingTo=%d autoLockHeldSec=%.2f"
 				" autoLockHistory=%zu/%zu translMad_mm=%.3f rotMad_deg=%.3f"
 				" err_last_mm=%.2f err_samples=%d"
 				" sec_since_reanchor=%.2f autolock_suppress_until=%.3f"
@@ -3142,6 +3175,8 @@ void CalibrationTick(double time)
 				" relPosCal=%d hmdStalls=%d",
 				(int)ctx.state, (int)ctx.lockRelativePositionMode,
 				(int)ctx.lockRelativePosition, (int)ctx.autoLockEffectivelyLocked,
+				(int)ctx.autoLockHasPendingFlip, (int)ctx.autoLockPendingFlipTo,
+				autoLockHeldSec,
 				ctx.autoLockHistory.size(), spacecal::autolock::kSamplesNeeded,
 				translMadMm, rotMadDeg,
 				errLast, errSeries.size(),

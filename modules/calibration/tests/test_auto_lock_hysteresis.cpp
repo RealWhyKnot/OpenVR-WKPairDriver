@@ -372,3 +372,61 @@ TEST(AutoLockHysteresisTest, BimodalNoiseEnterLockOnceAndHold)
         << "Should never unlock under bimodal 10%-spike noise. unlockEvents="
         << unlockEvents;
 }
+
+// --- Panic-level deviation predicate ----------------------------------------
+
+// Catches clearly-broken rigid attachments that the pending-flip queue
+// would otherwise hold under the stationary-HMD gate for up to 5 s. Sized
+// against the 2026-05-22 field log: median locked MAD was 2.5 mm, worst-
+// case outlier 669 mm. The 40 mm / 5 deg thresholds bracket those.
+
+TEST(AutoLockPanicTest, TranslationBoundary)
+{
+    EXPECT_FALSE(al::IsPanicLevelDeviation(0.039, 0.0))
+        << "39 mm is one mm below the panic floor -- should defer to the "
+           "normal pending-flip path";
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.040, 0.0))
+        << "40 mm sits exactly on the panic floor -- should fire";
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.041, 0.0));
+}
+
+TEST(AutoLockPanicTest, RotationBoundary)
+{
+    const double fourNineDeg = 4.9 * EIGEN_PI / 180.0;
+    const double fiveDeg     = 5.0 * EIGEN_PI / 180.0;
+    const double fiveOneDeg  = 5.1 * EIGEN_PI / 180.0;
+
+    EXPECT_FALSE(al::IsPanicLevelDeviation(0.0, fourNineDeg));
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.0, fiveDeg));
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.0, fiveOneDeg));
+}
+
+TEST(AutoLockPanicTest, EitherAxisTriggers)
+{
+    // 50 mm translation + 10 deg rotation -- both panic-level.
+    const double tenDeg = 10.0 * EIGEN_PI / 180.0;
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.050, tenDeg));
+
+    // The 2026-05-22 field outlier: 669 mm with no extreme rotation.
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.669, 0.0));
+
+    // Below panic on translation, above on rotation: still fires.
+    EXPECT_TRUE(al::IsPanicLevelDeviation(0.010, tenDeg));
+}
+
+// Panic does not replace the hysteresis verdict -- the 8 mm leave
+// threshold still releases locks normally, the queue and stationary gate
+// still arbitrate timing. Panic is a strict superset trigger for the
+// pathological tail. Pin the contract that callers must consult both.
+TEST(AutoLockPanicTest, DoesNotSubsumeHysteresis)
+{
+    // 9 mm: past the 8 mm leave threshold but well under the 40 mm panic
+    // floor. The hysteresis verdict (currently locked) says unlock; the
+    // panic predicate says no. Callers route through the normal queue.
+    EXPECT_FALSE(al::IsPanicLevelDeviation(0.009, 0.0));
+    EXPECT_FALSE(al::VerdictWithHysteresis(0.009, 0.0, /*prevLocked=*/true));
+
+    // 2 mm: below both. Locked stays locked.
+    EXPECT_FALSE(al::IsPanicLevelDeviation(0.002, 0.0));
+    EXPECT_TRUE(al::VerdictWithHysteresis(0.002, 0.0, /*prevLocked=*/true));
+}

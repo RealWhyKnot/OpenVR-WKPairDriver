@@ -84,6 +84,39 @@ constexpr double kAutoLockGateHeldWarnSeconds = 2.0;
 // motion releases the lock promptly.
 constexpr double kAutoLockUnlockMaxWaitSeconds = 5.0;
 
+// Panic-unlock thresholds. When a currently-locked pair's robust deviation
+// jumps this far past the normal leave threshold, the rigid relationship
+// has clearly broken. The pending-flip queue exists to hide visible
+// calibration jumps under natural stillness, but at panic-level deviation
+// the jump is already happening -- holding the effective state locked for
+// up to kAutoLockUnlockMaxWaitSeconds only extends the window of wrong
+// output. Callers should bypass the queue and write the effective state
+// directly when this predicate fires.
+//
+// 40 mm = 5 x kLeaveTranslM. Sized so a chi-square reanchor spike plus
+// normal motion noise cannot land at panic level -- the reanchor freeze
+// window (kFreezeWindowSec = 0.5 in ReanchorChiSquareDetector.h) bounds
+// the reanchor displacement, and even worst-case translation jumps stay
+// well under 40 mm in the 30-sample MAD. The 2026-05-22 session log
+// (the calibration robustness pass) showed the worst-case real outlier
+// at ~670 mm, comfortably past this threshold; sub-30 mm spikes are
+// absorbed by the normal 5 s unlock-timeout path.
+//
+// 5 deg picked symmetrically: 3.3 x kLeaveRotRad. Any rigid attachment
+// drifting 5 deg from its median quaternion is broken, not noisy.
+constexpr double kPanicTranslM = 0.040;
+constexpr double kPanicRotRad = 5.0 * EIGEN_PI / 180.0;
+
+// True when the robust deviation metrics indicate a clearly-broken rigid
+// relationship. Callers should consult both this and VerdictWithHysteresis:
+// VerdictWithHysteresis answers "what does the detector decide" (queued
+// through the stationary gate); IsPanicLevelDeviation answers "is the
+// queue still appropriate" (no -- commit unlock now).
+inline bool IsPanicLevelDeviation(double translStdDev, double rotMaxAngle)
+{
+    return translStdDev >= kPanicTranslM || rotMaxAngle >= kPanicRotRad;
+}
+
 // Returns the verdict the detector should produce given the current
 // (translStdDev, rotMaxAngle) and the previously committed lock state.
 // Single owner of the hysteresis decision; unit tests pin the contract.
