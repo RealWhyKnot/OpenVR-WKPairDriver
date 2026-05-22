@@ -2547,18 +2547,6 @@ void DumpDriftSubsystemState() {
 	}
 }
 
-// Resolve the persistent-hide intent for a device. Returns the quash bit
-// the driver should hold for this id, honouring CalCtx.alwaysHideSerials but
-// never agreeing to hide the HMD class (defense in depth -- hiding the HMD
-// would zero the user's view via the +10 km offset).
-static bool ResolvePersistentHide(uint32_t id)
-{
-	if (id == vr::k_unTrackedDeviceIndex_Hmd) return false;
-	const std::string& serial = g_lastSeenSerial[id];
-	if (serial.empty()) return false;
-	return CalCtx.alwaysHideSerials.count(serial) != 0;
-}
-
 void ResetAndDisableOffsets(uint32_t id, const std::string& trackingSystem = "")
 {
 	vr::HmdVector3d_t zeroV;
@@ -2569,14 +2557,12 @@ void ResetAndDisableOffsets(uint32_t id, const std::string& trackingSystem = "")
 
 	protocol::SetDeviceTransform payload{ id, false, zeroV, zeroQ, 1.0 };
 	SetTargetSystemField(payload, trackingSystem);
-	// Carry the persistent-hide intent on the disable payload too. Without
-	// this, disabling cal for an always-hidden tracker would still preserve
-	// the prior hide via updateQuash=false -- but only as long as the driver
-	// has a non-default `tf.quash`. For first-session devices (driver fresh,
-	// tf.quash defaults to false) we need the disable payload to actively
-	// set quash=true so the hide takes effect from the user's first toggle.
+	// Clear any prior hide bit -- the simple per-pair quashTargetInContinuous
+	// toggle owns this for the cal target, asserted at the live payload site.
+	// Disable payloads ship hidden=false explicitly so a previously-hidden
+	// slot doesn't keep the offset after the user takes the device out of cal.
 	payload.updateQuash = true;
-	payload.quash = ResolvePersistentHide(id);
+	payload.quash = false;
 	SendDeviceTransformIfChanged(id, payload);
 }
 
@@ -2720,11 +2706,6 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			std::string serial = (serialErr == vr::TrackedProp_Success) ? std::string(serialBuf) : std::string();
 			if (g_lastSeenSerial[id] != serial) {
 				const bool hadPriorSerial = !g_lastSeenSerial[id].empty();
-				// Update the seen-serial BEFORE the disable send so
-				// ResolvePersistentHide inside ResetAndDisableOffsets sees the
-				// new serial -- otherwise a freshly-connected always-hidden
-				// tracker would appear in the play space for one scan cycle
-				// before the next tick caught up.
 				g_lastSeenSerial[id] = serial;
 				if (hadPriorSerial) {
 					// ID reassigned. Force a clean disable on the slot before any new
@@ -2837,16 +2818,16 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			/*inContinuousState=*/CalCtx.state == CalibrationState::Continuous,
 			/*isFreshlyAdopted=*/isFreshlyAdopted,
 			/*snapThisCycle=*/snapThisCycle);
-		// Final hide intent: OR the persistent per-serial hide list with the
-		// legacy "during continuous cal" toggle. HMD class is rejected inside
-		// ResolvePersistentHide so the user can't accidentally blank their own
-		// view. updateQuash=true so the driver actually writes the bit rather
-		// than holding the previous value.
-		const bool legacyDuringCal =
-			CalCtx.state == CalibrationState::Continuous
+		// Hide intent: the per-pair "Hide tracker (during cal)" toggle drives
+		// quash on the cal target while continuous-cal is running. HMDs are
+		// never quashed (hiding the headset by translating its pose by ~10 km
+		// would blind the user). updateQuash=true so the driver actively
+		// writes the bit rather than holding the previous value.
+		const bool isHmd = (id == vr::k_unTrackedDeviceIndex_Hmd);
+		payload.quash = !isHmd
+			&& CalCtx.state == CalibrationState::Continuous
 			&& (int32_t)id == CalCtx.targetID
 			&& CalCtx.quashTargetInContinuous;
-		payload.quash = ResolvePersistentHide(id) || legacyDuringCal;
 		payload.updateQuash = true;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 
