@@ -10,6 +10,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **calibration:** Unify AdditionalCalibration extras AUTO Lock with primary (988bbf8)
 - **calibration:** Centralise HMD speed + forward-declare leaf autolock helpers (9c721b1)
 - diag(facetracking): per-phase startup log so a slow cold-start narrows itself (04ab330)
+- Modularize large WKOpenVR subsystems (4f4c668)
 
 ### Fixed
 - **calibration:** Geometry-shift CUSUM sustain gate + post-fire cooldown (d41c811)
