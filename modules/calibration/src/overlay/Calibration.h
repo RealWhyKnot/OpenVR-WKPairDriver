@@ -458,6 +458,40 @@ struct CalibrationContext
 	// kPostFireCooldownSeconds for the duration.
 	double geometryShiftCooldownUntil = 0.0;
 
+	// Warm-restart detection. The user takes off the HMD, comes back later,
+	// puts it on -- without intervention the solver re-validates the saved
+	// profile from an empty sample buffer, which takes 4-7 minutes under
+	// any tracking noise (Lighthouse base-station noise, Quest cross-system
+	// latency, etc.). During those minutes the user sees their avatar
+	// "fly away and fly back" as the candidate solver flips between two
+	// minima per tick. The warm-restart snap path detects the HMD's
+	// proximity sensor going false -> true after a sustained absence and
+	// (a) re-applies the saved profile transform immediately, (b) sets a
+	// grace window in which CalibrationCalc bypasses the prior-error
+	// rejection gate so fresh candidates that converge toward the saved
+	// profile are accepted right away. If a real geometry shift fires
+	// during the grace window (e.g. the user actually moved a base
+	// station while away), grace drops to zero and the normal
+	// continuous-cal recovery takes over.
+	//
+	// `lastUserPresent` defaults to true so a session that starts with
+	// the user already wearing the HMD sees no rising edge -- the snap
+	// path is mid-session-warm-restart only.
+	//
+	// `userAwaySince` is the timestamp at which proximity went false;
+	// the rising edge only counts as a warm restart if proximity stayed
+	// false for at least kWarmRestartMinAwaySeconds (filters
+	// proximity-sensor blips that some HMD runtimes emit on radio
+	// hiccups).
+	//
+	// `warmRestartGraceSamples` is a downcounter ticked by
+	// CalibrationTick after each ComputeIncremental. > 0 means
+	// CalibrationCalc skips the prior-vs-new error rejection (see
+	// `CalibrationCalc::warmRestartGraceActive`).
+	bool lastUserPresent = true;
+	double userAwaySince = 0.0;
+	int warmRestartGraceSamples = 0;
+
 	// Multi-ecosystem extras: each entry aligns an additional non-HMD tracking
 	// system to the HMD's tracking system. Empty for the typical 1-or-2-system
 	// case. The wizard appends entries here as it walks the user through each
@@ -663,6 +697,12 @@ struct CalibrationContext
 		recoveryHmdDeltaAtStart = 0.0;
 		geometryShiftGraceUntil = 0.0;
 		geometryShiftCooldownUntil = 0.0;
+		// Warm-restart state: a Clear means the saved profile is gone, so
+		// any pending grace must go too. Default lastUserPresent back to
+		// true so the next proximity-false reading produces a clean edge.
+		lastUserPresent = true;
+		userAwaySince = 0.0;
+		warmRestartGraceSamples = 0;
 		// Note: showAdvancedSettings is intentionally NOT reset -- it's a
 		// user preference that spans profiles.
 		// No calibration was performed — relative pose is NOT calibrated. The

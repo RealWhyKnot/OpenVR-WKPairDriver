@@ -1530,9 +1530,24 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 				// (the floor clamps below 5 mm).
 				Metrics::effectivePriorMm.Push(effectivePrior * 1000.0);
 				if (effectivePrior < newError * threshold) {
-					newCalibrationValid = false;
-					shouldRapidCorrect = false;
-					m_rejectReasonTag = "below_floor_or_worse";
+					// Warm-restart bypass: when the user just put the HMD back
+					// on after a break, the prior-vs-new gate keeps rejecting
+					// valid candidates because the rolling sample buffer is
+					// empty and any honest new candidate is "worse" than the
+					// already-applied saved profile by the threshold factor.
+					// During the grace window, accept the candidate anyway --
+					// it will converge toward the saved offset within ~30 s,
+					// which is the experience we want instead of the 4-7 min
+					// "flying away and flying back" reject-loop. The reason
+					// tag changes so triage can see how often the bypass
+					// actually fired vs sat idle.
+					if (warmRestartGraceActive) {
+						m_rejectReasonTag = "warm_restart_grace_bypass";
+					} else {
+						newCalibrationValid = false;
+						shouldRapidCorrect = false;
+						m_rejectReasonTag = "below_floor_or_worse";
+					}
 				}
 			}
 		}

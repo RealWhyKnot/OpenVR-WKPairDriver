@@ -28,6 +28,8 @@
 #include "RotationMatrix3.h" // AngleFromRotationMatrix3 / AxisFromRotationMatrix3 (clamped).
 #include "AutoLockHysteresis.h" // spacecal::autolock::VerdictWithHysteresis -- AUTO Lock
                              // hysteresis + stationary-gate constants and pure helpers.
+#include "WarmRestart.h"     // spacecal::warm_restart::ShouldEngage -- proximity-edge
+                             // decision for the saved-profile snap path.
 
 #include <string>
 #include <vector>
@@ -617,6 +619,74 @@ void CalibrationTick(double time)
 	// post-fix log readers will see lockRelativePosition=1 in fires after
 	// AUTO Lock engages (previously stuck at 0).
 	calibration.lockRelativePosition = ctx.lockRelativePosition;
+	calibration.warmRestartGraceActive = (ctx.warmRestartGraceSamples > 0);
+
+	// Warm-restart detection. The user takes the HMD off (activity level
+	// falls to Standby), comes back later, puts it on (activity level
+	// snaps back to UserInteraction). If the away duration cleared the
+	// threshold and the saved profile is valid, snap the driver to the
+	// saved transform and grant a grace window in which CalibrationCalc
+	// skips the prior-vs-new error rejection gate. Convergence then picks
+	// the saved offset back up within ~30 s instead of fighting it back
+	// from an empty sample buffer over the next 4-7 min.
+	//
+	// GetTrackedDeviceActivityLevel is preferred over Prop_UserPresent_Bool
+	// here because the activity-level path is driven by both the proximity
+	// sensor AND motion -- so an HMD with no working proximity sensor
+	// (some Quest variants over Link) still produces a usable signal as
+	// long as the IMU sees the HMD sitting still long enough for the
+	// runtime to transition to Standby (>= 5 s of stillness, configurable
+	// in SteamVR Power Management).
+	//
+	// k_EDeviceActivityLevel_Unknown returns for devices that aren't
+	// reporting yet (e.g. a fresh HMD that hasn't woken up); we treat
+	// Unknown as "not present" so no spurious edges fire during startup.
+	{
+		const vr::EDeviceActivityLevel activity =
+			vr::VRSystem()->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+		const bool nowPresent =
+			(activity == vr::k_EDeviceActivityLevel_UserInteraction)
+			|| (activity == vr::k_EDeviceActivityLevel_UserInteraction_Timeout);
+		// activity != Unknown is the "we have a signal at all" gate;
+		// without this, a freshly-launched session before the HMD has
+		// reported anything would look like a "false" reading and
+		// immediately start the away timer at session start.
+		if (activity != vr::k_EDeviceActivityLevel_Unknown) {
+			const bool wasPresent = ctx.lastUserPresent;
+			if (wasPresent && !nowPresent) {
+				ctx.userAwaySince = time;
+			} else if (!wasPresent && nowPresent) {
+				const double awayFor = (ctx.userAwaySince > 0.0)
+					? (time - ctx.userAwaySince) : 0.0;
+				const spacecal::warm_restart::EngageInput engageIn = {
+					wasPresent,
+					nowPresent,
+					awayFor,
+					ctx.validProfile,
+					ctx.state == CalibrationState::Continuous
+						|| ctx.state == CalibrationState::ContinuousStandby,
+				};
+				if (spacecal::warm_restart::ShouldEngage(engageIn)) {
+					ctx.warmRestartGraceSamples =
+						spacecal::warm_restart::kGraceSamples;
+					g_snapNextProfileApply = true;
+					const double mag = std::sqrt(
+						  ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
+						+ ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()
+						+ ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z());
+					char wbuf[200];
+					snprintf(wbuf, sizeof wbuf,
+						"[warm-restart][snap] away_for_s=%.1f state=%d"
+						" grace_samples=%d profile_magnitude_cm=%.2f",
+						awayFor, (int)ctx.state,
+						ctx.warmRestartGraceSamples, mag);
+					Metrics::WriteLogAnnotation(wbuf);
+				}
+				ctx.userAwaySince = 0.0;
+			}
+			ctx.lastUserPresent = nowPresent;
+		}
+	}
 
 	// Diagnostic: trace relPose-cal validity flips. The flag is set/cleared
 	// from several call sites and is currently only externally visible inside
@@ -1102,6 +1172,22 @@ void CalibrationTick(double time)
 					Metrics::WriteLogAnnotation(fireBuf);
 
 					CalCtx.Log("Tracking geometry shifted -- restarting calibration\n");
+					// A geometry-shift fire while a warm-restart grace was
+					// active means the snap landed on a profile that no
+					// longer matches reality (typically a base station got
+					// nudged while the user was away). Drop the grace so
+					// the normal continuous-cal recovery path takes over
+					// -- the fast path traded safety for speed, and the
+					// detector just learned the trade was wrong this time.
+					if (ctx.warmRestartGraceSamples > 0) {
+						char gbuf[160];
+						snprintf(gbuf, sizeof gbuf,
+							"[warm-restart][grace-ended] reason=geometry_shift"
+							" remaining=%d",
+							ctx.warmRestartGraceSamples);
+						Metrics::WriteLogAnnotation(gbuf);
+						ctx.warmRestartGraceSamples = 0;
+					}
 					calibration.Clear();
 					ctx.state = CalibrationState::ContinuousStandby;
 					// Intentionally NOT clearing ctx.relativePosCalibrated here.
@@ -1707,6 +1793,19 @@ void CalibrationTick(double time)
 		// math doesn't fight the user trying to inspect the current result.
 		if (!CalCtx.calibrationPaused) {
 			calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+
+			// Warm-restart grace counts down per Continuous-mode solve. When
+			// it hits zero, the prior-vs-new error gate snaps back on -- the
+			// solver has had ~30 s of bypassed acceptance and should be sitting
+			// on the saved offset now. Logged so triage can see whether the
+			// fast path ended naturally or was demoted by a geometry-shift.
+			if (CalCtx.warmRestartGraceSamples > 0) {
+				--CalCtx.warmRestartGraceSamples;
+				if (CalCtx.warmRestartGraceSamples == 0) {
+					Metrics::WriteLogAnnotation(
+						"[warm-restart][grace-ended] reason=samples_exhausted");
+				}
+			}
 
 			// Sustained gravity-axis disagreement diagnostic. Push the per-tick
 			// residual pitch+roll reading into a rolling 60s window and ask

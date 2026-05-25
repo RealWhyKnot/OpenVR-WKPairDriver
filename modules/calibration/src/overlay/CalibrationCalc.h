@@ -106,6 +106,12 @@ public:
 	// persists across ticks. Set by the caller per-tick from
 	// CalCtx.useBlendFilter; default-off path is unchanged.
 	bool useBlendFilter = false;
+	// When true, the prior-vs-new error rejection gate inside
+	// ComputeIncremental is bypassed for this tick. Set by CalibrationTick
+	// when a warm-restart proximity edge fires and counted down per call;
+	// see CalibrationContext::warmRestartGraceSamples for the rationale.
+	// Off path is unchanged.
+	bool warmRestartGraceActive = false;
 	
 	const Eigen::AffineCompact3d Transformation() const 
 	{
