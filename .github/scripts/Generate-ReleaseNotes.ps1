@@ -469,7 +469,7 @@ if ($includeIntegrity) {
 # Each template is repo-curated content under .github/release-template/<name>.md.
 # Read in this fixed order; missing templates emit a warning and skip without
 # failing the build. Token substitution happens inside Read-TemplateSection.
-$templateOrder = @('links', 'install', 'uninstall', 'what-you-need-to-do')
+$templateOrder = @('links', 'install', 'uninstall', 'what-you-need-to-do', 'please-read')
 foreach ($name in $templateOrder) {
     $section = Read-TemplateSection -name $name -dir $TemplateDir -tokenMap $tokens
     if ($section) {
