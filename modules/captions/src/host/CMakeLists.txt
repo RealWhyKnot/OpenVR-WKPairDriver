@@ -7,6 +7,16 @@ cmake_minimum_required(VERSION 3.15)
 # All three inference libraries are gated by CMake options so a contributor
 # without the prebuilt DLLs can still build the driver+overlay with stubs.
 
+# Belt-and-suspenders guard for the disabled-in-release path (see the
+# matching note in modules/facetracking/src/host/CMakeLists.txt).
+if(COMMAND wkopenvr_module_disabled)
+    wkopenvr_module_disabled(captions _wk_cap_disabled)
+    if(_wk_cap_disabled)
+        message(STATUS "Skipping captions host module (disabled-in-release; secondary guard)")
+        return()
+    endif()
+endif()
+
 option(OPENVR_PAIR_BUILD_CAPTIONS_HOST
     "Build the native captions host sidecar. Off lets a C++-only contributor build without the inference library dependencies."
     ON)

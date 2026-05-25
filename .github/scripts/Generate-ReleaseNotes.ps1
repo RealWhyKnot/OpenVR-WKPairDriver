@@ -10,9 +10,10 @@
     1. Title (h1: "<repo> <tag>")
     2. What's Changed (auto-changelog from the commit slice between prev tag
        and this tag; bucketed by conventional-commit prefix)
-    3. File integrity (auto-generated SHA256 + size table for the release zip
-       and every file inside it; reads inner-file metadata from the manifest
-       emitted by build.ps1)
+    3. File integrity (two-row Markdown table covering the umbrella zip and
+       the matching Setup.exe; per-file hashes inside the zip are deliberately
+       not listed any more -- the body had grown past one screen of scroll
+       and the inner hashes were rarely consulted)
     4. More (from .github/release-template/links.md, with token substitution)
     5. Install (fresh) (from .github/release-template/install.md)
     6. Uninstall (from .github/release-template/uninstall.md)
@@ -65,13 +66,6 @@
   token substitution (see README in this directory) before emission.
   Default: ".github/release-template".
 
-.PARAMETER Manifest
-  Path to the per-file manifest emitted by build.ps1 alongside the zip.
-  Tab-separated <sha256>\t<size_bytes>\t<relative_path> per line. Used
-  to compose the inner-file rows of the File integrity section.
-  Required (along with -ZipPath, -ZipSize, -ZipSha256) for the File
-  integrity section to render; otherwise that section is skipped.
-
 .PARAMETER ZipPath
   Path to the release zip artifact. Used to derive the zip name when
   -ZipName is not set, and as a presence check for the File integrity
@@ -86,6 +80,21 @@
 
 .PARAMETER ZipSha256
   SHA256 of the release zip. Used by the File integrity section.
+
+.PARAMETER SetupPath
+  Path to the Setup.exe installer. Used to derive the display name when
+  -SetupName is not set, and as a presence check for the second row of
+  the File integrity section.
+
+.PARAMETER SetupName
+  Override for the installer's display name in the File integrity section.
+  Defaults to the leaf of -SetupPath.
+
+.PARAMETER SetupSize
+  Size in bytes of the installer. Used by the File integrity section.
+
+.PARAMETER SetupSha256
+  SHA256 of the installer. Used by the File integrity section.
 
 .PARAMETER AllowEmpty
   Skip the empty-slice guard. Use only for the very first release on a repo
@@ -102,11 +111,14 @@ param(
     [string] $Repo        = $env:GITHUB_REPOSITORY,
     [string] $Extras      = $null,
     [string] $TemplateDir = $null,
-    [string] $Manifest    = $null,
     [string] $ZipPath     = $null,
     [string] $ZipName     = $null,
     [long]   $ZipSize     = 0,
     [string] $ZipSha256   = $null,
+    [string] $SetupPath   = $null,
+    [string] $SetupName   = $null,
+    [long]   $SetupSize   = 0,
+    [string] $SetupSha256 = $null,
     [switch] $AllowEmpty,
     [switch] $SkipScrub
 )
@@ -430,52 +442,27 @@ if ($Repo -and $prevTag) {
 }
 
 # --- File integrity ---
-# Composes a code-block with the release zip on the first line and indented
-# inner-file rows below. Inner-file hashes come from the manifest emitted by
-# build.ps1 (release/<zip-name>.manifest.tsv); the zip itself is hashed by the
-# workflow's "Locate release zip" step and passed in via -ZipPath/-ZipSha256/-ZipSize.
-# If any of those are missing (running locally without a build, or the workflow
-# wiring is incomplete), the section is skipped with a warning so the operator
-# notices.
-$includeIntegrity = $ZipPath -and $ZipSha256 -and $ZipSize -gt 0 -and $Manifest -and (Test-Path -LiteralPath $Manifest)
+# Two-row Markdown table covering the umbrella zip + Setup.exe. The zip itself
+# is hashed by the Package step in release.yml; the Setup.exe is hashed by the
+# Build NSIS installer step. Both pairs (path/size/sha) are passed in. If any
+# value is missing (running locally without a build, or the workflow wiring is
+# incomplete), the section is skipped with a warning so the operator notices.
+$includeIntegrity = $ZipPath -and $ZipSha256 -and $ZipSize -gt 0 `
+    -and $SetupPath -and $SetupSha256 -and $SetupSize -gt 0
 if ($includeIntegrity) {
-    $manifestEntries = @()
-    foreach ($line in Get-Content -LiteralPath $Manifest -Encoding UTF8) {
-        if (-not $line) { continue }
-        $parts = $line -split "`t", 3
-        if ($parts.Count -ne 3) {
-            Write-Host "::warning::Skipping malformed manifest line: $line"
-            continue
-        }
-        $manifestEntries += [pscustomobject]@{
-            Sha256 = $parts[0]
-            Size   = [long]$parts[1]
-            Path   = $parts[2]
-        }
-    }
     [void]$sb.AppendLine()
     [void]$sb.AppendLine("## File integrity")
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine("Every file in the release zip is hashed below. Verify with ``Get-FileHash <file> -Algorithm SHA256`` on PowerShell.")
+    [void]$sb.AppendLine("Verify with ``Get-FileHash <file> -Algorithm SHA256`` on PowerShell.")
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine('```')
-    $zipNameForLine = if ($zipNameToken) { $zipNameToken } else { Split-Path -Leaf $ZipPath }
-    $zipSizeStr = Format-Bytes $ZipSize
-    [void]$sb.AppendLine(("{0,-36}    {1,8}    SHA256: {2}" -f $zipNameForLine, $zipSizeStr, $ZipSha256.ToUpper()))
-    [void]$sb.AppendLine()
-    # Top-level files before subdirectory files; alphabetical within each
-    # group. Reads better for a user verifying a hash: the binary they
-    # double-click on is at the top.
-    $sortedEntries = $manifestEntries |
-        Sort-Object @{Expression = { ($_.Path -split '/').Count }}, Path
-    foreach ($entry in $sortedEntries) {
-        $indented = "  " + $entry.Path
-        $sizeStr = Format-Bytes $entry.Size
-        [void]$sb.AppendLine(("{0,-36}    {1,8}    SHA256: {2}" -f $indented, $sizeStr, $entry.Sha256.ToUpper()))
-    }
-    [void]$sb.AppendLine('```')
-} elseif ($Manifest -or $ZipPath -or $ZipSha256) {
-    Write-Host "::warning::File-integrity section skipped: -Manifest, -ZipPath, -ZipSize, and -ZipSha256 must all be set. Got Manifest='$Manifest' ZipPath='$ZipPath' ZipSize=$ZipSize ZipSha256='$ZipSha256'."
+    [void]$sb.AppendLine("| File | Size | SHA256 |")
+    [void]$sb.AppendLine("|---|---|---|")
+    $zipNameForLine   = if ($zipNameToken) { $zipNameToken } else { Split-Path -Leaf $ZipPath }
+    $setupNameForLine = if ($SetupName)    { $SetupName }    else { Split-Path -Leaf $SetupPath }
+    [void]$sb.AppendLine(("| ``{0}`` | {1} | ``{2}`` |" -f $zipNameForLine,   (Format-Bytes $ZipSize),   $ZipSha256.ToUpper()))
+    [void]$sb.AppendLine(("| ``{0}`` | {1} | ``{2}`` |" -f $setupNameForLine, (Format-Bytes $SetupSize), $SetupSha256.ToUpper()))
+} elseif ($ZipPath -or $ZipSha256 -or $SetupPath -or $SetupSha256) {
+    Write-Host "::warning::File-integrity section skipped: -ZipPath, -ZipSize, -ZipSha256, -SetupPath, -SetupSize, and -SetupSha256 must all be set. Got ZipPath='$ZipPath' ZipSize=$ZipSize ZipSha256='$ZipSha256' SetupPath='$SetupPath' SetupSize=$SetupSize SetupSha256='$SetupSha256'."
 }
 
 # --- Templated evergreen sections ---

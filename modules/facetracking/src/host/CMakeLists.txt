@@ -6,6 +6,19 @@ cmake_minimum_required(VERSION 3.15)
 # modules/facetracking/src/host/global.json (10.x); CMake locates the dotnet
 # binary on the build host's PATH.
 
+# Belt-and-suspenders: the umbrella's wkopenvr_add_host_module() already
+# short-circuits add_subdirectory for a disabled-in-release module so this
+# file normally never loads in a release build. The guard here protects
+# against the rare case of this directory being added directly (e.g. an
+# isolated CMake invocation, a future helper that bypasses the umbrella).
+if(COMMAND wkopenvr_module_disabled)
+    wkopenvr_module_disabled(facetracking _wk_ft_disabled)
+    if(_wk_ft_disabled)
+        message(STATUS "Skipping facetracking host module (disabled-in-release; secondary guard)")
+        return()
+    endif()
+endif()
+
 option(OPENVR_PAIR_BUILD_FACE_HOST
 	"Build the C# face-tracking module host (.NET 10). Off lets a C++-only contributor build the driver+overlay without the .NET SDK."
 	ON)

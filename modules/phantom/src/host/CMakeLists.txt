@@ -5,6 +5,16 @@ cmake_minimum_required(VERSION 3.15)
 # follow-up that lands ONNX Runtime + a SparsePoser model replaces the
 # inference body without touching the IPC / shmem boundary.
 
+# Belt-and-suspenders guard for the disabled-in-release path (see the
+# matching note in modules/facetracking/src/host/CMakeLists.txt).
+if(COMMAND wkopenvr_module_disabled)
+    wkopenvr_module_disabled(phantom _wk_ph_disabled)
+    if(_wk_ph_disabled)
+        message(STATUS "Skipping phantom host module (disabled-in-release; secondary guard)")
+        return()
+    endif()
+endif()
+
 option(OPENVR_PAIR_BUILD_PHANTOM_SIDECAR
     "Build the phantom-tracker inference sidecar exe" ON)
 

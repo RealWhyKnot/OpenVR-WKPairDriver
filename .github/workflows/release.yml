@@ -1,33 +1,17 @@
-# This workflow publishes a release on this repo AND mirrors per-feature
-# zips to the seven sibling repos (WKOpenVR-SpaceCalibrator,
-# WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-# WKOpenVR-OSCRouter, WKOpenVR-Captions, WKOpenVR-Phantom). The mirror step
-# needs a token with contents:write on all seven repos, stored as the
-# secret MIRROR_RELEASE_TOKEN. Provision via:
-#   1. github.com -> Settings -> Developer settings -> Fine-grained PAT
-#   2. Resource owner: RealWhyKnot. Repos: WKOpenVR-SpaceCalibrator,
-#      WKOpenVR-Smoothing, WKOpenVR-InputHealth, WKOpenVR-VRCFT,
-#      WKOpenVR-OSCRouter, WKOpenVR-Captions, WKOpenVR-Phantom.
-#   3. Permissions: Contents = Read and write.
-#   4. Copy token, then in this repo: Settings -> Secrets and variables
-#      -> Actions -> New repository secret -> name MIRROR_RELEASE_TOKEN.
-# Without this secret, the umbrella release publishes successfully but
-# the mirror steps fail (acceptable for a smoke test; fix before promoting).
-#
-# Modules carrying modules/<slug>/disabled-in-release.flag are filtered
-# out of the per-feature zip and installer loops below and their mirror
-# step is skipped via an `if:` guard, so an unstable feature never lands
-# on its sibling repo even when MIRROR_RELEASE_TOKEN covers it.
+# Publishes the umbrella release with the umbrella zip, the umbrella
+# Setup.exe, and one Setup.exe per active feature (Calibration, Smoothing,
+# InputHealth at present). Modules carrying modules/<slug>/disabled-in-release.flag
+# are excluded from the per-feature installer loop and from the umbrella
+# zip staging so an unstable feature never lands in the published artifacts.
 
 name: Release
 
 # Triggered by pushing a tag like v2026.5.12.0. Builds the umbrella binary
-# (WKOpenVR.exe), driver (driver_wkopenvr.dll), the C# face-tracking host
-# (WKOpenVR.FaceModuleHost.exe), and the native captions host
-# (WKOpenVR.CaptionsHost.exe) via CMake + MSVC + dotnet publish, runs
-# the test suite, packages an umbrella zip and five per-feature mirror zips,
-# publishes the umbrella release on this repo, and pushes a mirror release
-# to each sibling repo.
+# (WKOpenVR.exe), driver (driver_wkopenvr.dll), and -- when their modules
+# are not flagged disabled-in-release -- the C# face-tracking host and the
+# native captions host. Runs the test suite, builds the umbrella zip + the
+# umbrella Setup.exe + one Setup.exe per active feature, and publishes a
+# single GitHub release here.
 #
 # Changelog promotion: before the build, Update-Changelog.ps1 renames the
 # "## Unreleased" heading to "## [vTAG] -- DATE". After the GitHub release
@@ -229,8 +213,8 @@ jobs:
               -Wait -PassThru -NoNewWindow
           if ($p.ExitCode -ne 0) { throw "Captions host self-test failed (exit $($p.ExitCode))" }
 
-      - name: Package umbrella and mirror zips
-        id: zips
+      - name: Package umbrella zip
+        id: zip
         shell: pwsh
         env:
           TAG_NAME: ${{ github.ref_name }}
@@ -238,6 +222,23 @@ jobs:
           $version   = $env:TAG_NAME -replace '^v', ''
           $artifacts = "build/artifacts/Release"
           $driverSrc = "build/driver_wkopenvr"
+
+          # --- Pre-stage cleanup ------------------------------------------
+          # actions/cache@v5 restores build/ from prior runs. A previous dev
+          # build (with no disabled-in-release.flag in place) can leave
+          # build/driver_wkopenvr/resources/<gated-slug>/host populated with
+          # host exes that the current release build wouldn't produce. Wipe
+          # those orphan directories before staging so they cannot leak into
+          # the umbrella zip.
+          foreach ($slug in 'facetracking','captions','oscrouter','phantom') {
+            if (Test-Path -LiteralPath "modules/$slug/disabled-in-release.flag") {
+              $orphan = "$driverSrc/resources/$slug"
+              if (Test-Path -LiteralPath $orphan) {
+                Write-Host "Removing orphan gated-module dir from cached build: $orphan"
+                Remove-Item -Recurse -Force -LiteralPath $orphan
+              }
+            }
+          }
 
           if (-not (Test-Path "$artifacts/WKOpenVR.exe")) {
             throw "WKOpenVR.exe not found at $artifacts"
@@ -262,14 +263,29 @@ jobs:
           Copy-Item "$driverSrc/resources/settings/default.vrsettings"    "$stage/driver_wkopenvr/resources/settings/default.vrsettings"
           Copy-Item "$driverSrc/bin/win64/driver_wkopenvr.dll"           "$stage/driver_wkopenvr/bin/win64/driver_01wkopenvr.dll"
 
-          $srcFt = "$driverSrc/resources/facetracking"
-          if (Test-Path $srcFt) {
-            Copy-Item -Recurse -Path $srcFt -Destination "$stage/driver_wkopenvr/resources/facetracking"
+          # Disabled-in-release markers gate every per-module artifact below.
+          # A disabled module's CMake helper short-circuited add_subdirectory,
+          # so the build never produced the host exes / input profiles to stage.
+          $faceTrackingEnabled = -not (Test-Path -LiteralPath 'modules/facetracking/disabled-in-release.flag')
+          $captionsEnabled     = -not (Test-Path -LiteralPath 'modules/captions/disabled-in-release.flag')
+          $phantomEnabled      = -not (Test-Path -LiteralPath 'modules/phantom/disabled-in-release.flag')
+
+          if ($faceTrackingEnabled) {
+            $srcFt = "$driverSrc/resources/facetracking"
+            if (Test-Path $srcFt) {
+              Copy-Item -Recurse -Path $srcFt -Destination "$stage/driver_wkopenvr/resources/facetracking"
+            }
+          } else {
+            Write-Host "Skipping resources/facetracking stage (modules/facetracking/disabled-in-release.flag)."
           }
 
-          $srcTr = "$driverSrc/resources/captions"
-          if (Test-Path $srcTr) {
-            Copy-Item -Recurse -Path $srcTr -Destination "$stage/driver_wkopenvr/resources/captions"
+          if ($captionsEnabled) {
+            $srcTr = "$driverSrc/resources/captions"
+            if (Test-Path $srcTr) {
+              Copy-Item -Recurse -Path $srcTr -Destination "$stage/driver_wkopenvr/resources/captions"
+            }
+          } else {
+            Write-Host "Skipping resources/captions stage (modules/captions/disabled-in-release.flag)."
           }
 
           if (-not (Test-Path "$artifacts/dashboard_icon.png")) {
@@ -290,13 +306,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           Copy-Item "$artifacts/resources/face-module-sync.ps1" "$stage/resources/face-module-sync.ps1"
 
-          # Disabled-in-release markers gate every per-module artifact below.
-          # A disabled module's CMake helper short-circuited add_subdirectory,
-          # so the build never produced the host exes / input profiles to stage.
-          $faceTrackingEnabled = -not (Test-Path -LiteralPath 'modules/facetracking/disabled-in-release.flag')
-          $captionsEnabled     = -not (Test-Path -LiteralPath 'modules/captions/disabled-in-release.flag')
-          $phantomEnabled      = -not (Test-Path -LiteralPath 'modules/phantom/disabled-in-release.flag')
-
           # Stage the C# face-tracking host. CMake publishes it to
           # build/artifacts/FaceModuleHost/; the workflow runs cmake directly
           # so we copy it into the stage here. The driver's HostSupervisor
@@ -316,13 +325,10 @@ jobs:
             Write-Host "Face-tracking host staging skipped (modules/facetracking/disabled-in-release.flag)."
           }
 
-          # Stage the native captions host. CMake emits it to
-          # build/driver_wkopenvr/resources/captions/host/ (same driver-tree
-          # layout that quick.ps1 deploys). The $srcTr block above already
-          # copied the captions resources tree into the stage; this block
-          # verifies the host exe landed correctly so a missing CaptionsHost
-          # build is caught early with a clear message rather than a silent
-          # gap in the release zip.
+          # Verify the native captions host staged correctly. The resource-tree
+          # copy above already pulled in the host directory; this block catches
+          # a missing CaptionsHost build early with a clear message instead of
+          # leaving a silent gap in the release zip.
           if ($captionsEnabled) {
             $trHostStageExe = "$stage/driver_wkopenvr/resources/captions/host/WKOpenVR.CaptionsHost.exe"
             if (-not (Test-Path $trHostStageExe)) {
@@ -342,91 +348,23 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path "release" | Out-Null
 
-          # Helper: build a zip + manifest for a given staging directory.
-          function New-ReleaseZip {
-            param([string]$StageDir, [string]$ZipPath)
-            if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-            Compress-Archive -Path "$StageDir/*" -DestinationPath $ZipPath -CompressionLevel Optimal
-            $item     = Get-Item $ZipPath
-            $hash     = (Get-FileHash $ZipPath -Algorithm SHA256).Hash
-            $rootLen  = (Resolve-Path $StageDir).Path.Length + 1
-            $rows     = Get-ChildItem $StageDir -Recurse -File | ForEach-Object {
-              $rel = $_.FullName.Substring($rootLen).Replace('\', '/')
-              $h   = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-              "{0}`t{1}`t{2}" -f $h, $_.Length, $rel
-            }
-            $maniPath = [IO.Path]::ChangeExtension($ZipPath, "manifest.tsv") -replace '\.zip\.manifest', '.manifest'
-            $enc = [System.Text.UTF8Encoding]::new($false)
-            [System.IO.File]::WriteAllLines((Resolve-Path (Split-Path $maniPath)).Path + "\" + (Split-Path -Leaf $maniPath), $rows, $enc)
-            return [pscustomobject]@{
-              Path     = (Resolve-Path $ZipPath).Path
-              Name     = $item.Name
-              Size     = $item.Length
-              Sha256   = $hash
-              Manifest = (Resolve-Path $maniPath).Path
-            }
-          }
-
-          # --- Umbrella zip (all three flag files absent; installer drops them) ---
+          # --- Umbrella zip ---------------------------------------------------
+          # One artifact for the published release. The installer drops the
+          # appropriate enable_*.flag files at install time, so the zip itself
+          # ships with none.
           $umbrellaZipPath = "release/WKOpenVR-$version.zip"
-          $umbrella = New-ReleaseZip -StageDir $stage -ZipPath $umbrellaZipPath
-          Write-Host "Umbrella zip: $($umbrella.Name) ($($umbrella.Size) bytes) sha256=$($umbrella.Sha256)"
-
-          # --- Per-feature mirror zips ----------------------------------------
-          # Each mirror zip is identical to the umbrella plus one flag file
-          # pre-dropped in driver_wkopenvr/resources/ so the user's SteamVR
-          # picks up that feature immediately after extracting into the driver dir.
-          # Slug = modules/<slug>/ folder name (and the marker filename root).
-          # Any feature whose source tree carries disabled-in-release.flag is
-          # filtered out below so it never gets a zip, installer, or mirror
-          # push -- the same marker the CMake helper uses to skip linking the
-          # module into the release binary.
-          $allFeatures = @(
-            [pscustomobject]@{ Name = 'Calibration';  Slug = 'calibration';  Flag = 'enable_calibration.flag';  Repo = 'RealWhyKnot/WKOpenVR-SpaceCalibrator' }
-            [pscustomobject]@{ Name = 'Smoothing';    Slug = 'smoothing';    Flag = 'enable_smoothing.flag';    Repo = 'RealWhyKnot/WKOpenVR-Smoothing' }
-            [pscustomobject]@{ Name = 'InputHealth';  Slug = 'inputhealth';  Flag = 'enable_inputhealth.flag';  Repo = 'RealWhyKnot/WKOpenVR-InputHealth' }
-            [pscustomobject]@{ Name = 'FaceTracking'; Slug = 'facetracking'; Flag = 'enable_facetracking.flag'; Repo = 'RealWhyKnot/WKOpenVR-VRCFT' }
-            [pscustomobject]@{ Name = 'OSCRouter';    Slug = 'oscrouter';    Flag = 'enable_oscrouter.flag';    Repo = 'RealWhyKnot/WKOpenVR-OSCRouter' }
-            [pscustomobject]@{ Name = 'Captions';     Slug = 'captions';     Flag = 'enable_captions.flag';     Repo = 'RealWhyKnot/WKOpenVR-Captions' }
-            [pscustomobject]@{ Name = 'Phantom';      Slug = 'phantom';      Flag = 'enable_phantom.flag';      Repo = 'RealWhyKnot/WKOpenVR-Phantom' }
-          )
-          $features = $allFeatures | Where-Object {
-            $marker = "modules/$($_.Slug)/disabled-in-release.flag"
-            if (Test-Path -LiteralPath $marker) {
-              Write-Host "Skipping mirror zip for $($_.Name) ($marker present)"
-              return $false
-            }
-            return $true
-          }
-
-          $mirrorPaths = @{}
-          foreach ($feat in $features) {
-            $flagFile = "$stage/driver_wkopenvr/resources/$($feat.Flag)"
-            New-Item -ItemType File -Force -Path $flagFile | Out-Null
-            $zipPath = "release/WKOpenVR-$($feat.Name)-$version.zip"
-            $z = New-ReleaseZip -StageDir $stage -ZipPath $zipPath
-            $mirrorPaths[$feat.Name] = $z.Path
-            Write-Host "Mirror zip ($($feat.Name)): $($z.Name) ($($z.Size) bytes)"
-            Remove-Item $flagFile -Force
-          }
+          if (Test-Path $umbrellaZipPath) { Remove-Item $umbrellaZipPath -Force }
+          Compress-Archive -Path "$stage/*" -DestinationPath $umbrellaZipPath -CompressionLevel Optimal
+          $umbrellaItem = Get-Item $umbrellaZipPath
+          $umbrellaHash = (Get-FileHash $umbrellaZipPath -Algorithm SHA256).Hash
+          Write-Host "Umbrella zip: $($umbrellaItem.Name) ($($umbrellaItem.Length) bytes) sha256=$umbrellaHash"
 
           Remove-Item -Recurse -Force $stage
 
-          # Emit outputs for downstream steps. Disabled features land as empty
-          # strings; the matching Mirror release step uses `if:` to skip when
-          # the output is empty.
-          "umbrella_path=$($umbrella.Path)"         >> $env:GITHUB_OUTPUT
-          "umbrella_name=$($umbrella.Name)"         >> $env:GITHUB_OUTPUT
-          "umbrella_size=$($umbrella.Size)"         >> $env:GITHUB_OUTPUT
-          "umbrella_sha256=$($umbrella.Sha256)"     >> $env:GITHUB_OUTPUT
-          "umbrella_manifest=$($umbrella.Manifest)" >> $env:GITHUB_OUTPUT
-          "mirror_calibration=$($mirrorPaths['Calibration'])"   >> $env:GITHUB_OUTPUT
-          "mirror_smoothing=$($mirrorPaths['Smoothing'])"       >> $env:GITHUB_OUTPUT
-          "mirror_inputhealth=$($mirrorPaths['InputHealth'])"   >> $env:GITHUB_OUTPUT
-          "mirror_facetracking=$($mirrorPaths['FaceTracking'])" >> $env:GITHUB_OUTPUT
-          "mirror_oscrouter=$($mirrorPaths['OSCRouter'])"       >> $env:GITHUB_OUTPUT
-          "mirror_captions=$($mirrorPaths['Captions'])"         >> $env:GITHUB_OUTPUT
-          "mirror_phantom=$($mirrorPaths['Phantom'])"           >> $env:GITHUB_OUTPUT
+          "umbrella_path=$((Resolve-Path $umbrellaZipPath).Path)" >> $env:GITHUB_OUTPUT
+          "umbrella_name=$($umbrellaItem.Name)"                   >> $env:GITHUB_OUTPUT
+          "umbrella_size=$($umbrellaItem.Length)"                 >> $env:GITHUB_OUTPUT
+          "umbrella_sha256=$umbrellaHash"                         >> $env:GITHUB_OUTPUT
 
       - name: Verify NSIS input artifacts staged
         # makensis errors with an obscure "no files found" when File /r is
@@ -508,10 +446,12 @@ jobs:
           $versioned = "release/WKOpenVR-v$version-Setup.exe"
           Move-Item $raw.FullName $versioned -Force
           $hash = (Get-FileHash $versioned -Algorithm SHA256).Hash
+          $size = (Get-Item $versioned).Length
           "path=$((Resolve-Path $versioned).Path)" >> $env:GITHUB_OUTPUT
           "name=$(Split-Path -Leaf $versioned)"    >> $env:GITHUB_OUTPUT
+          "size=$size"                             >> $env:GITHUB_OUTPUT
           "sha256=$hash"                           >> $env:GITHUB_OUTPUT
-          Write-Host "Installer: $versioned sha256=$hash"
+          Write-Host "Installer: $versioned ($size bytes) sha256=$hash"
 
       - name: Build per-feature NSIS installers
         id: feature_installers
@@ -575,11 +515,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $body = & ./.github/scripts/Generate-ReleaseNotes.ps1 `
-            -ZipPath   '${{ steps.zips.outputs.umbrella_path }}' `
-            -ZipName   '${{ steps.zips.outputs.umbrella_name }}' `
-            -ZipSize   '${{ steps.zips.outputs.umbrella_size }}' `
-            -ZipSha256 '${{ steps.zips.outputs.umbrella_sha256 }}' `
-            -Manifest  '${{ steps.zips.outputs.umbrella_manifest }}'
+            -ZipPath     '${{ steps.zip.outputs.umbrella_path }}' `
+            -ZipName     '${{ steps.zip.outputs.umbrella_name }}' `
+            -ZipSize     '${{ steps.zip.outputs.umbrella_size }}' `
+            -ZipSha256   '${{ steps.zip.outputs.umbrella_sha256 }}' `
+            -SetupPath   '${{ steps.installer.outputs.path }}' `
+            -SetupName   '${{ steps.installer.outputs.name }}' `
+            -SetupSize   '${{ steps.installer.outputs.size }}' `
+            -SetupSha256 '${{ steps.installer.outputs.sha256 }}'
           if (-not $body) {
             throw "Generate-ReleaseNotes.ps1 returned empty output."
           }
@@ -588,14 +531,24 @@ jobs:
           $body          >> $env:GITHUB_OUTPUT
           $delim         >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub release (umbrella)
+      - name: Create GitHub release
         id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Per-feature installer paths. A disabled-in-release module's
+          # output is empty here; the assembly loop below filters those out
+          # so gh release create never sees an empty positional arg.
+          INSTALLER_CALIBRATION:  ${{ steps.feature_installers.outputs.installer_calibration }}
+          INSTALLER_SMOOTHING:    ${{ steps.feature_installers.outputs.installer_smoothing }}
+          INSTALLER_INPUTHEALTH:  ${{ steps.feature_installers.outputs.installer_inputhealth }}
+          INSTALLER_FACETRACKING: ${{ steps.feature_installers.outputs.installer_facetracking }}
+          INSTALLER_OSCROUTER:    ${{ steps.feature_installers.outputs.installer_oscrouter }}
+          INSTALLER_CAPTIONS:     ${{ steps.feature_installers.outputs.installer_captions }}
+          INSTALLER_PHANTOM:      ${{ steps.feature_installers.outputs.installer_phantom }}
         shell: pwsh
         run: |
           $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.umbrella_path }}"
+          $zip       = "${{ steps.zip.outputs.umbrella_path }}"
           $installer = "${{ steps.installer.outputs.path }}"
           $notes     = @'
           ${{ steps.changelog.outputs.body }}
@@ -603,9 +556,28 @@ jobs:
           $notesPath = Join-Path $env:RUNNER_TEMP 'release-body-input.md'
           $notes | Out-File -LiteralPath $notesPath -Encoding utf8 -NoNewline
           "input_path=$notesPath" >> $env:GITHUB_OUTPUT
+
+          # Assemble the asset list. Umbrella zip + umbrella Setup.exe first,
+          # then any per-feature installers that were actually produced.
+          $assets = @($zip, $installer)
+          $featureInstallers = @(
+            $env:INSTALLER_CALIBRATION,
+            $env:INSTALLER_SMOOTHING,
+            $env:INSTALLER_INPUTHEALTH,
+            $env:INSTALLER_FACETRACKING,
+            $env:INSTALLER_OSCROUTER,
+            $env:INSTALLER_CAPTIONS,
+            $env:INSTALLER_PHANTOM
+          )
+          foreach ($p in $featureInstallers) {
+            if ($p) { $assets += $p }
+          }
+          Write-Host "Release assets ($($assets.Count)):"
+          $assets | ForEach-Object { Write-Host "  $_" }
+
           $extra = @()
           if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --title $tag --notes-file $notesPath @extra
+          gh release create $tag --title $tag --notes-file $notesPath @extra @assets
 
       - name: Verify published release body matches input
         env:
@@ -672,122 +644,8 @@ jobs:
           # API's eventual-consistency lag, not a real publish failure.
           # See release_verify_indexing_lag_2026-05-07 -- the same
           # behaviour bit the SC pipeline. Surface a warning instead of
-          # failing the workflow so the umbrella release stays
-          # published and the downstream mirror steps still run.
+          # failing the workflow so the umbrella release stays published.
           Write-Host "::warning::Release body verify could not confirm the auto-corrected body within $($recheck.AttemptCount) attempts. The edit request succeeded; treating as a transient API lag and continuing."
-
-      # Mirror releases: one per feature. Each push uses MIRROR_RELEASE_TOKEN
-      # (a fine-grained PAT with contents:write on the three sibling repos).
-      # The notes reference back to this repo's release so users clicking
-      # through from a sibling repo's releases tab find the full changelog.
-      - name: Mirror release to WKOpenVR-SpaceCalibrator
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_calibration }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_calibration }}"
-          $repo  = "RealWhyKnot/WKOpenVR-SpaceCalibrator"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_calibration.flag so calibration activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-Smoothing
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_smoothing }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_smoothing }}"
-          $repo  = "RealWhyKnot/WKOpenVR-Smoothing"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_smoothing.flag so smoothing activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-InputHealth
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_inputhealth }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_inputhealth }}"
-          $repo  = "RealWhyKnot/WKOpenVR-InputHealth"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_inputhealth.flag so input health monitoring activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-VRCFT
-        if: ${{ steps.zips.outputs.mirror_facetracking != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_facetracking }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_facetracking }}"
-          $repo  = "RealWhyKnot/WKOpenVR-VRCFT"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_facetracking.flag so face and eye tracking activate immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-OSCRouter
-        if: ${{ steps.zips.outputs.mirror_oscrouter != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_oscrouter }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_oscrouter }}"
-          $repo  = "RealWhyKnot/WKOpenVR-OSCRouter"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_oscrouter.flag so OSC fan-out activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-Captions
-        if: ${{ steps.zips.outputs.mirror_captions != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_captions }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_captions }}"
-          $repo  = "RealWhyKnot/WKOpenVR-Captions"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_captions.flag so live captions activate immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
-
-      - name: Mirror release to WKOpenVR-Phantom
-        if: ${{ steps.zips.outputs.mirror_phantom != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_RELEASE_TOKEN }}
-          GITHUB_SHA: ${{ github.sha }}
-        shell: pwsh
-        run: |
-          $tag       = "${{ github.ref_name }}"
-          $zip       = "${{ steps.zips.outputs.mirror_phantom }}"
-          $installer = "${{ steps.feature_installers.outputs.installer_phantom }}"
-          $repo  = "RealWhyKnot/WKOpenVR-Phantom"
-          $notes = "Mirror of WKOpenVR release $tag. Zip includes enable_phantom.flag so phantom-tracker dropout bridging activates immediately. Source: https://github.com/RealWhyKnot/WKOpenVR/commit/$env:GITHUB_SHA"
-          $extra = @()
-          if ('${{ steps.beta.outputs.is_beta }}' -eq 'true') { $extra = @('--prerelease','--latest=false') }
-          gh release create $tag $zip $installer --repo $repo --title $tag --notes $notes @extra
 
       - name: Push promoted changelog back to main (verified)
         if: ${{ steps.beta.outputs.is_beta != 'true' }}
@@ -897,64 +755,27 @@ jobs:
 
       - name: Clean up partial release on failure
         # When any step after "Create GitHub release" fails, the umbrella
-        # release is up and some mirror releases may already be up on
-        # the sibling repos -- those would be orphans pointing at a
-        # commit that the next retry may rewrite. Delete the umbrella
-        # AND every mirror release for $TAG_NAME so the retry starts
-        # from a fully clean slate. The umbrella uses GITHUB_TOKEN;
-        # the mirrors use MIRROR_RELEASE_TOKEN (same PAT the mirror
-        # publish steps use). Per-mirror delete failures are warnings,
-        # not fatal -- one common cause is the mirror was never
-        # created (step skipped) and there is nothing to delete.
+        # release is up and points at a commit that the next retry may
+        # rewrite. Delete it so the retry starts from a clean slate.
         if: failure()
         env:
-          GH_TOKEN_UMBRELLA: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN_MIRROR: ${{ secrets.MIRROR_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $tag = $env:TAG_NAME
-
-          function Remove-ReleaseIfPresent {
-              param([string]$Repo, [string]$Token, [string]$Label)
-              $env:GH_TOKEN = $Token
-              $exists = gh release view $tag --repo $Repo --json id 2>$null
-              if ($LASTEXITCODE -eq 0 -and $exists) {
-                  Write-Host "Cleanup: deleting $Label release $tag from $Repo."
-                  gh release delete $tag --repo $Repo --yes --cleanup-tag
-                  if ($LASTEXITCODE -ne 0) {
-                      Write-Host "::warning::Could not auto-delete $Label release $tag on $Repo. Manual cleanup may be needed before retrying."
-                  }
-              } else {
-                  Write-Host "Cleanup: no $Label release $tag on $Repo -- nothing to remove."
-              }
+          $tag  = $env:TAG_NAME
+          $repo = "${{ github.repository }}"
+          $exists = gh release view $tag --repo $repo --json id 2>$null
+          if ($LASTEXITCODE -eq 0 -and $exists) {
+            Write-Host "Cleanup: deleting umbrella release $tag from $repo."
+            gh release delete $tag --repo $repo --yes --cleanup-tag
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::Could not auto-delete umbrella release $tag on $repo. Manual cleanup may be needed before retrying."
+            }
+          } else {
+            Write-Host "Cleanup: no umbrella release $tag on $repo -- nothing to remove."
           }
 
-          $umbrellaRepo = "${{ github.repository }}"
-          Remove-ReleaseIfPresent -Repo $umbrellaRepo -Token $env:GH_TOKEN_UMBRELLA -Label "umbrella"
-
-          # Mirror list mirrors the gating on each publish step: a sibling
-          # repo only gets a release when its corresponding feature zip
-          # output is non-empty. Reading the same source of truth here
-          # avoids the cleanup pinging repos that never had anything
-          # published (and could never have an orphan to delete).
-          $mirrors = @(
-              @{ Repo = 'RealWhyKnot/WKOpenVR-SpaceCalibrator'; Zip = '${{ steps.zips.outputs.mirror_calibration }}'  },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-Smoothing';       Zip = '${{ steps.zips.outputs.mirror_smoothing }}'    },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-InputHealth';     Zip = '${{ steps.zips.outputs.mirror_inputhealth }}'  },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-VRCFT';           Zip = '${{ steps.zips.outputs.mirror_facetracking }}' },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-OSCRouter';       Zip = '${{ steps.zips.outputs.mirror_oscrouter }}'    },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-Captions';        Zip = '${{ steps.zips.outputs.mirror_captions }}'     },
-              @{ Repo = 'RealWhyKnot/WKOpenVR-Phantom';         Zip = '${{ steps.zips.outputs.mirror_phantom }}'      }
-          )
-          foreach ($m in $mirrors) {
-              if (-not $m.Zip) { continue }
-              Remove-ReleaseIfPresent -Repo $m.Repo -Token $env:GH_TOKEN_MIRROR -Label "mirror"
-          }
-
-          # `gh release view` on a non-existent release returns 1; the
-          # function uses that as a present/absent signal, but PowerShell
-          # would otherwise propagate the trailing 1 as the step's exit
-          # status. Reset so a clean cleanup pass is reported as a clean
-          # step even when every release was already absent.
+          # `gh release view` on a non-existent release returns 1; reset so
+          # a clean cleanup pass is reported as a clean step.
           $global:LASTEXITCODE = 0
