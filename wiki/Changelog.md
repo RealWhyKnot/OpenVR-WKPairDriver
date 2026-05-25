@@ -4,6 +4,12 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 
 ## Unreleased
 
+_No notable changes since the last release._
+
+---
+
+## [v2026.5.25.0](https://github.com/RealWhyKnot/WKOpenVR/releases/tag/v2026.5.25.0) — 2026-05-25
+
 ### Added
 - **calibration:** Plumb slew-rate config + IPC + UI (protocol v24) (e9770db)
 - **calibration:** Add SlewRateCap pure helper + tests (37caaf4)
