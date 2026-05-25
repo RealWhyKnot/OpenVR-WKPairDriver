@@ -8,6 +8,12 @@ _No notable changes since the last release._
 
 ---
 
+## [v2026.5.25.1](https://github.com/RealWhyKnot/WKOpenVR/releases/tag/v2026.5.25.1) — 2026-05-25
+
+_Maintenance release; see commit log for details._
+
+---
+
 ## [v2026.5.25.0](https://github.com/RealWhyKnot/WKOpenVR/releases/tag/v2026.5.25.0) — 2026-05-25
 
 ### Added
