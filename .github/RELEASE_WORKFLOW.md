@@ -1,19 +1,18 @@
 # Release workflow
 
 Releases are tag-driven and fully automated. Pushing a `v*` tag triggers
-[release.yml](workflows/release.yml), which builds the driver DLL,
-publishes a GitHub release, and verifies the published body matches the
-input. The release body is generated from `git log` between the previous
-tag and the current tag plus the templated evergreen sections in
-[release-template/](release-template/) -- there is no hand-written
-narrative path. If a release needs content that the auto-generator can't
-produce, the only supported path is the [extras file](#extras-file).
+[release.yml](workflows/release.yml), which builds the umbrella binary
+and driver DLL, packages the artifacts, publishes a GitHub release, and
+verifies the published body matches the input. The release body is
+generated from `git log` between the previous tag and the current tag
+plus the templated evergreen sections in [release-template/](release-template/)
+-- there is no hand-written narrative path. If a release needs content
+that the auto-generator can't produce, the only supported path is the
+[extras file](#extras-file).
 
-This repo is the shared SteamVR driver consumed by sibling consumer
-overlays (WKOpenVR-SpaceCalibrator, WKOpenVR-Smoothing, WKOpenVR-InputHealth)
-via submodule. End users typically receive this driver as part of one of
-those overlays' installers; standalone driver releases here are mainly
-for paired-bump coordination across the consumer overlays.
+Each release attaches the umbrella zip, the umbrella `*-Setup.exe`, and
+one `*-Setup.exe` per active feature module. End users typically install
+via one of the Setup.exe variants on the release page.
 
 ## Tag shapes
 
@@ -44,7 +43,9 @@ The release body is the verbatim output of
 **Full Changelog**: <compare-url>
 
 ## File integrity
-<table from build.ps1's manifest.tsv>
+| File | Size | SHA256 |
+| umbrella zip | ... |
+| umbrella Setup.exe | ... |
 
 ## More
 <links.md template>
@@ -152,22 +153,6 @@ The workflow pushes the promoted `CHANGELOG.md` and `wiki/Changelog.md`
 back to `main` via the GraphQL `createCommitOnBranch` mutation. The
 resulting commit is signed server-side with GitHub's bot key, so it
 lands as verified=true.
-
-## Coordination with consumer overlays
-
-When this driver releases, the consumer overlays (WKOpenVR-SpaceCalibrator,
-WKOpenVR-Smoothing, WKOpenVR-InputHealth) typically need a paired bump:
-
-1. Tag this driver: `git tag -a v2026.M.D.N origin/main && git push origin v2026.M.D.N`.
-2. In each consumer's checkout: `git submodule update --remote WKOpenVR`,
-   commit the new submodule SHA with a `chore(deps): bump WKOpenVR to <sha>`
-   subject, push.
-3. Tag and release each consumer at its own version when ready.
-
-The shared driver's per-build version stamp + version-gate in each
-consumer's installer means a user with multiple consumers installed
-never accidentally downgrades the shared driver by updating one of
-them.
 
 ## Failure modes + remediations
 

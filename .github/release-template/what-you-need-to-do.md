@@ -1,5 +1,5 @@
 ## What you need to do
 
-Download the per-feature zip from the sibling repo's release page (or this repo's umbrella zip if you want all flags under your own control) and extract into `<SteamVR runtime>\drivers\01wkopenvr\`. Restart SteamVR.
+Run the Setup.exe variant that matches the features you want. Or download `WKOpenVR-{version}.zip` and extract into `<SteamVR runtime>\drivers\01wkopenvr\` for full control over which flags are present. Restart SteamVR after either path.
 
-If you are updating from a previous release: stop SteamVR, replace the files, restart SteamVR. Existing flag files are preserved by an extract-over.
+If you are updating from a previous release: stop SteamVR, run the new Setup.exe (or extract the new zip over the old install), restart SteamVR. Existing flag files are preserved by an extract-over.

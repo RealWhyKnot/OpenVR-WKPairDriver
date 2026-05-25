@@ -34,7 +34,7 @@ cd WKOpenVR
 
 ## Release packaging
 
-`./build.ps1 -Release` produces a release-shaped zip + per-file manifest TSV under `release/` alongside the build outputs. The CI workflow (`.github/workflows/release.yml`) does the same staging on a tag push and additionally produces the four per-feature mirror zips. See the [release process](Release-Process) page.
+`./build.ps1 -Release` produces a release-shaped zip under `release/` alongside the build outputs. The CI workflow (`.github/workflows/release.yml`) does the same staging on a tag push and additionally builds the umbrella + per-feature NSIS installers. See the [release process](Release-Process) page.
 
 ## PowerShell 5.1 gotchas
 

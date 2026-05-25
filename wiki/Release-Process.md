@@ -3,26 +3,14 @@
 Releases are produced by `.github/workflows/release.yml` on a `v*` tag push. The workflow:
 
 1. Promotes the `## Unreleased` heading in `CHANGELOG.md` (and the wiki mirror) to `## [vTAG] -- DATE` via `.github/scripts/Update-Changelog.ps1`.
-2. Configures + builds the umbrella exe, driver DLL, and C# face-tracking host.
+2. Configures + builds the umbrella exe and driver DLL with `-DWKOPENVR_RELEASE_BUILD=ON`. Modules carrying `modules/<slug>/disabled-in-release.flag` are skipped via the CMake helpers in `cmake/WKOpenVRModules.cmake` and their resource directories are wiped from the cached build tree before staging.
 3. Runs every `*_tests.exe` under `build/artifacts/Release/`; any non-zero exit fails the release.
-4. Stages a driver tree under `release/_stage_<version>/` with the loader-prefixed `driver_01wkopenvr.dll`, the face-tracking host artifacts, the umbrella exe, and `openvr_api.dll`.
-5. Builds five zip artifacts: one umbrella + four per-feature mirrors. Each mirror is identical to the umbrella plus one `enable_<feature>.flag` pre-dropped under `driver_wkopenvr/resources/`.
-6. Builds the NSIS installer (`WKOpenVR-v<version>-Setup.exe`).
-7. Generates the release body via `.github/scripts/Generate-ReleaseNotes.ps1` from the promoted changelog plus per-file SHA256 manifest.
-8. Publishes the umbrella release on this repo (zip + installer).
-9. Mirrors the release to each sibling repo using `MIRROR_RELEASE_TOKEN`, attaching that feature's mirror zip.
-10. Pushes the promoted CHANGELOG.md back to `main` via GraphQL `createCommitOnBranch` so the commit is server-side signed by GitHub's bot key.
-
-## Mirror token
-
-The mirror step needs a fine-grained PAT with `contents: read and write` scoped to all four mirror repos:
-
-- `RealWhyKnot/WKOpenVR-SpaceCalibrator`
-- `RealWhyKnot/WKOpenVR-Smoothing`
-- `RealWhyKnot/WKOpenVR-InputHealth`
-- `RealWhyKnot/WKOpenVR-VRCFT`
-
-Store as the `MIRROR_RELEASE_TOKEN` secret on this repo (Settings -> Secrets and variables -> Actions). Without it, the umbrella release publishes but the four mirror steps fail -- acceptable for a smoke test, fix before promoting any real version. Widening the token to add a new mirror repo is an in-place edit on the PAT under `github.com/settings/tokens?type=beta`; no need to regenerate.
+4. Stages a driver tree under `release/_stage_<version>/` with the loader-prefixed `driver_01wkopenvr.dll`, the umbrella exe, and `openvr_api.dll`. Resource directories for any module with `disabled-in-release.flag` are skipped.
+5. Builds the umbrella zip (`WKOpenVR-<version>.zip`).
+6. Builds the umbrella NSIS installer (`WKOpenVR-v<version>-Setup.exe`) plus one per-feature installer per active module (`WKOpenVR-<Name>-v<version>-Setup.exe`). Each per-feature installer drops the matching `enable_<feature>.flag` so the feature activates immediately after install.
+7. Generates the release body via `.github/scripts/Generate-ReleaseNotes.ps1` from the promoted changelog plus a two-row file integrity table (umbrella zip + umbrella Setup.exe).
+8. Publishes a single GitHub release on this repo with the umbrella zip, umbrella Setup.exe, and every per-feature Setup.exe attached.
+9. Pushes the promoted CHANGELOG.md back to `main` via GraphQL `createCommitOnBranch` so the commit is server-side signed by GitHub's bot key.
 
 ## Changelog discipline
 
@@ -41,4 +29,4 @@ Two hooks enforce the version-stamp convention on `.githooks/`:
 
 ## Test-tag rule
 
-Don't push test tags to the live repo. The workflow does five public releases per tag (umbrella + four mirrors) and pushes a server-signed changelog-promotion commit at the end; a "test" tag would leak all of that publicly. Validate workflow changes locally with `js-yaml` for parse, mirror the packaging step by extracting the PowerShell from the YAML and running it against the existing build artifacts, or use a private fork for end-to-end runs.
+Don't push test tags to the live repo. The workflow publishes a public release per tag and pushes a server-signed changelog-promotion commit at the end; a "test" tag would leak all of that publicly. Validate workflow changes locally with `js-yaml` for parse, run the packaging step by extracting the PowerShell from the YAML and executing it against the existing build artifacts, or use a private fork for end-to-end runs.
