@@ -17,6 +17,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
+#include <cmath>
 #include <random>
 #include <vector>
 
@@ -179,6 +180,32 @@ TEST(CalibrationCalcTest, RecoversPureTranslation) {
         << "Recovered translation: " << recovered.translation().transpose()
         << ", expected: " << trans.transpose();
     EXPECT_LT(RotationErrorDegrees(recovered, expected), 0.5);
+}
+
+TEST(CalibrationCalcTest, SeedEstimatedTransformationStartsIncrementalFromProfile) {
+    const double yawRad = 20.0 * EIGEN_PI / 180.0;
+    const Eigen::Vector3d trans(-1.06882, 2.47276, 0.50086);
+    Eigen::AffineCompact3d profile = MakeTransform(yawRad, 0.0, 0.0, trans);
+
+    CalibrationCalc calc;
+    calc.Clear();
+    calc.SeedEstimatedTransformation(profile);
+
+    ASSERT_TRUE(calc.isValid());
+    EXPECT_LT((calc.Transformation().translation() - trans).norm(), 1e-9);
+    EXPECT_LT(RotationErrorDegrees(calc.Transformation(), profile), 1e-5);
+
+    for (auto& s : MakeSamplePairs(profile, kSampleCount)) {
+        calc.PushSample(s);
+    }
+
+    bool lerp = false;
+    (void)calc.ComputeIncremental(
+        lerp, /*threshold=*/1.5, /*relPoseMaxError=*/0.005, /*ignoreOutliers=*/false);
+    ASSERT_TRUE(calc.isValid());
+    ASSERT_TRUE(std::isfinite(calc.LastPriorErrorM()));
+    EXPECT_LT(calc.LastPriorErrorM(), 1e-3)
+        << "Continuous mode must score the saved profile as the prior, not identity";
 }
 
 // ---------------------------------------------------------------------------

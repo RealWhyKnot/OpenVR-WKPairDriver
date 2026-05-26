@@ -157,6 +157,8 @@ public:
 		m_relativePosCalibrated = calibrated;
 	}
 
+	void SeedEstimatedTransformation(const Eigen::AffineCompact3d& transform);
+
 	void PushSample(const Sample& sample);
 	void Clear();
 

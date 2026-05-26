@@ -62,6 +62,20 @@ CalibrationContext CalCtx;
 // directly from earlier in the translation unit.
 static double g_runtimeWedgeSince = -1.0;
 
+static Eigen::AffineCompact3d ProfileTransform(Eigen::Vector3d eulerDeg, Eigen::Vector3d transCm)
+{
+	auto euler = eulerDeg * EIGEN_PI / 180.0;
+	Eigen::Quaterniond rotQuat =
+		Eigen::AngleAxisd(euler(0), Eigen::Vector3d::UnitZ()) *
+		Eigen::AngleAxisd(euler(1), Eigen::Vector3d::UnitY()) *
+		Eigen::AngleAxisd(euler(2), Eigen::Vector3d::UnitX());
+
+	Eigen::AffineCompact3d transform = Eigen::AffineCompact3d::Identity();
+	transform.linear() = rotQuat.toRotationMatrix();
+	transform.translation() = transCm * 0.01;
+	return transform;
+}
+
 // CPU-pressure diagnostic. Samples GetProcessTimes() once per CalibrationTick
 // (~20 Hz). Computes the % of total CPU the SC process used over the wall-clock
 // delta since the last sample, divided by the logical-processor count so 100%
@@ -686,6 +700,24 @@ void StartContinuousCalibration(const char* reason) {
 	}
 	StartCalibration(reason);
 	CalCtx.state = CalibrationState::Continuous;
+	if (CalCtx.validProfile) {
+		calibration.SeedEstimatedTransformation(
+			ProfileTransform(CalCtx.calibratedRotation, CalCtx.calibratedTranslation));
+		const double magCm = CalCtx.calibratedTranslation.norm();
+		char seedBuf[320];
+		snprintf(seedBuf, sizeof seedBuf,
+			"StartContinuousCalibration_seed_profile: trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f rot_deg=(%.3f,%.3f,%.3f)",
+			CalCtx.calibratedTranslation.x(),
+			CalCtx.calibratedTranslation.y(),
+			CalCtx.calibratedTranslation.z(),
+			magCm,
+			CalCtx.calibratedRotation.x(),
+			CalCtx.calibratedRotation.y(),
+			CalCtx.calibratedRotation.z());
+		Metrics::WriteLogAnnotation(seedBuf);
+	} else {
+		Metrics::WriteLogAnnotation("StartContinuousCalibration_seed_profile: skipped validProfile=0");
+	}
 	calibration.setRelativeTransformation(CalCtx.refToTargetPose, CalCtx.relativePosCalibrated);
 	calibration.lockRelativePosition = CalCtx.lockRelativePosition;
 	if (CalCtx.lockRelativePosition) {
@@ -702,12 +734,14 @@ void StartContinuousCalibration(const char* reason) {
 	spacecal::liveness::Reset(g_tgtLiveness);
 	g_refWasOffline = false;
 	g_tgtWasOffline = false;
-	char startBuf[200];
+	char startBuf[280];
 	snprintf(startBuf, sizeof startBuf,
-		"StartContinuousCalibration: reason=%s snapshot_valid=%d relPosCal=%d",
+		"StartContinuousCalibration: reason=%s snapshot_valid=%d validProfile=%d relPosCal=%d lockRelPos=%d",
 		(reason && reason[0]) ? reason : "unknown",
 		(int)CalCtx.continuousStartSnapshot.validProfile,
-		(int)CalCtx.continuousStartSnapshot.relativePosCalibrated);
+		(int)CalCtx.validProfile,
+		(int)CalCtx.continuousStartSnapshot.relativePosCalibrated,
+		(int)CalCtx.lockRelativePosition);
 	Metrics::WriteLogAnnotation(startBuf);
 }
 
@@ -2714,10 +2748,24 @@ void CalibrationTick(double time)
 			inContinuous, hasGuardBaseline, hasAcceptedSnapshot,
 			guardBaseline, candidateTranslationCm, R);
 		if (!finiteT || !nonTrivialRot || !guard.accepted) {
-			char rejBuf[224];
+			const char* baselineTag =
+				hasAcceptedSnapshot ? "last_accepted" : (ctx.validProfile ? "profile" : "none");
+			char rejBuf[512];
 			std::snprintf(rejBuf, sizeof rejBuf,
-				"calibration_candidate_rejected: finiteT=%d rotAngle=%.6f reason=%s jump_cm=%.2f",
-				finiteT ? 1 : 0, rotAngle, guard.reason, guard.jumpM * 100.0);
+				"calibration_candidate_rejected: finiteT=%d rotAngle=%.6f reason=%s jump_cm=%.2f baseline=%s "
+				"baseline_cm=(%.2f,%.2f,%.2f) candidate_cm=(%.2f,%.2f,%.2f) candidate_mag_cm=%.2f",
+				finiteT ? 1 : 0,
+				rotAngle,
+				guard.reason,
+				guard.jumpM * 100.0,
+				baselineTag,
+				guardBaseline.x(),
+				guardBaseline.y(),
+				guardBaseline.z(),
+				candidateTranslationCm.x(),
+				candidateTranslationCm.y(),
+				candidateTranslationCm.z(),
+				candidateTranslationCm.norm());
 			Metrics::WriteLogAnnotation(rejBuf);
 			CalCtx.Log("Calibration candidate rejected; keeping previous profile.\n");
 		} else {
@@ -2738,6 +2786,18 @@ void CalibrationTick(double time)
 			if (ctx.state == CalibrationState::Continuous) {
 				ctx.lastAcceptedContinuousSnapshot = ctx.CaptureProfileSnapshot();
 			}
+
+			char acceptBuf[360];
+			std::snprintf(acceptBuf, sizeof acceptBuf,
+				"calibration_candidate_accepted: state=%d trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f relPosCal=%d validProfile=%d",
+				(int)ctx.state,
+				ctx.calibratedTranslation.x(),
+				ctx.calibratedTranslation.y(),
+				ctx.calibratedTranslation.z(),
+				ctx.calibratedTranslation.norm(),
+				(int)ctx.relativePosCalibrated,
+				(int)ctx.validProfile);
+			Metrics::WriteLogAnnotation(acceptBuf);
 
 			CalCtx.Log("Finished calibration, profile saved\n");
 

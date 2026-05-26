@@ -147,6 +147,46 @@ void CalibrationCalc::Clear() {
 	// is restarted faster than fresh samples can be collected.
 }
 
+void CalibrationCalc::SeedEstimatedTransformation(const Eigen::AffineCompact3d& transform) {
+	if (!transform.matrix().allFinite()) {
+		Metrics::WriteLogAnnotation("SeedEstimatedTransformation_rejected: nonfinite_transform");
+		return;
+	}
+
+	m_estimatedTransformation = transform;
+	m_isValid = true;
+	m_consecutiveRejections = 0;
+	m_rejectReasonTag.clear();
+	m_healthyHoldAnnotated = false;
+	m_lastPriorRetargetingErrorM = std::numeric_limits<double>::infinity();
+
+	const Eigen::Quaterniond q(transform.rotation());
+	const Eigen::Quaterniond twistY(q.w(), 0.0, q.y(), 0.0);
+	const double twistNorm = std::sqrt(twistY.w() * twistY.w() + twistY.y() * twistY.y());
+	const double yaw = (twistNorm > 1e-12)
+		? 2.0 * std::atan2(twistY.y() / twistNorm, twistY.w() / twistNorm)
+		: 0.0;
+
+	spacecal::blendfilter::Reset(m_blendFilter);
+	m_blendFilter.initialized = true;
+	m_blendFilter.yaw = yaw;
+	m_blendFilter.tx = transform.translation().x();
+	m_blendFilter.ty = transform.translation().y();
+	m_blendFilter.tz = transform.translation().z();
+	m_blendFilterLastUpdateTime = m_lastSampleTime;
+
+	char buf[220];
+	snprintf(buf, sizeof buf,
+		"SeedEstimatedTransformation_applied: trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f yaw_deg=%.3f sample_count=%zu",
+		transform.translation().x() * 100.0,
+		transform.translation().y() * 100.0,
+		transform.translation().z() * 100.0,
+		transform.translation().norm() * 100.0,
+		yaw * 57.29577951308232,
+		m_samples.size());
+	Metrics::WriteLogAnnotation(buf);
+}
+
 void CalibrationCalc::FreezeRotationPhaseSamples() {
 	// Move the live sample buffer into the frozen-rotation slot so the next
 	// CollectSample tick starts a fresh translation-phase buffer. ComputeOneshot
