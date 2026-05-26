@@ -2,6 +2,7 @@
 
 #include "CalibrationInternal.h"
 #include "CalibrationMetrics.h"
+#include "HeadMountPoseSampling.h"
 #include "LatencyEstimator.h"
 #include "RotationMatrix3.h"
 #include "VRState.h"
@@ -226,7 +227,91 @@ CalibrationCalc calibration;
 		target.result = vr::ETrackingResult::TrackingResult_Uninitialized;
 
 		reference = ctx.devicePoses[ctx.referenceID];
-		target = ctx.devicePoses[ctx.targetID];
+
+		// AutoPaired: when a head-mount tracker is resolved and valid, use its
+		// pose (composed with headFromTracker) as the target-side observation.
+		// Gives continuous paired samples without user motion. Off mode, or any
+		// tick where the tracker pose is invalid, falls through to the regular
+		// ctx.targetID path. Restricted to continuous states so one-shot
+		// Begin/Rotation/Translation always read the user-selected target
+		// device, regardless of head-mount config.
+		const bool inContinuousFamily =
+			ctx.state == CalibrationState::Continuous
+			|| ctx.state == CalibrationState::ContinuousStandby;
+		const bool headMountEngaged =
+			inContinuousFamily
+			&& ctx.headMount.mode >= HeadMountMode::AutoPaired
+			&& ctx.headMount.deviceID >= 0
+			&& ctx.headMount.deviceID < (int32_t)vr::k_unMaxTrackedDeviceCount;
+
+		if (headMountEngaged) {
+			const vr::DriverPose_t& trackerRaw = ctx.devicePoses[ctx.headMount.deviceID];
+			if (trackerRaw.poseIsValid
+				&& trackerRaw.result == vr::ETrackingResult::TrackingResult_Running_OK)
+			{
+				// Log first use each session (edge: headMountEngaged just became true
+				// or was re-entered after an invalid tick).
+				{
+					static bool s_loggedActive = false;
+					if (!s_loggedActive) {
+						s_loggedActive = true;
+						char mbuf[256];
+						const std::string& mdl = CalCtx.headMount.trackerModel;
+						snprintf(mbuf, sizeof mbuf,
+							"[head-mount] auto-paired sampling active: deviceID=%d model='%s'",
+							(int)ctx.headMount.deviceID, mdl.c_str());
+						Metrics::WriteLogAnnotation(mbuf);
+					}
+				}
+				// Compose tracker world pose with headFromTracker so the math sees a
+				// pose at the HMD's reference point (IPD midpoint), not the tracker
+				// mount point. head_pose = tracker_pose * headFromTracker.
+				// Composition and conversion logic lives in HeadMountPoseSampling.h
+				// so unit tests can exercise it without a live VR session.
+				const Eigen::AffineCompact3d headWorld =
+					spacecal::headmount::ComputeHeadWorldPose(
+						trackerRaw, ctx.headMount.headFromTracker);
+
+				// Encode the derived head pose into a synthetic DriverPose_t with an
+				// identity worldFromDriver. Velocity fields are zeroed intentionally --
+				// this pose is only used for translation/rotation sample collection,
+				// not for velocity extrapolation.
+				target = vr::DriverPose_t{};
+				target.poseIsValid = true;
+				target.result = vr::ETrackingResult::TrackingResult_Running_OK;
+				target.deviceIsConnected = true;
+				target.qWorldFromDriverRotation.w = 1.0;
+				target.qWorldFromDriverRotation.x = 0.0;
+				target.qWorldFromDriverRotation.y = 0.0;
+				target.qWorldFromDriverRotation.z = 0.0;
+				Eigen::Quaterniond headQ(headWorld.linear());
+				headQ.normalize();
+				target.qRotation.w = headQ.w();
+				target.qRotation.x = headQ.x();
+				target.qRotation.y = headQ.y();
+				target.qRotation.z = headQ.z();
+				target.vecPosition[0] = headWorld.translation().x();
+				target.vecPosition[1] = headWorld.translation().y();
+				target.vecPosition[2] = headWorld.translation().z();
+			}
+			// Invalid tracker: target stays zero/invalid; the validity gate below
+			// rejects the sample. No silent fallback to ctx.targetID.
+			// Log the first invalid tick and the recovery edge.
+			{
+				static bool s_trackerWasValid = false;
+				const bool trackerNowValid = trackerRaw.poseIsValid
+					&& trackerRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+				if (s_trackerWasValid && !trackerNowValid) {
+					Metrics::WriteLogAnnotation(
+						"[head-mount] tracker invalid; falling back to non-head-mount target for this tick");
+				} else if (!s_trackerWasValid && trackerNowValid) {
+					Metrics::WriteLogAnnotation("[head-mount] tracker valid again");
+				}
+				s_trackerWasValid = trackerNowValid;
+			}
+		} else {
+			target = ctx.devicePoses[ctx.targetID];
+		}
 
 		// Defensive: detect quash-pose bleed. The +10 km X/Z offset that
 		// HideList applies to hidden trackers happens in the driver AFTER
@@ -468,6 +553,31 @@ CalibrationCalc calibration;
 			Metrics::jitterTarget.Push(calibration.TargetJitter());
 		}
 
+		// Head-mount diagnostic metrics.
+		{
+			const bool hmActive = spacecal::headmount::IsTrackerValidForSampling(
+				ctx.headMount,
+				ctx.devicePoses,
+				vr::k_unMaxTrackedDeviceCount);
+			Metrics::headMountActive.Push(hmActive);
+
+			// questHmdVsProxyDeltaMm: distance between the HMD's reported world
+			// position and the head-mount tracker's derived head position.
+			// Spikes indicate a Quest SLAM snap or mount slip.
+			if (hmActive
+				&& reference.poseIsValid
+				&& reference.result == vr::ETrackingResult::TrackingResult_Running_OK)
+			{
+				const Pose hmdPose = ConvertPose(reference);
+				const Eigen::AffineCompact3d proxyHeadWorld =
+					spacecal::headmount::ComputeHeadWorldPose(
+						ctx.devicePoses[ctx.headMount.deviceID],
+						ctx.headMount.headFromTracker);
+				const double deltaM = (hmdPose.trans - proxyHeadWorld.translation()).norm();
+				Metrics::questHmdVsProxyDeltaMm.Push(deltaM * 1000.0);
+			}
+		}
+
 		return true;
 	}
 
@@ -480,6 +590,58 @@ CalibrationCalc calibration;
 
 		if (CalCtx.targetID < 0) {
 			CalCtx.targetID = state.FindDevice(CalCtx.targetStandby.trackingSystem, CalCtx.targetStandby.model, CalCtx.targetStandby.serial);
+		}
+
+		// Resolve the head-mount tracker by serial each scan so reconnections are
+		// picked up automatically. Serial is authoritative; model is used as a
+		// soft hint by FindDevice. Resolution runs whenever a serial is configured
+		// regardless of mode: the offset-calibration modal needs the deviceID to
+		// flow samples to its solver before the user commits to a head-mount
+		// mode. Downstream consumers (auto-paired CollectSample, the quash
+		// decision) still gate on mode, so resolving here doesn't leak behavior
+		// into Off mode.
+		if (!CalCtx.headMount.trackerSerial.empty()) {
+			int32_t resolvedID = state.FindDevice(
+				CalCtx.headMount.trackerTrackingSystem,
+				CalCtx.headMount.trackerModel,
+				CalCtx.headMount.trackerSerial);
+			if (resolvedID < 0) {
+				if (CalCtx.headMount.deviceID >= 0) {
+					char lbuf[256];
+					snprintf(lbuf, sizeof lbuf,
+						"[head-mount] tracker not found in VRState; deviceID reset"
+						" serial='%s' trackingSystem='%s'",
+						CalCtx.headMount.trackerSerial.c_str(),
+						CalCtx.headMount.trackerTrackingSystem.c_str());
+					Metrics::WriteLogAnnotation(lbuf);
+				}
+				CalCtx.headMount.deviceID = -1;
+			} else {
+				if (CalCtx.headMount.deviceID != resolvedID) {
+					char lbuf[256];
+					snprintf(lbuf, sizeof lbuf,
+						"[head-mount] tracker resolved: serial='%s' deviceID=%d",
+						CalCtx.headMount.trackerSerial.c_str(), (int)resolvedID);
+					Metrics::WriteLogAnnotation(lbuf);
+				}
+				CalCtx.headMount.deviceID = resolvedID;
+			}
+		} else {
+			{
+				static int s_lastLoggedMode = -999;
+				const int curMode = (int)CalCtx.headMount.mode;
+				if (curMode != s_lastLoggedMode) {
+					s_lastLoggedMode = curMode;
+					if (curMode > 0) {
+						char lbuf[128];
+						snprintf(lbuf, sizeof lbuf,
+							"[head-mount] no serial configured but mode=%d; deviceID stays -1",
+							curMode);
+						Metrics::WriteLogAnnotation(lbuf);
+					}
+				}
+			}
+			CalCtx.headMount.deviceID = -1;
 		}
 
 		for (int i = 0; i < CalCtx.MAX_CONTROLLERS; i++) {

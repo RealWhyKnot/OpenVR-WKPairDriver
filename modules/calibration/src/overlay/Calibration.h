@@ -137,6 +137,61 @@ struct AdditionalCalibration {
 	AdditionalCalibration& operator=(AdditionalCalibration&&) noexcept = default;
 };
 
+// Operating mode for the head-mounted tracker feature. Off disables the
+// entire subsystem. Higher modes are cumulative: DriverSynth implies
+// Corroborate which implies AutoPaired.
+enum class HeadMountMode : uint8_t {
+	Off          = 0,
+	AutoPaired   = 1,
+	Corroborate  = 2,
+	DriverSynth  = 3,   // dev-only
+};
+
+// Identity and calibration for a head-mounted tracker (e.g. a Vive tracker
+// zip-tied to a Quest headset). headFromTracker is the rigid offset from the
+// tracker's local frame to the HMD's local frame, solved by the offset
+// calibration wizard.
+struct HeadMountConfig {
+	HeadMountMode mode = HeadMountMode::Off;
+	std::string trackerSerial;
+	std::string trackerModel;          // persisted; needed for VRState::FindDevice
+	std::string trackerTrackingSystem;
+	Eigen::AffineCompact3d headFromTracker = Eigen::AffineCompact3d::Identity();
+	bool hideTracker = true;
+	bool offsetCalibrated = false;
+	// Runtime-resolved OpenVR device ID; not persisted. -1 means unresolved.
+	// Set each AssignTargets() call by matching trackerSerial + trackerTrackingSystem.
+	int32_t deviceID = -1;
+};
+
+// One vertex of the safety boundary polygon.
+struct BoundaryVertex { double x = 0, y = 0, z = 0; };
+
+// Safety boundary anchored in the target tracking system (lighthouse) so it
+// stays physically stable even when the reference universe drifts. Vertices
+// are stored in lighthouse space; chaperone push transforms them into
+// standing-universe coordinates each cycle. priorChaperone snapshots the
+// user's pre-existing SteamVR chaperone before our first push so the
+// "Restore original" action returns the user to where they started.
+struct BoundaryConfig {
+	bool enabled = false;
+	std::vector<BoundaryVertex> vertices;
+	double floorY = 0.0;
+	double ceilingY = 2.5;
+	std::vector<uint8_t> priorChaperone;
+	bool priorChaperoneCaptured = false;
+};
+
+// ADB connection state and Guardian-pause settings. savedEndpoint survives
+// restarts so the user does not re-scan on every launch.
+struct AdbConfig {
+	bool setupCompleted = false;
+	std::string savedEndpoint;
+	bool guardianPauseEnabled = false;
+	int guardianPauseValue = 1;
+	bool autoApplyOnStart = true;
+};
+
 struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
@@ -164,6 +219,14 @@ struct CalibrationContext
 	// state == Continuous in the apply path, so this default only affects
 	// continuous behaviour.
 	bool quashTargetInContinuous = true;
+
+	// Head-mounted tracker configuration (Quest + lighthouse hybrid).
+	HeadMountConfig headMount;
+	// Safety boundary: captured chaperone outline + floor/ceiling for re-push.
+	BoundaryConfig  boundary;
+	// ADB connection and Guardian-pause settings.
+	AdbConfig       adb;
+
 	double timeLastTick = 0, timeLastScan = 0, timeLastAssign = 0;
 	// Default ON: drop sample pairs whose rotation axis disagrees with the
 	// consensus before the LS solve. Helps with intermittent USB glitches or
@@ -926,6 +989,7 @@ void CalibrationTick(double time);
 // catches any caller that hasn't been updated yet so the build stays green.
 void StartCalibration(const char* reason = "unknown");
 void StartContinuousCalibration(const char* reason = "unknown");
+void CancelCalibration(const char* reason = "unknown");
 void EndContinuousCalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
@@ -972,12 +1036,6 @@ bool UndoLastAutoRecovery();
 // Hide the recovery banner without undoing. The recovered calibration
 // continues; only the UI banner disappears.
 void DismissAutoRecoveryBanner();
-
-// Manual playspace recenter: shift the standing zero pose so the user's
-// current HMD position becomes the chaperone center. X and Z translate;
-// Y (floor) and rotation are preserved. Used by the "Recenter playspace"
-// UI button. Returns true on success.
-bool RecenterPlayspaceToCurrentHmd();
 
 // Re-open the driver pose shared-memory segment. The IPC client invokes this
 // after a successful reconnect to vrserver: when vrserver crashes and respawns,

@@ -3,7 +3,10 @@
 #include "Calibration.h"
 #include "CalibrationAnchor.h"
 #include "Configuration.h"
+#include "GuardianAutoApply.h"
 #include "UserInterface.h"
+
+#include "AdbController.h"
 
 #include <openvr.h>
 
@@ -13,6 +16,11 @@
 #include <vector>
 
 namespace {
+
+// Singleton AdbController for the calibration plugin. Constructed once;
+// all Guardian auto-apply calls go through this instance so the binary
+// path is resolved only once.
+AdbController g_adb;
 
 bool g_profileLoaded = false;
 bool g_vrReady = false;
@@ -97,6 +105,10 @@ void CCal_UmbrellaStart()
 	if (!g_profileLoaded) {
 		LoadProfile(CalCtx);
 		g_profileLoaded = true;
+		// Profile load is complete; run the gated Guardian pause sequence
+		// before the render loop starts so the headset is in the correct
+		// state by the time the first frame renders.
+		wkopenvr::adb::MaybeAutoApplyAtStart(g_adb);
 	}
 	g_lastRetry = std::chrono::steady_clock::now() - g_retryPeriod;
 }
@@ -108,6 +120,10 @@ void CCal_UmbrellaTick()
 		g_lastRetry = now;
 		TryConnect();
 	}
+
+	// Low-rate ADB health poll. TickGuardianHealth enforces its own 7 s cadence
+	// internally so calling it every tick is cheap when ADB is idle.
+	wkopenvr::adb::TickGuardianHealth(g_adb);
 
 	if (g_vrReady) {
 		CalibrationTick(SecondsSinceStart());
@@ -142,6 +158,11 @@ void CCal_UmbrellaShutdown()
 		vr::VR_Shutdown();
 	}
 	g_vrReady = false;
+}
+
+AdbController& CCal_GetAdb()
+{
+	return g_adb;
 }
 
 void RequestImmediateRedraw()

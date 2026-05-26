@@ -61,6 +61,10 @@ if(MSVC)
 endif()
 
 add_executable(OpenVRPairOverlay WIN32
+	AdbController.cpp
+	AdbController.h
+	AdbSetupWizard.cpp
+	AdbSetupWizard.h
 	CalibrationAnchor.cpp
 	CalibrationAnchor.h
 	DeviceFilters.cpp

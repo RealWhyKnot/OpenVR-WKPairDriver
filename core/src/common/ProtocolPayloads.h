@@ -621,6 +621,27 @@
 		uint8_t _reserved[6];
 	};
 
+	// POD payload for RequestSetHeadMountConfig (v25). The overlay resolves
+	// trackerSerial to a live deviceId before sending; deviceId == -1 means
+	// the tracker is not currently present. mode encodes HeadMountMode;
+	// headFromTrackerTrans and headFromTrackerRot (xyzw) carry the rigid
+	// offset from the tracker's frame to the HMD's frame.
+	//
+	// NOTE: this struct exceeds sizeof(SetDeviceTransform). sizeof(Request)
+	// grows with this addition. See the v25 version comment in Protocol.h.
+	struct SetHeadMountConfig
+	{
+		uint32_t mode;                                        // HeadMountMode value
+		int32_t  deviceId;                                    // -1 = not resolved
+		char     trackerSerial[MaxTrackingSystemNameLen];
+		char     trackerTrackingSystem[MaxTrackingSystemNameLen];
+		double   headFromTrackerTrans[3];                     // metres, tracker local
+		double   headFromTrackerRot[4];                       // quaternion xyzw
+		bool     hideTracker;
+		bool     offsetCalibrated;
+		uint8_t  _pad[6];
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -675,6 +696,9 @@
 			// v22: OSC router live send-port edit. Tiny (8 bytes); does not
 			// grow the union.
 			OscRouterConfig       setOscRouterConfig;
+			// v25: head-mounted tracker config. Larger than SetDeviceTransform;
+			// sizeof(Request) grows. See the v25 comment in Protocol.h.
+			SetHeadMountConfig    setHeadMountConfig;
 		};
 
 		Request() : type(RequestInvalid), setAlignmentSpeedParams({}) { }

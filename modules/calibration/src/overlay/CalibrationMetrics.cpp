@@ -46,6 +46,16 @@ namespace Metrics {
 	// true - full calibration, false - static calibration
 	TimeSeries<bool> calibrationApplied;
 
+	TimeSeries<bool>     headMountActive;
+	TimeSeries<double>   headMountResidualMm;
+	TimeSeries<double>   questHmdVsProxyDeltaMm;
+	TimeSeries<uint32_t> snapSuppressedCount;
+	TimeSeries<uint32_t> driverSynthFallbackCount;
+	TimeSeries<bool>     boundaryActive;
+	TimeSeries<uint32_t> chaperoneRePushCount;
+	TimeSeries<bool>     guardianPaused;
+	TimeSeries<bool>     adbConnected;
+
 	// https://stackoverflow.com/a/17827724
 	bool IsBrowsePath(const std::wstring& path)
 	{

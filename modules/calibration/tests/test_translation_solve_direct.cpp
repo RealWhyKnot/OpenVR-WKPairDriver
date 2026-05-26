@@ -39,7 +39,10 @@ std::vector<Sample> MakeDirectSamples(
     std::mt19937 rng(seed);
     std::uniform_real_distribution<double> angleDist(-EIGEN_PI, EIGEN_PI);
     std::uniform_real_distribution<double> transDist(-1.0, 1.0);
-    std::normal_distribution<double> noiseDist(0.0, sigma_m);
+    // MSVC's std::normal_distribution asserts sigma > 0 even at construction,
+    // so substitute a safe positive sigma when noise is disabled; the
+    // distribution is only sampled below when sigma_m > 0.0.
+    std::normal_distribution<double> noiseDist(0.0, sigma_m > 0.0 ? sigma_m : 1.0);
 
     std::vector<Sample> samples;
     samples.reserve(N);

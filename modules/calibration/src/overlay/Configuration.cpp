@@ -1,7 +1,8 @@
 #include "Configuration.h"
+#include "BoundaryRePush.h"       // ScheduleBoundaryStartupPush -- startup push on load.
 #include "CalibrationMetrics.h"   // WriteLogAnnotation -- profile_loaded_calibration
                                   // diagnostic line on launch.
-#include "WedgeDetector.h"        // kMaxPlausibleCalibrationMagnitudeCm — shared
+#include "WedgeDetector.h"        // kMaxPlausibleCalibrationMagnitudeCm -- shared
                                   // with the runtime wedge detector in Calibration.cpp.
 
 #include <picojson.h>
@@ -49,12 +50,15 @@
 //       Adds "lock_relative_position_mode" (int 0/1/2 = OFF/ON/AUTO) replacing
 //       the legacy "lock_relative_position" bool. Migration: bool true -> ON,
 //       bool false -> AUTO (the new safer default that detects rigidity).
+//   4 - Adds head_mount, boundary, and adb config sections for
+//       lighthouse-anchored head-tracker + safety boundary. No field renames;
+//       new sections default to disabled.
 //
 // When you change the schema:
 //   1. Bump kProfileSchemaVersion below.
 //   2. Add a step inside MigrateProfile() for the new bump.
 //   3. Keep the load path tolerant of missing keys for any new field.
-static const int kProfileSchemaVersion = 3;
+static const int kProfileSchemaVersion = 4;
 
 // Set to true when a chaperone geometry array with a non-multiple-of-12 length
 // is encountered during ParseProfile. The UI reads this to show a banner
@@ -100,7 +104,14 @@ static void MigrateProfile(int from_version, picojson::object& profile)
 		// keep that data. The next save with kProfileSchemaVersion >= 2 will
 		// drop it for new profiles.
 	}
+
+	// 3 -> 4: head_mount, boundary, and adb are new sections. The load path
+	// is tolerant of missing keys and defaults them to disabled, so nothing
+	// needs to be rewritten here. A v3 profile silently acquires the
+	// default-off state; the first save from the new overlay writes the keys
+	// only when non-default.
 }
+
 
 static picojson::array FloatArray(const float *buf, size_t numFloats)
 {
@@ -200,6 +211,202 @@ static picojson::object SaveAlignmentParams(CalibrationContext& ctx) {
 		obj[name].set<double>(param);
 	});
 
+	return obj;
+}
+
+// Hex-encode a byte buffer to a std::string. Used for prior_chaperone bytes
+// because picojson carries no base64 helper and a hex string is readable,
+// round-trip exact, and requires no external dependency.
+static std::string BytesToHex(const std::vector<uint8_t>& bytes) {
+	static const char kHex[] = "0123456789abcdef";
+	std::string out;
+	out.reserve(bytes.size() * 2);
+	for (uint8_t b : bytes) {
+		out += kHex[b >> 4];
+		out += kHex[b & 0x0f];
+	}
+	return out;
+}
+
+// Decode a hex string produced by BytesToHex. Non-hex characters cause the
+// pair to be skipped (tolerant of whitespace or minor corruption).
+static std::vector<uint8_t> HexToBytes(const std::string& hex) {
+	std::vector<uint8_t> out;
+	out.reserve(hex.size() / 2);
+	for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+		auto hval = [](char c) -> int {
+			if (c >= '0' && c <= '9') return c - '0';
+			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+			return -1;
+		};
+		int hi = hval(hex[i]), lo = hval(hex[i + 1]);
+		if (hi >= 0 && lo >= 0)
+			out.push_back((uint8_t)((hi << 4) | lo));
+	}
+	return out;
+}
+
+static void LoadHeadMount(HeadMountConfig& hm, picojson::value& value) {
+	if (!value.is<picojson::object>()) return;
+	auto& obj = value.get<picojson::object>();
+
+	if (obj["mode"].is<double>()) {
+		int raw = (int)obj["mode"].get<double>();
+		if (raw >= 0 && raw <= 3)
+			hm.mode = (HeadMountMode)raw;
+	}
+	if (obj["tracker_serial"].is<std::string>())
+		hm.trackerSerial = obj["tracker_serial"].get<std::string>();
+	if (obj["tracker_model"].is<std::string>())
+		hm.trackerModel = obj["tracker_model"].get<std::string>();
+	if (obj["tracker_tracking_system"].is<std::string>())
+		hm.trackerTrackingSystem = obj["tracker_tracking_system"].get<std::string>();
+	if (obj["hide_tracker"].is<bool>())
+		hm.hideTracker = obj["hide_tracker"].get<bool>();
+	if (obj["offset_calibrated"].is<bool>())
+		hm.offsetCalibrated = obj["offset_calibrated"].get<bool>();
+
+	// head_from_tracker: quaternion + translation, same pattern as relative_transform.
+	if (obj["head_from_tracker"].is<picojson::object>()) {
+		auto& xf = obj["head_from_tracker"].get<picojson::object>();
+		Eigen::Vector3d trans = Eigen::Vector3d::Zero();
+		Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+		if (xf["translation"].is<picojson::array>()) {
+			auto& arr = xf["translation"].get<picojson::array>();
+			if (arr.size() == 3 && arr[0].is<double>() && arr[1].is<double>() && arr[2].is<double>()) {
+				trans(0) = arr[0].get<double>();
+				trans(1) = arr[1].get<double>();
+				trans(2) = arr[2].get<double>();
+			}
+		}
+		if (xf["rotation"].is<picojson::array>()) {
+			auto& arr = xf["rotation"].get<picojson::array>();
+			if (arr.size() == 4 && arr[0].is<double>() && arr[1].is<double>() && arr[2].is<double>() && arr[3].is<double>()) {
+				q.x() = arr[0].get<double>();
+				q.y() = arr[1].get<double>();
+				q.z() = arr[2].get<double>();
+				q.w() = arr[3].get<double>();
+				q.normalize();
+			}
+		}
+		hm.headFromTracker = Eigen::AffineCompact3d::Identity();
+		hm.headFromTracker.linear() = q.toRotationMatrix();
+		hm.headFromTracker.translation() = trans;
+	}
+}
+
+static picojson::object SaveHeadMount(const HeadMountConfig& hm) {
+	picojson::object obj;
+	double mode = (double)(uint8_t)hm.mode;
+	obj["mode"].set<double>(mode);
+	obj["tracker_serial"].set<std::string>(hm.trackerSerial);
+	obj["tracker_model"].set<std::string>(hm.trackerModel);
+	obj["tracker_tracking_system"].set<std::string>(hm.trackerTrackingSystem);
+	bool hide = hm.hideTracker;
+	bool offcal = hm.offsetCalibrated;
+	obj["hide_tracker"].set<bool>(hide);
+	obj["offset_calibrated"].set<bool>(offcal);
+
+	Eigen::Quaterniond q(hm.headFromTracker.rotation());
+	q.normalize();
+	Eigen::Vector3d t = hm.headFromTracker.translation();
+	picojson::array transArr, rotArr;
+	for (int i = 0; i < 3; ++i) { double v = t(i); transArr.push_back(picojson::value(v)); }
+	double qx = q.x(), qy = q.y(), qz = q.z(), qw = q.w();
+	rotArr.push_back(picojson::value(qx));
+	rotArr.push_back(picojson::value(qy));
+	rotArr.push_back(picojson::value(qz));
+	rotArr.push_back(picojson::value(qw));
+	picojson::object xf;
+	xf["translation"].set<picojson::array>(transArr);
+	xf["rotation"].set<picojson::array>(rotArr);
+	obj["head_from_tracker"].set<picojson::object>(xf);
+	return obj;
+}
+
+static void LoadBoundary(BoundaryConfig& bc, picojson::value& value) {
+	if (!value.is<picojson::object>()) return;
+	auto& obj = value.get<picojson::object>();
+
+	if (obj["enabled"].is<bool>())
+		bc.enabled = obj["enabled"].get<bool>();
+	if (obj["floor_y"].is<double>())
+		bc.floorY = obj["floor_y"].get<double>();
+	if (obj["ceiling_y"].is<double>())
+		bc.ceilingY = obj["ceiling_y"].get<double>();
+	if (obj["prior_chaperone_captured"].is<bool>())
+		bc.priorChaperoneCaptured = obj["prior_chaperone_captured"].get<bool>();
+	if (obj["prior_chaperone"].is<std::string>())
+		bc.priorChaperone = HexToBytes(obj["prior_chaperone"].get<std::string>());
+
+	bc.vertices.clear();
+	if (obj["vertices"].is<picojson::array>()) {
+		for (auto& v : obj["vertices"].get<picojson::array>()) {
+			if (!v.is<picojson::object>()) continue;
+			auto& vo = v.get<picojson::object>();
+			BoundaryVertex bv;
+			if (vo["x"].is<double>()) bv.x = vo["x"].get<double>();
+			if (vo["y"].is<double>()) bv.y = vo["y"].get<double>();
+			if (vo["z"].is<double>()) bv.z = vo["z"].get<double>();
+			bc.vertices.push_back(bv);
+		}
+	}
+}
+
+static picojson::object SaveBoundary(const BoundaryConfig& bc) {
+	picojson::object obj;
+	bool en = bc.enabled;
+	obj["enabled"].set<bool>(en);
+	double fy = bc.floorY, cy = bc.ceilingY;
+	obj["floor_y"].set<double>(fy);
+	obj["ceiling_y"].set<double>(cy);
+	bool cap = bc.priorChaperoneCaptured;
+	obj["prior_chaperone_captured"].set<bool>(cap);
+	obj["prior_chaperone"].set<std::string>(BytesToHex(bc.priorChaperone));
+
+	picojson::array verts;
+	for (const auto& bv : bc.vertices) {
+		picojson::object vo;
+		double x = bv.x, y = bv.y, z = bv.z;
+		vo["x"].set<double>(x);
+		vo["y"].set<double>(y);
+		vo["z"].set<double>(z);
+		picojson::value vval;
+		vval.set<picojson::object>(vo);
+		verts.push_back(vval);
+	}
+	obj["vertices"].set<picojson::array>(verts);
+	return obj;
+}
+
+static void LoadAdb(AdbConfig& adb, picojson::value& value) {
+	if (!value.is<picojson::object>()) return;
+	auto& obj = value.get<picojson::object>();
+
+	if (obj["setup_completed"].is<bool>())
+		adb.setupCompleted = obj["setup_completed"].get<bool>();
+	if (obj["saved_endpoint"].is<std::string>())
+		adb.savedEndpoint = obj["saved_endpoint"].get<std::string>();
+	if (obj["guardian_pause_enabled"].is<bool>())
+		adb.guardianPauseEnabled = obj["guardian_pause_enabled"].get<bool>();
+	if (obj["guardian_pause_value"].is<double>())
+		adb.guardianPauseValue = (int)obj["guardian_pause_value"].get<double>();
+	if (obj["auto_apply_on_start"].is<bool>())
+		adb.autoApplyOnStart = obj["auto_apply_on_start"].get<bool>();
+}
+
+static picojson::object SaveAdb(const AdbConfig& adb) {
+	picojson::object obj;
+	bool sc = adb.setupCompleted;
+	obj["setup_completed"].set<bool>(sc);
+	obj["saved_endpoint"].set<std::string>(adb.savedEndpoint);
+	bool gpe = adb.guardianPauseEnabled;
+	obj["guardian_pause_enabled"].set<bool>(gpe);
+	double gpv = (double)adb.guardianPauseValue;
+	obj["guardian_pause_value"].set<double>(gpv);
+	bool aas = adb.autoApplyOnStart;
+	obj["auto_apply_on_start"].set<bool>(aas);
 	return obj;
 }
 
@@ -531,6 +738,15 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.wizardCompleted = obj["wizard_completed"].get<bool>();
 	}
 
+	// v4: head-mounted tracker, safety boundary, ADB settings. All sections
+	// are optional (skip-if-absent); absent means default (disabled).
+	if (obj["head_mount"].is<picojson::object>())
+		LoadHeadMount(ctx.headMount, obj["head_mount"]);
+	if (obj["boundary"].is<picojson::object>())
+		LoadBoundary(ctx.boundary, obj["boundary"]);
+	if (obj["adb"].is<picojson::object>())
+		LoadAdb(ctx.adb, obj["adb"]);
+
 	// Load-time wedge guard, completion. The relative-pose state and
 	// refToTargetPose are read further down in ParseProfile, so we can only
 	// override them here, after all reads are done. End-state mirrors what
@@ -734,6 +950,24 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 		profile["wizard_completed"].set<bool>(wc);
 	}
 
+	// v4: head-mounted tracker, boundary, ADB. Skip-if-default: only write
+	// when the subsystem has been activated (mode != Off / enabled != false /
+	// setupCompleted != false) so profiles for the typical no-Quest setup
+	// remain identical to v3 except for the schema_version bump.
+	if (ctx.headMount.mode != HeadMountMode::Off
+		|| !ctx.headMount.trackerSerial.empty()
+		|| ctx.headMount.offsetCalibrated) {
+		profile["head_mount"].set<picojson::object>(SaveHeadMount(ctx.headMount));
+	}
+	if (ctx.boundary.enabled || ctx.boundary.priorChaperoneCaptured
+		|| !ctx.boundary.vertices.empty()) {
+		profile["boundary"].set<picojson::object>(SaveBoundary(ctx.boundary));
+	}
+	if (ctx.adb.setupCompleted || !ctx.adb.savedEndpoint.empty()
+		|| ctx.adb.guardianPauseEnabled) {
+		profile["adb"].set<picojson::object>(SaveAdb(ctx.adb));
+	}
+
 	picojson::value profileV;
 	profileV.set<picojson::object>(profile);
 
@@ -878,6 +1112,13 @@ void LoadProfile(CalibrationContext &ctx)
 	try {
 		std::stringstream io(str);
 		ParseProfile(ctx, io);
+		// If the saved profile has the boundary enabled, schedule a push once
+		// the calibration transform has had time to converge (see kStartupGraceTicks
+		// in BoundaryRePush.cpp). The tick happens at ~20 Hz so the push fires
+		// about 1.5 s after the profile loads, well past the first few solver cycles.
+		if (ctx.boundary.enabled && !ctx.boundary.vertices.empty()) {
+			ScheduleBoundaryStartupPush();
+		}
 		std::cout << "Loaded profile" << std::endl;
 		// Capture the load event in the spacecal log so anyone reading the
 		// session can correlate any post-load behavior change with the

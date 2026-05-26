@@ -3,6 +3,7 @@
 #define EIGEN_MPL2_ONLY
 
 #include "DriverModule.h"
+#include "DriverSynthCompose.h"
 #include "IPCServer.h"
 #include "Protocol.h"
 #include "IsometryTransform.h"
@@ -13,6 +14,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -66,6 +68,9 @@ public:
 	void HandleSetAlignmentSpeedParams(const protocol::AlignmentSpeedParams params) {
 		alignmentSpeedParams = params;
 	}
+	// v25: head-mount tracker config from the overlay. Caches state used by
+	// the DriverSynth branch in HandleDevicePoseUpdated (dev builds only).
+	void SetHeadMountConfig(const protocol::SetHeadMountConfig &cfg);
 	bool HandleIpcRequest(uint32_t featureMask, const protocol::Request &request, protocol::Response &response);
 	void OnGetGenericInterface(const char *pchInterface, void *iface);
 
@@ -147,10 +152,18 @@ private:
 		// off toward "no suppression" as the device's linear or angular
 		// velocity rises. smartMotionEma tracks a 0..1 motion-ramp signal
 		// (max of normalised linear and angular speed) low-passed across
-		// frames so the factor doesn't twitch on noisy IMU velocity. Both
-		// fields are guarded by stateMutex, same as predictionSmoothness.
+		// frames so the factor doesn't twitch on noisy IMU velocity. All
+		// fields below are guarded by stateMutex, same as predictionSmoothness.
 		bool   smartEnabled    = false;
 		double smartMotionEma  = 0.0;
+
+		// Position-space EWM state for smart smoothing.  Seeded from the first
+		// pose received after smoothness becomes non-zero; reset whenever
+		// smoothness drops to 0 so a re-enable starts from the current pose
+		// rather than a stale one.  Expressed in driver-space (same coordinate
+		// frame as pose.vecPosition).
+		bool   posEmaSeeded   = false;
+		double posEma[3]      = {0.0, 0.0, 0.0};
 
 		// When true, BlendTransform's lerp toward targetTransform only advances
 		// proportional to detected per-frame motion magnitude. A stationary user
@@ -255,6 +268,47 @@ private:
 	DeltaSize currentDeltaSpeed[vr::k_unMaxTrackedDeviceCount];
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
+
+	// v25: head-mount tracker driver state. Written by SetHeadMountConfig
+	// (IPC thread) and read by the DriverSynth branch in HandleDevicePoseUpdated
+	// (pose-hook thread). Guarded by its own mutex so reads and writes don't
+	// contend with the main stateMutex. The critical section in the pose hook
+	// is a struct copy-out (tiny); the IPC write is rare (UI changes only).
+	//
+	// HeadMountDriverState mirrors the wire payload but uses fixed-size buffers
+	// that are trivially copyable; no std::string so the mutex-guarded copy
+	// does not allocate.
+#if WKOPENVR_BUILD_IS_DEV
+	struct HeadMountDriverState {
+		int     mode          = 0;      // HeadMountMode value; 3 = DriverSynth
+		int32_t deviceId      = -1;     // -1 = unresolved
+		char    trackerSerial[protocol::MaxTrackingSystemNameLen]        = {};
+		char    trackerTrackingSystem[protocol::MaxTrackingSystemNameLen] = {};
+		double  headFromTrackerTrans[3] = {0.0, 0.0, 0.0};
+		double  headFromTrackerRot[4]   = {0.0, 0.0, 0.0, 1.0};  // xyzw
+		bool    hideTracker       = true;
+		bool    offsetCalibrated  = false;
+	};
+	mutable std::mutex        m_headMountStateMutex;
+	HeadMountDriverState      m_headMountState;
+
+	// Per-device tracker pose cache for the DriverSynth path. The pose-hook
+	// thread writes the latest tracker pose here when the device's openVRID
+	// matches m_headMountState.deviceId. The HMD synthesis branch reads this
+	// snapshot (copy-out under lock, then work without lock). Mutex is separate
+	// from stateMutex: the tracker snapshot is written on every pose tick for
+	// the tracked device, so sharing stateMutex would add contention on every
+	// tracker pose update.
+	mutable std::mutex               m_trackerSnapMutex;
+	driver_synth::TrackerSnapshot    m_trackerSnap;
+
+	// Upstream Quest HMD pose cache. Updated every time openVRID == 0 arrives
+	// in HandleDevicePoseUpdated (before the synthesis branch runs), so the
+	// synthesis branch always has a fresh upstream pose available for the
+	// worldFromDriver values and the sanity gate. Same mutex as the tracker
+	// snapshot (two tiny PODs, single lock, reduces mutex count).
+	driver_synth::TrackerSnapshot    m_upstreamHmdSnap;
+#endif // WKOPENVR_BUILD_IS_DEV
 
 	// Finger-smoothing config packed into an atomic uint64_t. Single-writer
 	// (IPC thread, on user UI input -- rare) / many-reader (skeletal hook

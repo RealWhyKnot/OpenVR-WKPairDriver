@@ -3,6 +3,7 @@
 #include "InterfaceHookInjector.h"
 #include "IsometryTransform.h"
 #include "Logging.h"
+#include "PredictionSmoothingMath.h"
 #include "ServerTrackedDeviceProviderConfigPacking.h"
 #include "inputhealth/PathClassifier.h"
 #include "inputhealth/SerialHash.h"
@@ -632,17 +633,30 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		// Clamp defensively -- a buggy overlay (or a stale-protocol mismatch)
 		// shouldn't be able to push a value above 100 here.
 		if (smoothness > 100) smoothness = 100;
-		double factor = 1.0 - (double)smoothness / 100.0;
+
+		// Squared curve: factor = (1 - s/100)^2.  Widens the perceptual gap
+		// between s=80 (factor=0.04) and s=100 (factor=0) compared to the old
+		// linear map (was 0.20 vs 0.00).
+		double factor = prediction::SmoothnessToFactor(smoothness);
+
+		// Position EWM alpha: separate from velocity factor so the positional
+		// filter can be softer at mid-settings without killing velocity too hard.
+		double posAlpha = prediction::PositionEwmAlpha(smoothness);
+
 		if (tf.smartEnabled) {
 			// Treat the slider as the maximum strength to apply when the
 			// device is stationary, and blend toward "no suppression"
-			// (factor = 1.0) as motion rises. EMA the input ramp so the
-			// effective factor doesn't twitch on noisy IMU velocity.
+			// (factor = 1.0 / posAlpha = 1.0) as motion rises. EMA the
+			// motion ramp so the effective factor doesn't twitch on noisy
+			// IMU velocity.
 			const double motion   = ComputeSmartMotionRamp(pose);
 			tf.smartMotionEma     = (1.0 - kSmartEmaAlpha) * tf.smartMotionEma
 			                      + kSmartEmaAlpha * motion;
-			factor = factor + (1.0 - factor) * tf.smartMotionEma;
+			factor   = factor   + (1.0 - factor)   * tf.smartMotionEma;
+			posAlpha = posAlpha + (1.0 - posAlpha)  * tf.smartMotionEma;
 		}
+
+		// Velocity / acceleration / lookahead suppression.
 		pose.vecVelocity[0] *= factor;
 		pose.vecVelocity[1] *= factor;
 		pose.vecVelocity[2] *= factor;
@@ -659,9 +673,160 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		// extrapolation; halving it halves the lookahead time. Same factor as
 		// velocity for consistency.
 		pose.poseTimeOffset *= factor;
+
+		// Position-space low-pass filter.  Seeds from the first pose seen after
+		// smoothness becomes non-zero; thereafter blends the running average
+		// toward the raw position at rate posAlpha each frame.  This attenuates
+		// physical jitter that velocity suppression cannot touch.
+		//
+		// Large-jump guard: if the raw position is more than 0.5 m from the
+		// current EMA (tracking loss / teleport recovery), reseed immediately
+		// so the filter doesn't lag behind an intentional large displacement.
+		if (tf.posEmaSeeded) {
+			const double dx = pose.vecPosition[0] - tf.posEma[0];
+			const double dy = pose.vecPosition[1] - tf.posEma[1];
+			const double dz = pose.vecPosition[2] - tf.posEma[2];
+			if (dx*dx + dy*dy + dz*dz > 0.25) { // 0.5 m radius
+				tf.posEmaSeeded = false;
+			}
+		}
+		if (!tf.posEmaSeeded) {
+			tf.posEma[0] = pose.vecPosition[0];
+			tf.posEma[1] = pose.vecPosition[1];
+			tf.posEma[2] = pose.vecPosition[2];
+			tf.posEmaSeeded = true;
+		} else {
+			tf.posEma[0] += posAlpha * (pose.vecPosition[0] - tf.posEma[0]);
+			tf.posEma[1] += posAlpha * (pose.vecPosition[1] - tf.posEma[1]);
+			tf.posEma[2] += posAlpha * (pose.vecPosition[2] - tf.posEma[2]);
+		}
+		pose.vecPosition[0] = tf.posEma[0];
+		pose.vecPosition[1] = tf.posEma[1];
+		pose.vecPosition[2] = tf.posEma[2];
+	} else {
+		// Smoothness dropped to 0: reset EMA state so a future re-enable
+		// seeds from the current raw pose rather than a stale snapshot.
+		tf.posEmaSeeded = false;
 	}
 
 	shmem.SetPose(openVRID, pose);
+
+#if WKOPENVR_BUILD_IS_DEV
+	// DriverSynth: dev-only experimental path that replaces the upstream Quest
+	// HMD pose with one synthesized from the head-mounted lighthouse tracker.
+	//
+	// Two separate tasks:
+	//   (a) Cache the upstream HMD pose every time openVRID == 0 arrives, so
+	//       the synthesis branch has a fresh worldFromDriver source.
+	//   (b) Cache the head-mount tracker pose every time its deviceId matches,
+	//       so the HMD branch can compose from the most recent valid snapshot.
+	//   (c) On openVRID == 0, attempt synthesis; replace `pose` on success.
+	//
+	// All snapshot writes happen under m_trackerSnapMutex (separate from
+	// stateMutex; no ordering risk because SetHeadMountConfig and the snapshot
+	// writers never hold stateMutex themselves).
+
+	{
+		// (a) and (b): snapshot updates.
+		const auto snapNow = std::chrono::steady_clock::now();
+
+		// Read the current head-mount deviceId cheaply under its own mutex.
+		int32_t hmDeviceId = -1;
+		{
+			std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
+			hmDeviceId = m_headMountState.deviceId;
+		}
+
+		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+
+		if (openVRID == 0) {
+			// Cache the upstream Quest HMD pose for worldFromDriver + sanity gate.
+			m_upstreamHmdSnap.pose      = pose;
+			m_upstreamHmdSnap.capturedAt = snapNow;
+			m_upstreamHmdSnap.capturedForDeviceId = 0;
+			m_upstreamHmdSnap.valid      = true;
+		} else if (hmDeviceId >= 0
+		           && static_cast<int32_t>(openVRID) == hmDeviceId) {
+			// Cache the head-mount tracker pose for composition.
+			m_trackerSnap.pose      = pose;
+			m_trackerSnap.capturedAt = snapNow;
+			m_trackerSnap.capturedForDeviceId = static_cast<int32_t>(openVRID);
+			m_trackerSnap.valid      = true;
+		}
+	}
+
+	if (openVRID == 0) {
+		// (c): attempt HMD synthesis. Copy the cached state out under its mutex
+		// (tiny), release, then work on the copy.
+		HeadMountDriverState hmState{};
+		{
+			std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
+			hmState = m_headMountState;
+		}
+
+		if (hmState.mode == 3 /*DriverSynth*/) {
+			// Copy the two snapshots and attempt composition.
+			driver_synth::TrackerSnapshot trackerCopy;
+			driver_synth::TrackerSnapshot upstreamCopy;
+			{
+				std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+				trackerCopy  = m_trackerSnap;
+				upstreamCopy = m_upstreamHmdSnap;
+			}
+
+			driver_synth::SynthState synthState{};
+			synthState.mode             = hmState.mode;
+			synthState.deviceId         = hmState.deviceId;
+			synthState.offsetCalibrated = hmState.offsetCalibrated;
+			memcpy(synthState.headFromTrackerTrans, hmState.headFromTrackerTrans,
+			       sizeof synthState.headFromTrackerTrans);
+			memcpy(synthState.headFromTrackerRot, hmState.headFromTrackerRot,
+			       sizeof synthState.headFromTrackerRot);
+
+			const auto synthNow = std::chrono::steady_clock::now();
+			vr::DriverPose_t synthPose{};
+			const bool ok = driver_synth::Compose(
+				synthState, trackerCopy, upstreamCopy, synthNow, synthPose);
+
+			if (ok) {
+				// Log first successful synthesis per session.
+				static bool s_synthActiveLogged = false;
+				if (!s_synthActiveLogged) {
+					s_synthActiveLogged = true;
+					LOG("[driver-synth] active: deviceID=%d", hmState.deviceId);
+				}
+				pose = synthPose;
+				// The synthesized pose takes over; skip the normal
+				// calibration/quash path by returning early.
+				return true;
+			}
+			// Synthesis failed: fall through to the normal calibration path.
+			// Log each unique failure reason once per session.
+			{
+				static uint8_t s_loggedReasons = 0;
+				enum { R_INVALID=1, R_STALE=2, R_UPSTREAM=4, R_MISMATCH=8, R_SANITY=16 };
+				const char* reason = "unknown";
+				uint8_t bit = 0;
+				if (!trackerCopy.valid || !trackerCopy.pose.poseIsValid) {
+					reason = "tracker_invalid"; bit = R_INVALID;
+				} else if (!driver_synth::IsTrackerFresh(trackerCopy, synthNow)) {
+					reason = "tracker_stale"; bit = R_STALE;
+				} else if (!driver_synth::IsUpstreamHmdFresh(upstreamCopy, synthNow)) {
+					reason = "upstream_stale"; bit = R_UPSTREAM;
+				} else if (trackerCopy.capturedForDeviceId != synthState.deviceId) {
+					reason = "snapshot_device_mismatch"; bit = R_MISMATCH;
+				} else {
+					reason = "sanity_gate_world_pos_delta"; bit = R_SANITY;
+				}
+				if (!(s_loggedReasons & bit)) {
+					s_loggedReasons |= bit;
+					LOG("[driver-synth] fallback: reason='%s'", reason);
+				}
+			}
+			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_DRIVER_SYNTH_FALLBACK);
+		}
+	}
+#endif // WKOPENVR_BUILD_IS_DEV
 
 	const bool quashTransition = tf.quash && !tf.prevQuash;
 	tf.prevQuash = tf.quash;
@@ -874,6 +1039,52 @@ void ServerTrackedDeviceProvider::HandleApplyRandomOffset() {
 	std::ostringstream oss;
 	oss << "Applied random offset: " << posOffset << " from init " << init << std::endl;
 	LOG("%s", oss.str().c_str());
+}
+
+void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMountConfig &cfg)
+{
+#if WKOPENVR_BUILD_IS_DEV
+	// Copy the wire payload into the cached state under its own mutex. The
+	// pose hook copies this state out (under lock, instantly) and then works
+	// on the copy without holding the lock, so the critical section here is
+	// just a struct write.
+	HeadMountDriverState next{};
+	next.mode             = static_cast<int>(cfg.mode);
+	next.deviceId         = cfg.deviceId;
+	next.hideTracker      = cfg.hideTracker;
+	next.offsetCalibrated = cfg.offsetCalibrated;
+
+	// NUL-safe copy of the fixed-size name buffers.
+	{
+		constexpr size_t kNameLen = protocol::MaxTrackingSystemNameLen;
+		const size_t serialLen = strnlen(cfg.trackerSerial, kNameLen);
+		memcpy(next.trackerSerial, cfg.trackerSerial, serialLen);
+		const size_t sysLen = strnlen(cfg.trackerTrackingSystem, kNameLen);
+		memcpy(next.trackerTrackingSystem, cfg.trackerTrackingSystem, sysLen);
+	}
+
+	memcpy(next.headFromTrackerTrans, cfg.headFromTrackerTrans,
+	       sizeof cfg.headFromTrackerTrans);
+	memcpy(next.headFromTrackerRot, cfg.headFromTrackerRot,
+	       sizeof cfg.headFromTrackerRot);
+
+	{
+		HeadMountDriverState prev{};
+		std::lock_guard<std::mutex> lk(m_headMountStateMutex);
+		prev = m_headMountState;
+		m_headMountState = next;
+		// Log on change only to avoid flooding when the overlay re-sends
+		// the same config on every AssignTargets scan.
+		if (next.mode != prev.mode
+		    || next.deviceId != prev.deviceId
+		    || next.offsetCalibrated != prev.offsetCalibrated) {
+			LOG("[driver-head-mount] config: mode=%d deviceID=%d offsetCalibrated=%d",
+			    next.mode, next.deviceId, (int)next.offsetCalibrated);
+		}
+	}
+#else
+	(void)cfg;
+#endif // WKOPENVR_BUILD_IS_DEV
 }
 
 void ServerTrackedDeviceProvider::SetFingerSmoothingConfig(const protocol::FingerSmoothingConfig &cfg)

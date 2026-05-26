@@ -24,6 +24,18 @@
 
 namespace spacecal::coherence {
 
+// Source identifier for head-mount tracker corroboration. When the geometry-
+// shift fire site feeds the head-mount tracker's actual displacement as a
+// corroborating input, it tags the source with this label so the suppression
+// log line can distinguish this path from the multi-pair extras path.
+//
+// The value is a diagnostic label only; the coherence score formula and
+// kSuppressThreshold / kMinExtrasForCoherence thresholds are unchanged.
+enum class CorroborationSource : uint8_t {
+    kExtraPairs          = 0,  // default: extras from additionalCalibrations
+    kHeadMountCorroboration = 1,  // head-mount tracker displacement vs velocity estimate
+};
+
 // Threshold above which a multi-pair spike is treated as common-mode.
 // 0.70 = "the extras spiked at least 70% as hard as the primary, in the
 // median." Below this, the primary's spike was substantially worse than

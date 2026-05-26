@@ -49,12 +49,27 @@ namespace Metrics {
     TimeSeries<double> translationDiversity;
     TimeSeries<double> rotationDiversity;
     TimeSeries<Eigen::Vector3d> translationAxisRangesCm;
+    TimeSeries<double> pairedMotionWarningCount;
     TimeSeries<double> watchdogHealthySkip;
     TimeSeries<double> effectivePriorMm;
     TimeSeries<double> validateRmsThresholdMm;
     std::string lastRejectReason;
 
     TimeSeries<bool> calibrationApplied;
+
+    TimeSeries<bool>     headMountActive;
+    TimeSeries<double>   headMountResidualMm;
+    TimeSeries<double>   questHmdVsProxyDeltaMm;
+    TimeSeries<uint32_t> snapSuppressedCount;
+    TimeSeries<uint32_t> driverSynthFallbackCount;
+    TimeSeries<bool>     boundaryActive;
+    TimeSeries<uint32_t> chaperoneRePushCount;
+    TimeSeries<bool>     guardianPaused;
+    TimeSeries<bool>     adbConnected;
+
+    TimeSeries<double> fallbackApplyRate;
+    TimeSeries<double> perIdApplyRate;
+    TimeSeries<double> quashApplyRate;
 
     bool enableLogs = false;
 
@@ -72,6 +87,13 @@ namespace Metrics {
 
     void WriteLogAnnotation(const char* /*s*/) {
         // No-op: the tests don't open a CSV log file.
+    }
+
+    void SetTickRawPoses(
+        const Eigen::Vector3d& /*refTrans*/, const Eigen::Quaterniond& /*refRot*/,
+        const Eigen::Vector3d& /*targetTrans*/, const Eigen::Quaterniond& /*targetRot*/,
+        TickPhase /*phase*/) {
+        // No-op: tests don't need per-tick pose logging.
     }
 
     void WriteLogEntry() {

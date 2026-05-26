@@ -463,3 +463,125 @@ TEST(ConfigurationTest, SaveStampsCurrentSchemaVersion) {
     EXPECT_NE(io.str().find("schema_version"), std::string::npos)
         << "Saved JSON should contain a schema_version key";
 }
+
+// ---------------------------------------------------------------------------
+// Schema migration v3 -> v4. v3 profiles have no head_mount, boundary, or
+// adb sections. They must load with all three at their disabled defaults.
+// ---------------------------------------------------------------------------
+TEST(ConfigurationTest, MigrateV3ProfileLoadsWithDisabledV4Sections) {
+    std::string v3Json = MakeMinimalProfile(/*schemaVersion=*/3);
+
+    CalibrationContext ctx;
+    std::stringstream io(v3Json);
+    ParseProfile(ctx, io);
+
+    EXPECT_TRUE(ctx.validProfile);
+    EXPECT_EQ(ctx.headMount.mode, HeadMountMode::Off)
+        << "v3 profile must default head_mount.mode to Off";
+    EXPECT_TRUE(ctx.headMount.trackerSerial.empty())
+        << "v3 profile must default head_mount.trackerSerial to empty";
+    EXPECT_FALSE(ctx.headMount.offsetCalibrated)
+        << "v3 profile must default head_mount.offsetCalibrated to false";
+    EXPECT_FALSE(ctx.boundary.enabled)
+        << "v3 profile must default boundary.enabled to false";
+    EXPECT_FALSE(ctx.adb.setupCompleted)
+        << "v3 profile must default adb.setupCompleted to false";
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip for the v4 sections (head_mount, boundary, adb). Non-default
+// values must survive a write->read cycle intact.
+// ---------------------------------------------------------------------------
+TEST(ConfigurationTest, V4SectionsRoundTrip) {
+    CalibrationContext src;
+    src.referenceTrackingSystem = "lighthouse";
+    src.targetTrackingSystem = "oculus";
+    src.validProfile = true;
+
+    src.headMount.mode = HeadMountMode::Corroborate;
+    src.headMount.trackerSerial = "LHR-AABBCCDD";
+    src.headMount.trackerTrackingSystem = "lighthouse";
+    src.headMount.hideTracker = false;
+    src.headMount.offsetCalibrated = true;
+    // Set a non-identity headFromTracker.
+    Eigen::Quaterniond q = Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitY())
+                           * Eigen::AngleAxisd(0.05, Eigen::Vector3d::UnitX());
+    src.headMount.headFromTracker = Eigen::AffineCompact3d::Identity();
+    src.headMount.headFromTracker.linear() = q.toRotationMatrix();
+    src.headMount.headFromTracker.translation() = Eigen::Vector3d(0.01, -0.02, 0.03);
+
+    src.boundary.enabled = true;
+    src.boundary.floorY = -0.05;
+    src.boundary.ceilingY = 2.3;
+    src.boundary.vertices = { {1.0, 0.0, 0.0}, {-1.0, 0.0, 0.5} };
+    src.boundary.priorChaperone = {0xDE, 0xAD, 0xBE, 0xEF};
+    src.boundary.priorChaperoneCaptured = true;
+
+    src.adb.setupCompleted = true;
+    src.adb.savedEndpoint = "192.168.1.42:5555";
+    src.adb.guardianPauseEnabled = true;
+    src.adb.guardianPauseValue = 2;
+    src.adb.autoApplyOnStart = false;
+
+    std::stringstream io;
+    WriteProfile(src, io);
+
+    CalibrationContext dst;
+    std::stringstream io2(io.str());
+    ParseProfile(dst, io2);
+
+    EXPECT_TRUE(dst.validProfile);
+    EXPECT_EQ(dst.headMount.mode, HeadMountMode::Corroborate);
+    EXPECT_EQ(dst.headMount.trackerSerial, "LHR-AABBCCDD");
+    EXPECT_EQ(dst.headMount.trackerTrackingSystem, "lighthouse");
+    EXPECT_FALSE(dst.headMount.hideTracker);
+    EXPECT_TRUE(dst.headMount.offsetCalibrated);
+    // Translation must round-trip to within floating-point precision.
+    EXPECT_NEAR(dst.headMount.headFromTracker.translation()(0), 0.01,  1e-9);
+    EXPECT_NEAR(dst.headMount.headFromTracker.translation()(1), -0.02, 1e-9);
+    EXPECT_NEAR(dst.headMount.headFromTracker.translation()(2), 0.03,  1e-9);
+    // Rotation: compare via quaternions; normalize first.
+    Eigen::Quaterniond qSrc(src.headMount.headFromTracker.rotation());
+    Eigen::Quaterniond qDst(dst.headMount.headFromTracker.rotation());
+    qSrc.normalize(); qDst.normalize();
+    EXPECT_NEAR(std::abs(qSrc.dot(qDst)), 1.0, 1e-6)
+        << "headFromTracker rotation must round-trip";
+
+    EXPECT_TRUE(dst.boundary.enabled);
+    EXPECT_NEAR(dst.boundary.floorY,   -0.05, 1e-9);
+    EXPECT_NEAR(dst.boundary.ceilingY,  2.3,  1e-9);
+    ASSERT_EQ(dst.boundary.vertices.size(), 2u);
+    EXPECT_NEAR(dst.boundary.vertices[0].x, 1.0,  1e-9);
+    EXPECT_NEAR(dst.boundary.vertices[1].z, 0.5,  1e-9);
+    ASSERT_EQ(dst.boundary.priorChaperone.size(), 4u);
+    EXPECT_EQ(dst.boundary.priorChaperone[0], 0xDE);
+    EXPECT_EQ(dst.boundary.priorChaperone[3], 0xEF);
+    EXPECT_TRUE(dst.boundary.priorChaperoneCaptured);
+
+    EXPECT_TRUE(dst.adb.setupCompleted);
+    EXPECT_EQ(dst.adb.savedEndpoint, "192.168.1.42:5555");
+    EXPECT_TRUE(dst.adb.guardianPauseEnabled);
+    EXPECT_EQ(dst.adb.guardianPauseValue, 2);
+    EXPECT_FALSE(dst.adb.autoApplyOnStart);
+}
+
+// Skip-if-default: the three new sections must NOT appear in the JSON
+// when all fields are at their default values.
+TEST(ConfigurationTest, V4SectionsSkippedWhenDefault) {
+    CalibrationContext ctx;
+    ctx.referenceTrackingSystem = "lighthouse";
+    ctx.targetTrackingSystem = "oculus";
+    ctx.validProfile = true;
+    // All head_mount / boundary / adb fields at construction defaults.
+
+    std::stringstream io;
+    WriteProfile(ctx, io);
+    const std::string json = io.str();
+
+    EXPECT_EQ(json.find("\"head_mount\""),  std::string::npos)
+        << "head_mount must be omitted when at default (Off, no serial)";
+    EXPECT_EQ(json.find("\"boundary\""),    std::string::npos)
+        << "boundary must be omitted when disabled and no vertices captured";
+    EXPECT_EQ(json.find("\"adb\""),         std::string::npos)
+        << "adb must be omitted when setup not completed and no endpoint saved";
+}

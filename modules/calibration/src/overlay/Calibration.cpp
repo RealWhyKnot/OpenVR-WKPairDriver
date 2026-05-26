@@ -12,6 +12,7 @@
 #include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
 #include "GeometryShiftDetector.h"  // IsCurrentErrorSpike, ShouldFireGeometryShiftRecovery
 #include "CommonModeCoherence.h"   // spacecal::coherence::ComputeCoherenceScore
+#include "SnapSuppression.h"       // spacecal::snap_suppression::EffectiveSpeedMps
 #include "MotionGate.h"      // ShouldBlendCycle -- auto-recovery snap decision
 #include "LatencyEstimator.h"  // spacecal::latency::EstimateLagTimeDomain / EstimateLagGccPhat
 #include "TiltDiagnostic.h"    // spacecal::gravity::EvaluateTilt -- sustained gravity-disagreement annotation
@@ -23,6 +24,14 @@
                              // from the rolling buffer of 30 cm relocalization events.
 #include "ReanchorChiSquareDetector.h" // spacecal::reanchor_chi::* -- sub-30 cm re-anchor
                              // sub-detector. Detection-only; freezes recs A/C on candidate.
+#include "BoundaryRePush.h"   // TickBoundaryRePush -- safety boundary chaperone re-push.
+#include "HeadMountOffsetModal.h" // wkopenvr::headmount::FeedSolverTick -- offset modal solver feed.
+#include "HeadMountTargetBinding.h"
+
+// Boundary capture session tick (defined in UserInterfaceTabsBoundary.cpp).
+// Called each CalibrationTick so capture runs independent of which tab is
+// visible. No-op when CaptureState is not Active.
+void CCal_TickBoundaryCapture();
 #include "TrackerLiveness.h" // spacecal::liveness::* -- detect non-HMD calibration anchor
                              // going silent under SteamVR's "Running_OK + poseIsValid stays true
                              // while pose hash is frozen" disconnect path.
@@ -336,6 +345,34 @@ static double ComputeHmdSpeedMps(const CalibrationContext& ctx)
 		hmd.vecVelocity[2] * hmd.vecVelocity[2]);
 }
 
+// AUTO Lock stationary gate -- speed source for the Corroborate path.
+//
+// When head-mount mode is Corroborate or higher and the head-tracker is
+// valid, take the max of the HMD speed and the head-tracker speed (see
+// spacecal::snap_suppression::EffectiveSpeedMps for the pure logic). Falls
+// back to HMD-only when the tracker is invalid or mode is below Corroborate,
+// bit-for-bit identical to ComputeHmdSpeedMps in those cases.
+static double ComputeEffectiveSpeedMps(const CalibrationContext& ctx)
+{
+	const double hmdSpeed = ComputeHmdSpeedMps(ctx);
+
+	const auto& hm = ctx.headMount;
+	double trackerSpeedMps = -1.0;  // sentinel: tracker invalid / unavailable
+	if (hm.mode >= HeadMountMode::Corroborate
+		&& hm.deviceID >= 0
+		&& (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount)
+	{
+		const auto& tp = ctx.devicePoses[hm.deviceID];
+		if (tp.poseIsValid && tp.result == vr::ETrackingResult::TrackingResult_Running_OK) {
+			trackerSpeedMps = std::sqrt(
+				tp.vecVelocity[0] * tp.vecVelocity[0] +
+				tp.vecVelocity[1] * tp.vecVelocity[1] +
+				tp.vecVelocity[2] * tp.vecVelocity[2]);
+		}
+	}
+	return spacecal::snap_suppression::EffectiveSpeedMps(hm.mode, hmdSpeed, trackerSpeedMps);
+}
+
 // Commit a queued AUTO Lock flip when the user is still enough that the
 // resulting calibration jump won't be jarring. Returns true if a commit
 // happened this call (caller may want to log / kick the calibration math).
@@ -531,6 +568,14 @@ void ReopenShmem()
 
 void StartCalibration(const char* reason)
 {
+	// Restoring the trio of resets dropped during the modularization refactor.
+	// Without these, clicking "Start Calibration" cleared messages and the
+	// sample buffer but left state == None, so CalibrationTick returned at the
+	// "if (state == None)" early-exit before CollectSample could push any
+	// Progress message -- the one-shot popup just displayed nothing.
+	CalCtx.hasAppliedCalibrationResult = false;
+	AssignTargets();
+	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
 	calibration.Clear();
@@ -594,6 +639,11 @@ void StartCalibration(const char* reason)
 void StartContinuousCalibration(const char* reason) {
 	CalCtx.hasAppliedCalibrationResult = false;
 	AssignTargets();
+	if (CalCtx.headMount.mode != HeadMountMode::Off || !CalCtx.headMount.trackerSerial.empty()) {
+		if (wkopenvr::headmount::BindHeadMountToContinuousTarget(CalCtx)) {
+			Metrics::WriteLogAnnotation("[head-mount] bound config to continuous target");
+		}
+	}
 	StartCalibration(reason);
 	CalCtx.state = CalibrationState::Continuous;
 	calibration.setRelativeTransformation(CalCtx.refToTargetPose, CalCtx.relativePosCalibrated);
@@ -617,6 +667,29 @@ void StartContinuousCalibration(const char* reason) {
 		"StartContinuousCalibration: reason=%s",
 		(reason && reason[0]) ? reason : "unknown");
 	Metrics::WriteLogAnnotation(startBuf);
+}
+
+void CancelCalibration(const char* reason) {
+	if (CalCtx.state != CalibrationState::Begin
+		&& CalCtx.state != CalibrationState::Rotation
+		&& CalCtx.state != CalibrationState::Translation) {
+		return;
+	}
+
+	CalCtx.state = CalibrationState::None;
+	CalCtx.wantedUpdateInterval = 1.0;
+	CalCtx.messages.clear();
+	CalCtx.pairedMotionPosSeeded = false;
+	CalCtx.pairedMotionMismatchCount = 0;
+	CalCtx.pairedMotionPrevRefPos = Eigen::Vector3d::Zero();
+	CalCtx.pairedMotionPrevTgtPos = Eigen::Vector3d::Zero();
+	calibration.Clear();
+
+	char buf[160];
+	snprintf(buf, sizeof buf,
+		"CancelCalibration: reason=%s",
+		(reason && reason[0]) ? reason : "unknown");
+	Metrics::WriteLogAnnotation(buf);
 }
 
 void EndContinuousCalibration() {
@@ -1092,12 +1165,21 @@ void CalibrationTick(double time)
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();
+	}
 
-		if (CalCtx.requireTriggerPressToApply && (time - ctx.timeLastAssign) > 10) {
-			// rescan devices every 10 seconds or so if we are using controller data
-			ctx.timeLastAssign = time;
-			AssignTargets();
-		}
+	// Device rescan: runs in every state at 1 Hz. AssignTargets is the only
+	// site that resolves targetID and headMount.deviceID by serial; without
+	// an idle-state rescan, a continuous target picked on the Basic tab
+	// stayed at id=-1 (and therefore the Headset-tab status line stayed red)
+	// until the user clicked Start. AssignTargets is idempotent: the
+	// reference/target re-resolve branches gate on id < 0, the head-mount
+	// branch only touches head-mount fields, and controllerIDs reseats
+	// from state.devices each call. The 1 Hz cadence matches the existing
+	// ScanAndApplyProfile timer below so we are not introducing new VRState
+	// load overhead beyond what already runs at this rate.
+	if ((time - ctx.timeLastAssign) >= 1.0) {
+		ctx.timeLastAssign = time;
+		AssignTargets();
 	}
 
 	// Sudden-tracking-shift watchdog. The 50-rejection watchdog inside CalibrationCalc
@@ -1676,10 +1758,11 @@ void CalibrationTick(double time)
 	{
 		static bool s_telemetryPrimed = false;
 		static uint64_t s_lastFallback = 0, s_lastPerId = 0, s_lastQuash = 0;
+		static uint64_t s_lastSynthFallback = 0;
 		static double s_lastTelemetryTime = 0;
 
-		uint64_t fallback = 0, perId = 0, quash = 0;
-		if (shmem.GetTelemetry(fallback, perId, quash)) {
+		uint64_t fallback = 0, perId = 0, quash = 0, synthFallback = 0;
+		if (shmem.GetTelemetry(fallback, perId, quash, synthFallback)) {
 			Metrics::RecordTimestamp();
 			double now = Metrics::CurrentTime;
 			if (!s_telemetryPrimed) {
@@ -1687,6 +1770,7 @@ void CalibrationTick(double time)
 				s_lastFallback = fallback;
 				s_lastPerId = perId;
 				s_lastQuash = quash;
+				s_lastSynthFallback = synthFallback;
 				s_lastTelemetryTime = now;
 			} else {
 				double dt = now - s_lastTelemetryTime;
@@ -1695,11 +1779,81 @@ void CalibrationTick(double time)
 					Metrics::perIdApplyRate.Push((perId - s_lastPerId) / dt);
 					Metrics::quashApplyRate.Push((quash - s_lastQuash) / dt);
 				}
+				// driverSynthFallbackCount is a monotonic session total, not a rate.
+				if (synthFallback != s_lastSynthFallback) {
+					Metrics::driverSynthFallbackCount.Push(
+						static_cast<uint32_t>(synthFallback));
+				}
 				s_lastFallback = fallback;
 				s_lastPerId = perId;
 				s_lastQuash = quash;
+				s_lastSynthFallback = synthFallback;
 				s_lastTelemetryTime = now;
 			}
+		}
+	}
+
+	// Feed the head-mount offset solver with fresh pose pairs. The modal's
+	// Solver is a no-op when not in Collecting state, so this call is cheap on
+	// every tick that doesn't have an active calibration modal.
+	// Log edge: modal is open but the tracker hasn't resolved yet (common root
+	// cause: user opened modal before picking a mode or before the tracker
+	// appeared in VRState).
+	{
+		static bool s_noDeviceWhileModalOpen = false;
+		const bool modalOpen = wkopenvr::headmount::OffsetModalIsOpen();
+		const bool noDevice  = ctx.headMount.deviceID < 0;
+		if (modalOpen && noDevice && !s_noDeviceWhileModalOpen) {
+			s_noDeviceWhileModalOpen = true;
+			Metrics::WriteLogAnnotation(
+				"[head-mount-solver] modal open but deviceID=-1 (tracker not resolved)");
+		} else if (!modalOpen || !noDevice) {
+			s_noDeviceWhileModalOpen = false;
+		}
+	}
+	if (ctx.headMount.deviceID >= 0
+	    && (uint32_t)ctx.headMount.deviceID < vr::k_unMaxTrackedDeviceCount)
+	{
+		const vr::DriverPose_t& hmRaw = ctx.devicePoses[ctx.headMount.deviceID];
+		const vr::DriverPose_t& hmdRaw = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+		if (hmRaw.poseIsValid
+		    && hmRaw.result == vr::ETrackingResult::TrackingResult_Running_OK
+		    && hmdRaw.poseIsValid)
+		{
+			{
+				static bool s_feedLogged = false;
+				if (!s_feedLogged) {
+					s_feedLogged = true;
+					char fbuf[128];
+					snprintf(fbuf, sizeof fbuf,
+						"[head-mount-solver] feeding pose pairs: deviceID=%d",
+						(int)ctx.headMount.deviceID);
+					Metrics::WriteLogAnnotation(fbuf);
+				}
+			}
+			// Build world-space poses from DriverPose_t fields.
+			auto poseFromDriver = [](const vr::DriverPose_t& raw) -> Eigen::Affine3d {
+				const Eigen::Quaterniond wfd(
+					raw.qWorldFromDriverRotation.w,
+					raw.qWorldFromDriverRotation.x,
+					raw.qWorldFromDriverRotation.y,
+					raw.qWorldFromDriverRotation.z);
+				const Eigen::Quaterniond localRot(
+					raw.qRotation.w, raw.qRotation.x,
+					raw.qRotation.y, raw.qRotation.z);
+				const Eigen::Vector3d wfdTrans(
+					raw.vecWorldFromDriverTranslation[0],
+					raw.vecWorldFromDriverTranslation[1],
+					raw.vecWorldFromDriverTranslation[2]);
+				const Eigen::Vector3d localPos(
+					raw.vecPosition[0], raw.vecPosition[1], raw.vecPosition[2]);
+				return Eigen::Translation3d(wfdTrans + wfd * localPos)
+				       * (wfd * localRot).normalized();
+			};
+			const Eigen::Affine3d trackerWorld = poseFromDriver(hmRaw);
+			const Eigen::Affine3d hmdWorld      = poseFromDriver(hmdRaw);
+			const double hmdSpeed = ComputeHmdSpeedMps(ctx);
+			wkopenvr::headmount::FeedSolverTick(hmdWorld, trackerWorld, hmdSpeed);
 		}
 	}
 
@@ -1903,7 +2057,7 @@ void CalibrationTick(double time)
 	// (control flow falls through to all three immediately below), which
 	// stops the on-disk profile from drifting during the offline window.
 	if (ctx.state == CalibrationState::Continuous) {
-		const double hmdSpeedMps = ComputeHmdSpeedMps(ctx);
+		const double hmdSpeedMps = ComputeEffectiveSpeedMps(ctx);
 
 		// Commit any queued AUTO-Lock flip if the user is paused enough to
 		// hide the resulting calibration jump. Re-resolve lockRelativePosition
@@ -2128,7 +2282,7 @@ void CalibrationTick(double time)
 		calibration.enableStaticRecalibration = CalCtx.enableStaticRecalibration;
 		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
 
-		const double hmdSpeedMps = ComputeHmdSpeedMps(CalCtx);
+		const double hmdSpeedMps = ComputeEffectiveSpeedMps(CalCtx);
 
 		// User-toggled "Pause updates" from the continuous-cal UI: keep the
 		// already-applied driver offset live, skip any new solve cycle so the
@@ -2567,7 +2721,17 @@ void CalibrationTick(double time)
 	}
 
 	Metrics::WriteLogEntry();
-		
+
+	// Feed controller poses into the boundary capture state machine. No-op
+	// when not in the Active capture state.
+	CCal_TickBoundaryCapture();
+
+	// Safety boundary: re-push chaperone geometry if the calibration transform
+	// has drifted since the last push (throttled to 1 Hz). Runs every tick so
+	// the 1-Hz gate inside TickBoundaryRePush handles timing. No-op when
+	// boundary.enabled is false.
+	TickBoundaryRePush(time);
+
 	if (CalCtx.state != CalibrationState::Continuous) {
 		ctx.state = CalibrationState::None;
 		calibration.Clear();
@@ -2612,87 +2776,6 @@ int GetWatchdogResetCount() {
 	return calibration.m_watchdogResets;
 }
 
-// Math derivation (so the next person editing this can double-check):
-//
-//   SZP is the standing-universe origin's pose expressed in the raw
-//   tracking universe. SZP = [R_szp | t_szp; 0 | 1]. A device's pose in
-//   the standing universe is then:
-//
-//     standing_pose = SZP^-1 * raw_pose
-//                   -> translation = R_szp^-1 * (raw_pos - t_szp)
-//
-//   We want the user's HMD standing-pose translation to become (0, y, 0)
-//   in X/Z while preserving Y. Setting:
-//
-//     t_szp_new = t_szp_old + R_szp * (hmd_standing_x, 0, hmd_standing_z)
-//
-//   makes hmd_standing_new = hmd_standing_old - (hmd_standing_x, 0, hmd_standing_z)
-//                          = (0, hmd_standing_y, 0).
-//
-//   For the common case where SZP's rotation is yaw-only (room
-//   calibration's typical state), R_szp * (x, 0, z) is just (x, 0, z)
-//   rotated about the Y axis -- so we have to apply the rotation, not
-//   just add the X/Z components. (An earlier draft of this function got
-//   that wrong; the addition only happened to be correct when yaw was
-//   exactly 0.)
-//
-// Returns true on success. Failures: VRChaperoneSetup unavailable, HMD
-// pose not valid.
-bool RecenterPlayspaceToCurrentHmd() {
-	if (!vr::VRSystem() || !vr::VRChaperoneSetup()) return false;
-
-	// Read HMD's current pose in the standing universe. With predictionSecs=0
-	// we get the "now" pose -- no extrapolation, which is what we want for
-	// a one-shot snapshot anchor.
-	vr::TrackedDevicePose_t poses[1] = {};
-	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
-		vr::TrackingUniverseStanding, 0.0f, poses, 1);
-	if (!poses[0].bPoseIsValid
-		|| poses[0].eTrackingResult != vr::TrackingResult_Running_OK) {
-		CalCtx.Log("Recenter playspace: HMD pose not valid; aborting.\n");
-		return false;
-	}
-	const auto& hmdMat = poses[0].mDeviceToAbsoluteTracking;
-	const float hmdStandingX = hmdMat.m[0][3];
-	const float hmdStandingZ = hmdMat.m[2][3];
-
-	// Defensive: throw away any pending working copy so we read the live
-	// state, not whatever some other code path is in the middle of editing.
-	// Mirrors what ApplyChaperoneBounds does.
-	vr::VRChaperoneSetup()->RevertWorkingCopy();
-
-	vr::HmdMatrix34_t szp{};
-	vr::VRChaperoneSetup()->GetWorkingStandingZeroPoseToRawTrackingPose(&szp);
-
-	// Delta = R_szp * (hmd_standing_x, 0, hmd_standing_z). Use the X/Z columns
-	// of R_szp's row-major 3x3 (the [_][0] and [_][2] columns).
-	const float dx = szp.m[0][0] * hmdStandingX + szp.m[0][2] * hmdStandingZ;
-	const float dz = szp.m[2][0] * hmdStandingX + szp.m[2][2] * hmdStandingZ;
-	// Y delta would be szp.m[1][0] * hmdStandingX + szp.m[1][2] * hmdStandingZ.
-	// For yaw-only SZP that's 0 (Y-axis row is (0, 1, 0)). For tilted SZPs
-	// it's small and cancels naturally if the user wants Y preserved.
-	// Either way we do NOT modify Y to keep floor calibration intact.
-	const float oldTx = szp.m[0][3];
-	const float oldTz = szp.m[2][3];
-
-	szp.m[0][3] = oldTx + dx;
-	szp.m[2][3] = oldTz + dz;
-
-	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&szp);
-	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
-
-	// Log enough that a debug-log reader can verify the action did what was
-	// intended: HMD pose pre-shift, delta applied, expected post-shift HMD
-	// position (~0, y, ~0 in X/Z if the math is right).
-	char logbuf[256];
-	snprintf(logbuf, sizeof logbuf,
-		"playspace_recenter: hmd_standing=(%.3f, %.3f, %.3f) -> "
-		"szp_translation_delta=(%.3f, 0, %.3f); szp_translation %.3f,%.3f -> %.3f,%.3f",
-		hmdStandingX, hmdMat.m[1][3], hmdStandingZ,
-		dx, dz,
-		oldTx, oldTz, szp.m[0][3], szp.m[2][3]);
-	CalCtx.Log(logbuf);
-	Metrics::WriteLogAnnotation(logbuf);
-
-	return true;
-}
+// (RecenterPlayspaceToCurrentHmd removed: superseded by lighthouse-anchored
+// boundary push -- shifting the SZP to the HMD pose would push the boundary
+// off the physical room geometry.)

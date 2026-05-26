@@ -1,7 +1,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "CalibrationMetrics.h"
-#include "VRState.h"
+#include "HeadMountTargetBinding.h"
 #include "Wizard.h"
 #include "UiHelpers.h"
 
@@ -55,7 +55,7 @@ static void AddResetContextMenu(const char* popupId, Fn resetFn) {
 // Lives in Advanced (not Basic) since these are bug-report breadcrumbs, not
 // something a casual user needs to see while running.
 static void DrawDiagnosticsPanel(ImVec2 panelSize) {
-	ImGui::BeginGroupPanel("Diagnostics", panelSize);
+	openvr_pair::overlay::ui::DrawPanel("Diagnostics", [&] {
 	const auto &pal = openvr_pair::overlay::ui::GetPalette();
 
 	// Watchdog reset tracking. We reflect whether the count has changed
@@ -129,16 +129,16 @@ static void DrawDiagnosticsPanel(ImVec2 panelSize) {
 		                  "environment problem (lighting, USB bandwidth, etc).");
 	}
 
-	ImGui::EndGroupPanel();
+	}, panelSize);
 }
 
 // Tip strip for both tabs. Reminds the user that hover = tooltip and
 // right-click on sliders = reset to default. Light-weight, identical between
 // Basic and Advanced so the hint is always reachable.
 static void DrawTipPanel(ImVec2 panelSize) {
-	ImGui::BeginGroupPanel("Tip", panelSize);
-	ImGui::TextWrapped("Hover over any setting to learn more about it. Right-click any slider to reset it to its default value.");
-	ImGui::EndGroupPanel();
+	openvr_pair::overlay::ui::DrawPanel("Tip", [&] {
+		ImGui::TextWrapped("Hover over any setting to learn more about it. Right-click any slider to reset it to its default value.");
+	}, panelSize);
 }
 
 void CCal_DrawSettings() {
@@ -146,33 +146,45 @@ void CCal_DrawSettings() {
 	// panel size for boxes
 	ImVec2 panel_size { ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
 
-	// (The "hover for tooltips" hint moved to the global footer so it
-	// doesn't take a row at the top of every tab.)
+	// Non-continuous and continuous Advanced read as two different surfaces.
+	// Continuous owns the long-session refinement knobs (slew rate, latency,
+	// recalibration threshold, tracker offset, target-quash); one-shot only
+	// uses the broad math switches and a couple of always-applicable thresholds.
+	// Everything that only does something while continuous calibration is
+	// running is gated on this flag and hidden in one-shot.
+	const bool kInContinuous =
+		CalCtx.state == CalibrationState::Continuous
+		|| CalCtx.state == CalibrationState::ContinuousStandby;
 
-	// Diagnostics panel: stuck-loop watchdog + HMD-stall purge counters.
-	// Lives in Advanced because it's bug-report breadcrumbs, not something
-	// a casual user is going to action on. Keeping it visible (rather than
-	// behind another collapsing header) so a user with a problem can copy
-	// the numbers into a bug report without spelunking.
-	DrawDiagnosticsPanel(panel_size);
+	// Diagnostics panel: continuous-only watchdog + HMD-stall counters. Both
+	// only tick during the continuous-cal refiner; rendering them outside
+	// continuous would always show 0 / never, which is more confusing than
+	// informative.
+	if (kInContinuous) {
+		DrawDiagnosticsPanel(panel_size);
+	}
 
-	// === Toggles panel ====================================================
-	// Hide tracker + Ignore outliers also live in the one-shot Settings tab
-	// (UserInterface.cpp). When state == None both tabs are visible at once,
-	// so duplicating them here would render the same checkbox twice. Gate on
-	// continuous mode: in continuous, the Settings tab is hidden and Advanced
-	// is the user's only access point; in non-continuous, the Settings tab
-	// owns these.
-	const bool kInContinuous = (CalCtx.state == CalibrationState::Continuous);
+	// Hide tracker + Ignore outliers. Both gate on continuous mode in the
+	// apply path (CalibrationProfileApply.cpp), so they're meaningful only
+	// while a continuous-cal run is active.
 	if (kInContinuous) {
 		ImGui::BeginGroupPanel("Toggles", panel_size);
-		if (ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
-			                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
-			                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
+		const bool headMountOwnsTargetHide =
+			CalCtx.headMount.mode >= HeadMountMode::AutoPaired
+			&& wkopenvr::headmount::HeadMountMatchesContinuousTarget(CalCtx);
+		if (headMountOwnsTargetHide) {
+			ImGui::TextDisabled("Tracker visibility is controlled on the Headset tab.");
+		} else {
+			if (ImGui::Checkbox("Hide calibration target tracker in OpenVR", &CalCtx.quashTargetInContinuous)) {
+				if (wkopenvr::headmount::HeadMountMatchesContinuousTarget(CalCtx)) {
+					CalCtx.headMount.hideTracker = CalCtx.quashTargetInContinuous;
+				}
+				SaveProfile(CalCtx);
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Suppress the calibration target tracker's pose in OpenVR while continuous calibration runs.\n"
+				                  "Use when the target tracker would otherwise show up as a duplicate of the reference.");
+			}
 		}
 		ImGui::SameLine();
 		ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
@@ -191,8 +203,12 @@ void CCal_DrawSettings() {
 	// they want to see everything at once, so flatten the hierarchy.
 	{
 
-		// Calibration speed radio + speed-threshold matrix
-		{
+		// Calibration speed radio + speed-threshold matrix. The whole
+		// speed-tuning surface is continuous-only: it tunes the rate at which
+		// continuous calibration drags the offset back into place. One-shot
+		// runs the calibrator once and applies the result; speed thresholds
+		// do nothing there.
+		if (kInContinuous) {
 			ImGui::BeginGroupPanel("Calibration speeds", panel_size);
 
 			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -317,10 +333,12 @@ void CCal_DrawSettings() {
 			}
 
 			ImGui::EndGroupPanel();
-		}
+		} // if (kInContinuous): Calibration speeds
 
-		// Alignment speeds (Decel/Slow/Fast)
-		{
+		// Alignment speeds (Decel/Slow/Fast). Same continuous-only domain as
+		// Calibration speeds above -- the alignment-rate caps feed
+		// ComputeIncremental, which only runs during continuous calibration.
+		if (kInContinuous) {
 			ImGui::BeginGroupPanel("Alignment speeds", panel_size);
 
 			ScaledDragFloat("Decel", CalCtx.alignmentSpeedParams.align_speed_tiny, 1.0, 0, 2.0, 0);
@@ -361,40 +379,48 @@ void CCal_DrawSettings() {
 				AddResetContextMenu("adv_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
 				ImGui::PopID();
 
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::AlignTextToFramePadding();
-				ImGui::TextUnformatted("Recalibration threshold");
-				ImGui::TableSetColumnIndex(1);
-				ImGui::PushID("adv_recalibration_threshold");
-				ImGui::SetNextItemWidth(-FLT_MIN);
-				ImGui::SliderFloat("##adv_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
-				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
-						"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
-				}
-				AddResetContextMenu("adv_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
-				ImGui::PopID();
+				// Recalibration threshold + Max relative error threshold both
+				// feed ComputeIncremental, the continuous-mode refiner.
+				if (kInContinuous) {
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::AlignTextToFramePadding();
+					ImGui::TextUnformatted("Recalibration threshold");
+					ImGui::TableSetColumnIndex(1);
+					ImGui::PushID("adv_recalibration_threshold");
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					ImGui::SliderFloat("##adv_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
+					if (ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
+							"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
+					}
+					AddResetContextMenu("adv_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
+					ImGui::PopID();
 
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::AlignTextToFramePadding();
-				ImGui::TextUnformatted("Max relative error threshold");
-				ImGui::TableSetColumnIndex(1);
-				ImGui::PushID("adv_max_relative_error_threshold");
-				ImGui::SetNextItemWidth(-FLT_MIN);
-				ImGui::SliderFloat("##adv_max_relative_error_threshold_slider", &CalCtx.maxRelativeErrorThreshold, 0.01f, 1.0f, "%1.1f", 0);
-				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.");
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::AlignTextToFramePadding();
+					ImGui::TextUnformatted("Max relative error threshold");
+					ImGui::TableSetColumnIndex(1);
+					ImGui::PushID("adv_max_relative_error_threshold");
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					ImGui::SliderFloat("##adv_max_relative_error_threshold_slider", &CalCtx.maxRelativeErrorThreshold, 0.01f, 1.0f, "%1.1f", 0);
+					if (ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.");
+					}
+					AddResetContextMenu("adv_max_rel_err_ctx", [] { CalCtx.maxRelativeErrorThreshold = 0.005f; });
+					ImGui::PopID();
 				}
-				AddResetContextMenu("adv_max_rel_err_ctx", [] { CalCtx.maxRelativeErrorThreshold = 0.005f; });
-				ImGui::PopID();
 
 				ImGui::EndTable();
 			}
 			ImGui::EndGroupPanel();
 		}
 
+		// Latency tuning + slew rate are continuous-only knobs. Hide them
+		// outside continuous mode so the Advanced tab doesn't read as a
+		// settings dump for one-shot users.
+		if (kInContinuous) {
 		// Latency tuning (one knob, less of a "Thresholds" grouping)
 		{
 			ImGui::BeginGroupPanel("Continuous calibration (advanced)", panel_size);
@@ -554,83 +580,50 @@ void CCal_DrawSettings() {
 			}
 			ImGui::EndGroupPanel();
 		}
+		} // if (kInContinuous): latency + slew rate
 
-		// Experimental opt-in toggles. New flags ship here default-off until real-
-		// world session evidence shows they are an improvement (or a regression to
-		// roll back). Header is collapsed by default so the panel doesn't grow
-		// noisy as more flags accumulate. Plain English on labels; engineering
-		// terms (algorithm names, paper refs) live in the tooltip if anywhere.
+		// Math panel. Single home for every math-stack toggle: validated
+		// defaults are opt-out ("Disable X"), research code paths are opt-in
+		// ("Enable X"). The pre-fork-upstream master switch was removed from
+		// UI on 2026-05-26 (still readable from the profile JSON as a hidden
+		// safety hatch) -- per-feature toggles below cover any reason to
+		// flip pieces of the stack individually.
 		//
-		// Each toggle is wrapped in a previous-value compare so that a user flip
-		// emits a one-shot log annotation. This gives anyone reading the
-		// session log direct evidence of "behavior changed at time T because the
-		// user enabled X". The previous-value statics are function-local so they
-		// don't leak; first-frame initialization captures whatever the loaded
-		// profile says, and subsequent flips fire the annotation.
+		// Each toggle is wrapped in a previous-value compare so that a user
+		// flip emits a one-shot log annotation -- session log shows "behavior
+		// changed at time T because the user enabled X". Statics initialize
+		// to the loaded-profile values on first frame so we do not log a
+		// spurious flip just because the panel rendered for the first time.
 		auto logToggleFlip = [](const char* key, bool& prev, bool current) {
 			if (prev != current) {
 				char buf[128];
-				snprintf(buf, sizeof buf, "experimental_toggle_flip: key=%s value=%d", key, (int)current);
+				snprintf(buf, sizeof buf, "math_toggle_flip: key=%s value=%d", key, (int)current);
 				Metrics::WriteLogAnnotation(buf);
 				prev = current;
 			}
 		};
-		// ---------------------------------------------------------------
-		// Panel 1: Legacy (pre-fork upstream math).
-		//
-		// One master switch for pre-fork upstream behavior. This is broader
-		// than the current-math kill switches below: it selects the bare
-		// upstream pairwise BDCSVD translation path and bypasses fork-only
-		// helpers at their call sites.
-		// ---------------------------------------------------------------
 		{
-			ImGui::BeginGroupPanel("Legacy (pre-fork upstream math)", panel_size);
-			ImGui::TextWrapped("Use this only as a broad compatibility mode. When on, the translation "
-				"solve uses the pre-fork upstream bare pairwise BDCSVD path and fork-only helpers "
-				"such as latency correction, velocity-aware weighting, and rest-locked yaw are bypassed.");
+			ImGui::BeginGroupPanel("Math", panel_size);
+			ImGui::TextWrapped("Validated defaults are on; flip a Disable switch only if a session shows "
+				"a regression and please file a log so the path can be fixed. Research switches at the "
+				"bottom are opt-in and may degrade tracking.");
 			ImGui::Spacing();
 
-			ImGui::Checkbox("Use pre-fork upstream math", &CalCtx.useUpstreamMath);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Master compatibility switch. ON selects the pre-fork upstream translation\n"
-					"solve and bypasses fork-only math helpers without changing their saved settings.\n"
-					"Turn it off to return to the current fork math stack.");
-			}
-			ImGui::EndGroupPanel();
-		}
+			// --- Validated defaults (Disable to revert) ---------------------
+			ImGui::TextDisabled("Validated defaults (Disable to revert)");
 
-		ImGui::Spacing();
-
-		// ---------------------------------------------------------------
-		// Panel 2: Current math (disable individual features).
-		//
-		// Per-feature kill switches for the current fork math stack. The
-		// labels are feature-disable wording; the stored bool names keep
-		// existing profile semantics.
-		// ---------------------------------------------------------------
-		{
-			ImGui::BeginGroupPanel("Current math (disable individual features)", panel_size);
-			ImGui::TextWrapped("These switches disable individual pieces of the current fork math stack. "
-				"The pre-fork upstream switch above takes precedence while it is on.");
-			ImGui::Spacing();
-
-			// Legacy translation solve. The default path is the direct O(N)
-			// latent-offset solve; flipping this on reverts to the prior
-			// pairwise O(N^2) IRLS as a safety hatch.
+			// Direct O(N) latent-offset translation solve. Default on, graduated
+			// 2026-05-11. Disabling reverts to pairwise O(N^2) IRLS.
 			ImGui::Checkbox("Disable direct translation solve (use pairwise IRLS)", &CalCtx.useLegacyMath);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Reverts the translation solve to the prior pairwise O(N^2) IRLS path.\n"
 					"The default direct O(N) latent-offset solver jointly estimates the calibration\n"
 					"translation and the reference-to-target offset, then runs per-sample Cauchy IRLS;\n"
-					"it is faster and statistically cleaner. Flip this on only if a real session shows\n"
-					"a regression vs the prior release -- and please file a session log so the direct\n"
-					"path can be fixed.\n\n"
+					"it is faster and statistically cleaner.\n\n"
 					"Active in: both one-shot and continuous calibration.");
 			}
 
-			// Legacy time-domain latency estimator. Inverts useGccPhatLatency:
-			// checked = revert to time-domain CC. Always interactive; this is
-			// a persisted preference, the tooltip explains when it takes effect.
+			// GCC-PHAT latency estimator. Default on (graduated 2026-05-11).
 			bool legacyTimeDomainLatency = !CalCtx.useGccPhatLatency;
 			if (ImGui::Checkbox("Disable GCC-PHAT latency estimator (use time-domain CC)", &legacyTimeDomainLatency)) {
 				CalCtx.useGccPhatLatency = !legacyTimeDomainLatency;
@@ -638,30 +631,24 @@ void CCal_DrawSettings() {
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Reverts the latency estimator from the default whitened-spectrum\n"
 					"cross-correlator (GCC-PHAT, Knapp-Carter 1976) to the prior time-domain CC.\n"
-					"GCC-PHAT is drop-in better across the latency-relevant range, especially when\n"
-					"the two tracking systems' velocity signals have different frequency content.\n"
-					"Flip this on if your auto-detected offset reads as jumpy.\n\n"
+					"GCC-PHAT is drop-in better across the latency-relevant range.\n\n"
 					"Active in: continuous calibration with auto-detect target latency on.");
 			}
 
-			// Legacy uniform IRLS weighting. Inverts useVelocityAwareWeighting:
-			// checked = drop the velocity scaling of the per-pair threshold.
+			// Velocity-aware IRLS weighting. Default on (graduated 2026-05-11).
 			bool legacyUniformIRLS = !CalCtx.useVelocityAwareWeighting;
 			if (ImGui::Checkbox("Disable velocity-aware IRLS weighting", &legacyUniformIRLS)) {
 				CalCtx.useVelocityAwareWeighting = !legacyUniformIRLS;
 			}
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Reverts the IRLS translation solve to the prior uniform per-pair\n"
-					"threshold. The default velocity-aware path scales the threshold DOWN with motion\n"
+					"threshold. The default velocity-aware path scales the threshold down with motion\n"
 					"magnitude so fast-motion glitches get a sharper cutoff while stationary\n"
-					"high-residual rows stay informative. Flip this on if you suspect the velocity\n"
-					"scaling is biasing the fit on your setup.\n\n"
+					"high-residual rows stay informative.\n\n"
 					"Active in: both one-shot and continuous calibration.");
 			}
 
-			// Disable rest-locked yaw drift correction. Inverts
-			// restLockedYawEnabled: checked = revert to no rest-yaw correction.
-			// Always interactive; tooltip explains when the path runs.
+			// Rest-locked yaw drift correction. Default on (graduated 2026-05-11).
 			bool disableRestLockedYaw = !CalCtx.restLockedYawEnabled;
 			if (ImGui::Checkbox("Disable rest-locked yaw drift correction", &disableRestLockedYaw)) {
 				CalCtx.restLockedYawEnabled = !disableRestLockedYaw;
@@ -669,97 +656,85 @@ void CCal_DrawSettings() {
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Disables the rest-locked yaw drift correction. When a tracker stays\n"
 					"still for 1 s, the default path locks its orientation as an absolute reference\n"
-					"and applies bounded-rate yaw nudges on subsequent at-rest ticks. Flip this on\n"
-					"to remove the correction entirely and rely on continuous-cal alone.\n\n"
+					"and applies bounded-rate yaw nudges on subsequent at-rest ticks.\n\n"
 					"Active in: continuous calibration OFF (one-shot, idle, editing, standby).");
 			}
-			ImGui::EndGroupPanel();
-		}
 
-		ImGui::Spacing();
-
-		// ---------------------------------------------------------------
-		// Panel 3: Experimental / research (opt-in).
-		//
-		// Fork-added code paths that have not graduated. Each has a
-		// documented risk that kept it from default-on. Off by default.
-		// ---------------------------------------------------------------
-		{
-			ImGui::BeginGroupPanel("Experimental / research (opt-in)", panel_size);
-			ImGui::TextWrapped("Not-yet-validated research code paths. Off by default; opt in only if "
-				"you want to help validate one. Documented risks per tooltip; if tracking regresses "
-				"after you flip one, flip it back.");
+			ImGui::Spacing();
+			ImGui::Separator();
 			ImGui::Spacing();
 
-			// CUSUM geometry-shift detector (Page 1954) replaces the 5x-rolling-
-			// median rule with a cumulative-sum statistical test. Same recovery
-			// action; tunable false-alarm rate via standard ARL tables.
-			// Always interactive; tooltip explains when the path runs.
-			ImGui::Checkbox("CUSUM geometry-shift detector", &CalCtx.useCusumGeometryShift);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the\n"
-					"default 5x-rolling-median rule. Same recovery action when fired (clear cal,\n"
-					"demote to standby). Documented ARL_0 ~ 10^4 ticks (~3 min at 60 Hz at noise-\n"
-					"floor convergence) means roughly one false alarm per quiet session, which is\n"
-					"why it has not graduated to default-on.\n\n"
-					"Active in: continuous calibration only.");
+			// --- Research (Enable to opt in) --------------------------------
+			ImGui::TextDisabled("Research (opt-in; can regress tracking)");
+
+			// CUSUM geometry-shift detector. Continuous-only path; the same
+			// detector runs in both modes per the wider flag flow, but its
+			// recovery trigger is meaningful only while continuous-cal is
+			// actively refining. Showing it outside continuous would let a
+			// one-shot user flip a knob whose effect they never see -- gate.
+			if (kInContinuous) {
+				ImGui::Checkbox("Enable CUSUM geometry-shift detector", &CalCtx.useCusumGeometryShift);
+				if (ImGui::IsItemHovered(0)) {
+					ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the\n"
+						"default 5x-rolling-median rule. Same recovery action when fired (clear cal,\n"
+						"demote to standby). Documented ARL_0 ~ 10^4 ticks (~3 min at 60 Hz) means roughly\n"
+						"one false alarm per quiet session, which is why it has not graduated to default-on.\n\n"
+						"Active in: continuous calibration only.");
+				}
 			}
 
-			// Tukey biweight + Qn-scale alternative robust kernel. Same
-			// IRLS path as velocity-aware weighting: applies in both modes.
-			ImGui::Checkbox("Tukey biweight robust kernel", &CalCtx.useTukeyBiweight);
+			// Tukey biweight + Qn-scale alternative robust kernel. Applies
+			// in both modes.
+			ImGui::Checkbox("Enable Tukey biweight robust kernel", &CalCtx.useTukeyBiweight);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Replaces the default IRLS Cauchy + MAD with Tukey biweight + Qn-scale\n"
 					"(Rousseeuw-Croux 1993). Tukey is redescending: residuals beyond the threshold get\n"
-					"exactly zero weight, which can swallow real geometry-shift evidence; that risk\n"
-					"is why it has not graduated. Cauchy + MAD has been adequate on observed data.\n\n"
+					"exactly zero weight, which can swallow real geometry-shift evidence.\n\n"
 					"Active in: both one-shot and continuous calibration.");
 			}
 
-			// Kalman-filter blend at publish. Replaces the EMA in
-			// ComputeIncremental; ComputeOneshot does not use the EMA path,
-			// so this toggle is a no-op in one-shot mode. Always interactive;
-			// tooltip explains when the path runs.
-			ImGui::Checkbox("Kalman-filter blend at publish", &CalCtx.useBlendFilter);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
-					"4-state Kalman filter on (yaw, tx, ty, tz). Off by default: measurement noise\n"
-					"is currently fixed and has not been adapted to the new direct translation\n"
-					"solver's covariance output. Until that plumbing lands, the EMA is the safer\n"
-					"default.\n\n"
-					"Active in: continuous calibration only.");
+			// Kalman-filter blend at publish. Continuous-only -- ComputeOneshot
+			// does not use the EMA path that this replaces.
+			if (kInContinuous) {
+				ImGui::Checkbox("Enable Kalman-filter blend at publish", &CalCtx.useBlendFilter);
+				if (ImGui::IsItemHovered(0)) {
+					ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
+						"4-state Kalman filter on (yaw, tx, ty, tz). Off by default: measurement noise\n"
+						"is currently fixed and has not been adapted to the new direct translation\n"
+						"solver's covariance output.\n\n"
+						"Active in: continuous calibration only.");
+				}
 			}
 
-			// Predictive recovery pre-correction. Buffer fills on the 30 cm
-			// relocalization fire (continuous mode); per-tick apply runs in
-			// any state. Mostly continuous-relevant.
-			ImGui::Checkbox("Predictive recovery pre-correction", &CalCtx.predictiveRecoveryEnabled);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Each Quest re-anchor event (the 30 cm HMD-jump trigger) pushes its direction\n"
-					"and magnitude into a 6-deep rolling buffer. Once 3+ events accumulate with a consistent\n"
-					"direction, apply 10 percent of the predicted next-jump per tick as a bounded-rate\n"
-					"translation nudge to the active calibration. Speculative -- can inject bias before a\n"
-					"real event, which is why it has not graduated.\n\n"
-					"Active in: any mode. Buffer fills only when the 30 cm detector fires (continuous\n"
-					"mode); the per-tick predictive nudge applies whenever the buffer has enough events.");
+			// Predictive recovery pre-correction. Continuous-only buffer fill,
+			// per-tick apply runs in any state -- gate on continuous since the
+			// buffer never fills otherwise.
+			if (kInContinuous) {
+				ImGui::Checkbox("Enable predictive recovery pre-correction", &CalCtx.predictiveRecoveryEnabled);
+				if (ImGui::IsItemHovered(0)) {
+					ImGui::SetTooltip("Each Quest re-anchor event (the 30 cm HMD-jump trigger) pushes its direction\n"
+						"and magnitude into a 6-deep rolling buffer. Once 3+ events accumulate with a consistent\n"
+						"direction, apply 10 percent of the predicted next-jump per tick as a bounded-rate\n"
+						"translation nudge. Speculative -- can inject bias before a real event.\n\n"
+						"Active in: continuous calibration (buffer fill requires the 30 cm detector to fire).");
+				}
 			}
 
-			// Chi-square re-anchor sub-detector. Pose-stream-only; works in
-			// any state.
-			ImGui::Checkbox("Chi-square re-anchor sub-detector", &CalCtx.reanchorChiSquareEnabled);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Mahalanobis distance between HMD-pose-from-rolling-velocity and observed\n"
-					"HMD pose. Threshold at chi-square 6 DoF p<1e-4 (about 27.86). Needs angular-velocity\n"
-					"prediction before it can trust rotation residuals during normal head turns; without\n"
-					"that it can false-fire on routine motion. Detection-only: never triggers recovery\n"
-					"itself.\n\n"
-					"Active in: any mode.");
+			// Chi-square re-anchor sub-detector. Continuous-only.
+			if (kInContinuous) {
+				ImGui::Checkbox("Enable chi-square re-anchor sub-detector", &CalCtx.reanchorChiSquareEnabled);
+				if (ImGui::IsItemHovered(0)) {
+					ImGui::SetTooltip("Mahalanobis distance between HMD-pose-from-rolling-velocity and observed\n"
+						"HMD pose. Threshold at chi-square 6 DoF p<1e-4 (about 27.86). Needs angular-velocity\n"
+						"prediction before it can trust rotation residuals during normal head turns; without\n"
+						"that it can false-fire on routine motion. Detection-only -- never triggers recovery.\n\n"
+						"Active in: continuous calibration only.");
+				}
 			}
 
-			// Toggle-flip diagnostic. Compare each flag to its previous value
-			// and emit a one-shot annotation on change. Statics are initialized
-			// to the loaded-profile values on first frame so we do not log a
-			// spurious flip just because the panel rendered for the first time.
+			// Toggle-flip diagnostic. useUpstreamMath is still tracked (it can
+			// be set via the profile JSON) so a flip in either direction still
+			// lands a log line.
 			static bool s_prevAutoDetect = CalCtx.latencyAutoDetect;
 			static bool s_prevUpstream   = CalCtx.useUpstreamMath;
 			static bool s_prevGccPhat    = CalCtx.useGccPhatLatency;
@@ -786,9 +761,10 @@ void CCal_DrawSettings() {
 			ImGui::EndGroupPanel();
 		}
 
-		// Tracker offset / Playspace scale stay in advanced -- these are rarely
-		// touched by hand and live next to the per-axis math anyway.
-		{
+		// Tracker offset is continuous-only: only the Continuous path applies
+		// it via continuousCalibrationOffset. Hide outside continuous so the
+		// one-shot Advanced tab isn't padded with a knob that does nothing.
+		if (kInContinuous) {
 			ImVec2 panel_size_inner { panel_size.x - 11 * 2, 0};
 			ImGui::BeginGroupPanel("Tracker offset", panel_size_inner);
 			DrawVectorElement("cc_tracker_offset", "X", &CalCtx.continuousCalibrationOffset.x());

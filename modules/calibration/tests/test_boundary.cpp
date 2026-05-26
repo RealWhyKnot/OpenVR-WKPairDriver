@@ -1,0 +1,266 @@
+// Tests for the safety boundary backend: Douglas-Peucker simplification,
+// polygon area, coordinate transform, and CaptureSession state machine.
+// Chaperone IVRChaperoneSetup calls are not exercised here -- they require
+// a running SteamVR instance.
+
+#include "Boundary.h"
+#include "BoundaryCapture.h"
+
+#include <Eigen/Geometry>
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <vector>
+
+using namespace wkopenvr::boundary;
+
+// ---------------------------------------------------------------------------
+// Douglas-Peucker
+// ---------------------------------------------------------------------------
+
+// 100 points all on the X-axis -> 2 kept (endpoints only).
+TEST(BoundaryDouglasPeuckerTest, SimplifiesCollinear) {
+    std::vector<BoundaryVertex> path;
+    for (int i = 0; i < 100; ++i) {
+        path.push_back({ (double)i * 0.1, 0.0, 0.0 });
+    }
+    auto kept = SimplifyDouglasPeucker(path, 0.05);
+    EXPECT_EQ(kept.size(), 2u);
+    EXPECT_EQ(kept.front(), 0u);
+    EXPECT_EQ(kept.back(), 99u);
+}
+
+// L-shape: (0,0,0) -> (1,0,0) -> (1,0,1) -> (2,0,1). The corner at (1,0,0)
+// and (1,0,1) must survive; a straight line from start to end would be
+// > 0.05 m away from both those points.
+TEST(BoundaryDouglasPeuckerTest, PreservesCorners) {
+    std::vector<BoundaryVertex> path = {
+        { 0.0, 0.0, 0.0 },
+        { 0.5, 0.0, 0.0 },   // collinear -- should be dropped
+        { 1.0, 0.0, 0.0 },   // corner A
+        { 1.0, 0.0, 0.5 },   // collinear -- should be dropped
+        { 1.0, 0.0, 1.0 },   // corner B
+        { 1.5, 0.0, 1.0 },   // collinear -- should be dropped
+        { 2.0, 0.0, 1.0 },
+    };
+    auto kept = SimplifyDouglasPeucker(path, 0.05);
+    // Kept indices must include the two corners (index 2 and 4).
+    bool hasCornerA = false, hasCornerB = false;
+    for (size_t idx : kept) {
+        if (idx == 2) hasCornerA = true;
+        if (idx == 4) hasCornerB = true;
+    }
+    EXPECT_TRUE(hasCornerA) << "corner at index 2 should be preserved";
+    EXPECT_TRUE(hasCornerB) << "corner at index 4 should be preserved";
+    // Collinear mid-points should be gone.
+    EXPECT_LE(kept.size(), 5u);
+}
+
+// Empty and single-point inputs should not crash.
+TEST(BoundaryDouglasPeuckerTest, HandlesEmpty) {
+    std::vector<BoundaryVertex> empty;
+    auto kept = SimplifyDouglasPeucker(empty, 0.05);
+    EXPECT_TRUE(kept.empty());
+}
+
+TEST(BoundaryDouglasPeuckerTest, HandlesSinglePoint) {
+    std::vector<BoundaryVertex> one = { { 1.0, 0.0, 2.0 } };
+    auto kept = SimplifyDouglasPeucker(one, 0.05);
+    ASSERT_EQ(kept.size(), 1u);
+    EXPECT_EQ(kept[0], 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Polygon area
+// ---------------------------------------------------------------------------
+
+// Counter-clockwise unit square on XZ plane: area should be +1.0.
+TEST(BoundaryAreaTest, SignedAreaCorrectForUnitSquare) {
+    std::vector<XZPoint> square = {
+        { 0.0, 0.0 },
+        { 1.0, 0.0 },
+        { 1.0, 1.0 },
+        { 0.0, 1.0 },
+    };
+    // Signed area is negative for CW winding. We care that AbsoluteArea = 1.
+    double area = AbsoluteAreaXZ(square);
+    EXPECT_NEAR(area, 1.0, 1e-9);
+}
+
+TEST(BoundaryAreaTest, AbsoluteAreaIgnoresWinding) {
+    // CW winding
+    std::vector<XZPoint> squareCW = {
+        { 0.0, 0.0 },
+        { 0.0, 1.0 },
+        { 1.0, 1.0 },
+        { 1.0, 0.0 },
+    };
+    double area = AbsoluteAreaXZ(squareCW);
+    EXPECT_NEAR(area, 1.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Transform to standing universe
+// ---------------------------------------------------------------------------
+
+// Identity transform: output equals input.
+TEST(BoundaryTransformTest, IdentityPassesThrough) {
+    Eigen::AffineCompact3d identity = Eigen::AffineCompact3d::Identity();
+    std::vector<BoundaryVertex> verts = {
+        { 1.0, 2.0, 3.0 },
+        { -0.5, 0.1, 4.2 },
+    };
+    auto out = TransformToStandingUniverse(verts, identity);
+    ASSERT_EQ(out.size(), verts.size());
+    for (size_t i = 0; i < verts.size(); ++i) {
+        EXPECT_NEAR(out[i].x, verts[i].x, 1e-9);
+        EXPECT_NEAR(out[i].y, verts[i].y, 1e-9);
+        EXPECT_NEAR(out[i].z, verts[i].z, 1e-9);
+    }
+}
+
+// Known translation applied to vertices matches Eigen-direct multiplication.
+TEST(BoundaryTransformTest, KnownTranslationApplied) {
+    Eigen::AffineCompact3d xf = Eigen::AffineCompact3d::Identity();
+    xf.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+
+    std::vector<BoundaryVertex> verts = { { 0.0, 0.0, 0.0 }, { 1.0, 0.0, 0.0 } };
+    auto out = TransformToStandingUniverse(verts, xf);
+    ASSERT_EQ(out.size(), 2u);
+
+    // First point (0,0,0) translated by (1,2,3) -> (1,2,3).
+    EXPECT_NEAR(out[0].x, 1.0, 1e-9);
+    EXPECT_NEAR(out[0].y, 2.0, 1e-9);
+    EXPECT_NEAR(out[0].z, 3.0, 1e-9);
+
+    // Second point (1,0,0) translated -> (2,2,3).
+    EXPECT_NEAR(out[1].x, 2.0, 1e-9);
+    EXPECT_NEAR(out[1].y, 2.0, 1e-9);
+    EXPECT_NEAR(out[1].z, 3.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// CaptureSession
+// ---------------------------------------------------------------------------
+
+// 100 ticks with the same pose -> only 1 vertex (debounce suppresses duplicates).
+TEST(CaptureSessionTest, DebouncesVertices) {
+    CaptureSession session;
+    session.Start();
+    EXPECT_EQ(session.state(), CaptureState::Active);
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translation() = Eigen::Vector3d(0.5, 1.0, 0.5);
+
+    for (int i = 0; i < 100; ++i) {
+        session.Tick(pose, /*triggerHeld=*/true);
+    }
+
+    EXPECT_EQ(session.rawVertexCount(), 1u);
+}
+
+// Walking an L-shape, then Finish -> simplified to ~3 vertices.
+TEST(CaptureSessionTest, FinishSimplifies) {
+    CaptureSession session;
+    session.Start();
+
+    // Walk along +X axis: 20 steps of 0.1 m -> 2 m total
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    for (int i = 0; i <= 20; ++i) {
+        pose.translation() = Eigen::Vector3d(i * 0.1, 0.0, 0.0);
+        session.Tick(pose, true);
+    }
+    // Turn: walk along +Z axis: 20 steps of 0.1 m
+    for (int i = 1; i <= 20; ++i) {
+        pose.translation() = Eigen::Vector3d(2.0, 0.0, i * 0.1);
+        session.Tick(pose, true);
+    }
+
+    session.Finish();
+    EXPECT_EQ(session.state(), CaptureState::Finished);
+    // Simplified result should have the two endpoints and the corner, ~3 points.
+    const auto& simplified = session.vertices();
+    EXPECT_GE(simplified.size(), 2u);
+    EXPECT_LE(simplified.size(), 5u);
+}
+
+// Cancel -> state Idle, buffer empty.
+TEST(CaptureSessionTest, CancelClearsBuffer) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    for (int i = 0; i < 5; ++i) {
+        pose.translation() = Eigen::Vector3d(i * 0.2, 0.0, 0.0);
+        session.Tick(pose, true);
+    }
+    EXPECT_GT(session.rawVertexCount(), 0u);
+
+    session.Cancel();
+    EXPECT_EQ(session.state(), CaptureState::Idle);
+    EXPECT_EQ(session.vertices().size(), 0u);
+    EXPECT_EQ(session.rawVertexCount(), 0u);
+}
+
+// Trigger not held -> no vertices accumulated.
+TEST(CaptureSessionTest, IgnoresTicksWhenTriggerNotHeld) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    for (int i = 0; i < 10; ++i) {
+        pose.translation() = Eigen::Vector3d(i * 0.1, 0.0, 0.0);
+        session.Tick(pose, /*triggerHeld=*/false);
+    }
+    EXPECT_EQ(session.rawVertexCount(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// ComputePolygonBoundsXZ
+// ---------------------------------------------------------------------------
+
+TEST(BoundaryBoundsTest, EmptyReturnsZero) {
+    std::vector<BoundaryVertex> empty;
+    auto b = ComputePolygonBoundsXZ(empty);
+    EXPECT_EQ(b.xMin, 0.0);
+    EXPECT_EQ(b.xMax, 0.0);
+    EXPECT_EQ(b.zMin, 0.0);
+    EXPECT_EQ(b.zMax, 0.0);
+}
+
+TEST(BoundaryBoundsTest, SinglePoint) {
+    std::vector<BoundaryVertex> v = { { 3.0, 0.0, -2.0 } };
+    auto b = ComputePolygonBoundsXZ(v);
+    EXPECT_NEAR(b.xMin, 3.0, 1e-9);
+    EXPECT_NEAR(b.xMax, 3.0, 1e-9);
+    EXPECT_NEAR(b.zMin, -2.0, 1e-9);
+    EXPECT_NEAR(b.zMax, -2.0, 1e-9);
+}
+
+TEST(BoundaryBoundsTest, UnitSquareXZ) {
+    std::vector<BoundaryVertex> square = {
+        { 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0 },
+        { 0.0, 0.0, 1.0 },
+    };
+    auto b = ComputePolygonBoundsXZ(square);
+    EXPECT_NEAR(b.xMin, 0.0, 1e-9);
+    EXPECT_NEAR(b.xMax, 1.0, 1e-9);
+    EXPECT_NEAR(b.zMin, 0.0, 1e-9);
+    EXPECT_NEAR(b.zMax, 1.0, 1e-9);
+}
+
+TEST(BoundaryBoundsTest, NegativeCoordinates) {
+    std::vector<BoundaryVertex> pts = {
+        { -3.0, 1.0, -4.0 },
+        {  2.0, 0.5,  5.0 },
+        {  0.0, 0.0,  0.0 },
+    };
+    auto b = ComputePolygonBoundsXZ(pts);
+    EXPECT_NEAR(b.xMin, -3.0, 1e-9);
+    EXPECT_NEAR(b.xMax,  2.0, 1e-9);
+    EXPECT_NEAR(b.zMin, -4.0, 1e-9);
+    EXPECT_NEAR(b.zMax,  5.0, 1e-9);
+}

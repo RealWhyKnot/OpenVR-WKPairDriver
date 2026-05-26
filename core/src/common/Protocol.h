@@ -224,7 +224,16 @@ namespace protocol
 	// union does not change size. Bump is required because a stale
 	// driver paired with a new overlay would read garbage from the new
 	// offsets; we'd rather refuse the handshake.
-	const uint32_t Version = 24;
+	//
+	// v25 (2026-05-26): adds RequestSetHeadMountConfig. Payload carries
+	// the head-mount tracker mode, resolved deviceId, serial + tracking-
+	// system strings, the rigid headFromTracker offset (translation +
+	// quaternion), and the hide/offsetCalibrated flags. The payload
+	// exceeds sizeof(SetDeviceTransform); sizeof(Request) grows. The
+	// bump forces a paired overlay+driver reinstall so a stale driver
+	// rejects the handshake rather than dispatching into a mismatched
+	// union layout.
+	const uint32_t Version = 25;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -321,6 +330,13 @@ namespace protocol
 		// to the UDP send socket; overlay also writes profiles/oscrouter.json
 		// so the value survives a restart even if the driver isn't running.
 		RequestSetOscRouterConfig,
+		// v25 (2026-05-26): head-mounted tracker config push. Overlay
+		// resolves the tracker serial to a live deviceId and sends the
+		// full HeadMountConfig over the wire so the driver can apply the
+		// headFromTracker offset and hide/show the tracker without parsing
+		// the profile JSON itself. Driver caches the payload and reads it
+		// on the per-tick pose-update path.
+		RequestSetHeadMountConfig,
 	};
 
 	enum ResponseType
@@ -359,7 +375,11 @@ namespace protocol
 			std::atomic<uint64_t> fallback_apply_count;
 			std::atomic<uint64_t> per_id_apply_count;
 			std::atomic<uint64_t> quash_apply_count;
-			std::atomic<uint64_t> reserved[5];
+			// Number of times DriverSynth fell back to the upstream HMD pose
+			// because the head-mounted tracker was invalid, stale, or the
+			// synthesized position exceeded the 1 m sanity gate.
+			std::atomic<uint64_t> driver_synth_fallback_count;
+			std::atomic<uint64_t> reserved[4];
 		};
 
 		// Names of the individual telemetry counters, used by IncrementTelemetry to
@@ -369,6 +389,7 @@ namespace protocol
 			TELEMETRY_FALLBACK_APPLY,
 			TELEMETRY_PER_ID_APPLY,
 			TELEMETRY_QUASH_APPLY,
+			TELEMETRY_DRIVER_SYNTH_FALLBACK,
 		};
 
 		// Sentinel written by the driver into ShmemData::magic. The overlay
@@ -629,6 +650,9 @@ namespace protocol
 			case TELEMETRY_QUASH_APPLY:
 				pData->telemetry.quash_apply_count.fetch_add(1, std::memory_order_relaxed);
 				break;
+			case TELEMETRY_DRIVER_SYNTH_FALLBACK:
+				pData->telemetry.driver_synth_fallback_count.fetch_add(1, std::memory_order_relaxed);
+				break;
 			default:
 				// Unknown enum value: silently ignore. Explicit default silences
 				// implicit-fall-through warnings and documents that no other
@@ -641,11 +665,13 @@ namespace protocol
 		// The values are loaded with relaxed ordering — the overlay only ever
 		// computes deltas across snapshots, so torn reads relative to other counters
 		// don't matter.
-		bool GetTelemetry(uint64_t& fallback_apply, uint64_t& per_id_apply, uint64_t& quash_apply) {
+		bool GetTelemetry(uint64_t& fallback_apply, uint64_t& per_id_apply,
+		                  uint64_t& quash_apply, uint64_t& driver_synth_fallback) {
 			if (pData == nullptr) return false;
-			fallback_apply = pData->telemetry.fallback_apply_count.load(std::memory_order_relaxed);
-			per_id_apply = pData->telemetry.per_id_apply_count.load(std::memory_order_relaxed);
-			quash_apply = pData->telemetry.quash_apply_count.load(std::memory_order_relaxed);
+			fallback_apply        = pData->telemetry.fallback_apply_count.load(std::memory_order_relaxed);
+			per_id_apply          = pData->telemetry.per_id_apply_count.load(std::memory_order_relaxed);
+			quash_apply           = pData->telemetry.quash_apply_count.load(std::memory_order_relaxed);
+			driver_synth_fallback = pData->telemetry.driver_synth_fallback_count.load(std::memory_order_relaxed);
 			return true;
 		}
 	};

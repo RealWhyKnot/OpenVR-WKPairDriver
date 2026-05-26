@@ -441,10 +441,20 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		// would blind the user). updateQuash=true so the driver actively
 		// writes the bit rather than holding the previous value.
 		const bool isHmd = (id == vr::k_unTrackedDeviceIndex_Hmd);
-		payload.quash = !isHmd
+		// Hide the regular calibration target while continuous-cal is active.
+		const bool quashTarget = !isHmd
 			&& CalCtx.state == CalibrationState::Continuous
 			&& (int32_t)id == CalCtx.targetID
 			&& CalCtx.quashTargetInContinuous;
+		// Also hide the head-mount tracker when AutoPaired is active and
+		// hideTracker is set -- it's providing continuous samples but the user
+		// doesn't want to see it floating as a phantom in their scene.
+		const bool quashHeadMount = !isHmd
+			&& CalCtx.state == CalibrationState::Continuous
+			&& (int32_t)id == CalCtx.headMount.deviceID
+			&& CalCtx.headMount.mode >= HeadMountMode::AutoPaired
+			&& CalCtx.headMount.hideTracker;
+		payload.quash = quashTarget || quashHeadMount;
 		payload.updateQuash = true;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 

@@ -12,11 +12,16 @@
 #include "Wizard.h"
 #include "UserInterfaceFooter.h"
 #include "UserInterfaceBanners.h"
+#include "HeadMountOffsetModal.h"
+#include "UiHelpers.h"
 
 #include <thread>
 #include <string>
+#include <cstdio>
+#include <cstring>
 #include <vector>
 #include <algorithm>
+#include <exception>
 #include <shellapi.h>
 #include <shlobj_core.h>
 #include <imgui/imgui.h>
@@ -51,6 +56,8 @@ void BuildMenu(bool runningInOverlay);
 // Smoothing overlay (Protocol v12 migration, 2026-05-11).
 void CCal_BasicInfo();
 void CCal_DrawSettings();
+void CCal_DrawBoundaryTab();
+void CCal_TickBoundaryCapture();
 static void OneShot_DrawSettings();
 
 bool runningInOverlay;
@@ -59,6 +66,50 @@ bool s_inUmbrella = false;
 void CCal_SetInUmbrella(bool inUmbrella)
 {
 	s_inUmbrella = inUmbrella;
+}
+
+// Shared head-mount config IPC. Previously inlined in BuildContinuousCalDisplay
+// only; lifted here so the one-shot path can dispatch the same payload after
+// the offset modal saves.
+static void SendHeadMountConfigFromCalCtx()
+{
+	const auto& hm = CalCtx.headMount;
+	protocol::Request req(protocol::RequestSetHeadMountConfig);
+	auto& p = req.setHeadMountConfig;
+	p.mode             = static_cast<uint32_t>(hm.mode);
+	p.deviceId         = hm.deviceID;
+	p.hideTracker      = hm.hideTracker;
+	p.offsetCalibrated = hm.offsetCalibrated;
+	{
+		size_t len = hm.trackerSerial.size();
+		if (len >= sizeof p.trackerSerial) len = sizeof p.trackerSerial - 1;
+		memcpy(p.trackerSerial, hm.trackerSerial.data(), len);
+		p.trackerSerial[len] = '\0';
+	}
+	{
+		size_t len = hm.trackerTrackingSystem.size();
+		if (len >= sizeof p.trackerTrackingSystem) len = sizeof p.trackerTrackingSystem - 1;
+		memcpy(p.trackerTrackingSystem, hm.trackerTrackingSystem.data(), len);
+		p.trackerTrackingSystem[len] = '\0';
+	}
+	Eigen::Quaterniond q(hm.headFromTracker.linear());
+	q.normalize();
+	const Eigen::Vector3d t = hm.headFromTracker.translation();
+	p.headFromTrackerTrans[0] = t.x();
+	p.headFromTrackerTrans[1] = t.y();
+	p.headFromTrackerTrans[2] = t.z();
+	p.headFromTrackerRot[0]   = q.x();
+	p.headFromTrackerRot[1]   = q.y();
+	p.headFromTrackerRot[2]   = q.z();
+	p.headFromTrackerRot[3]   = q.w();
+	try {
+		Driver.SendBlocking(req);
+	} catch (const std::exception& e) {
+		char buf[240];
+		snprintf(buf, sizeof buf,
+			"[head-mount] config push failed: %s", e.what());
+		Metrics::WriteLogAnnotation(buf);
+	}
 }
 
 void BuildMainWindow(bool runningInOverlay_)
@@ -270,22 +321,27 @@ void BuildContinuousCalDisplay() {
 	// (Mode pill moved to the global footer alongside the driver-status dot;
 	// no longer takes a row above the tab bar.)
 
-	// Tab bar layout.  The user-facing categories are:
-	//   - Basic:    everything a casual user touches.  No graphs, no jargon.
-	//               Plain buttons + the handful of settings most people change.
-	//   - Graphs:   the live plots.  For users who want to watch what the math
-	//               is doing in real time.
-	//   - Advanced: every technical knob -- speed radios, alignment thresholds,
-	//               latency tuning, the obscure checkboxes.  This is also the
-	//               only place where a user can override the AUTO defaults.
-	//   - Prediction: stays separate since it's its own feature surface
-	//               (external-tool detection + per-device suppression).
-	//   - Logs:     list debug-log CSV files for sending to bug reports;
-	//               always visible (user may have old logs to attach even
-	//               with logging currently off).
+	// Tab bar layout. User-facing categories:
+	//   - Basic:     the currently-running calibration -- device status, action
+	//                buttons, common settings.
+	//   - Headset:   the lighthouse-anchored story. Pick a head-mounted tracker,
+	//                solve its offset, choose a mode, draw the safety boundary
+	//                and (optionally) hide Quest's Guardian. Ordered to read as
+	//                a single user journey (pick -> calibrate -> mode -> boundary
+	//                -> guardian).
+	//   - Graphs:    live plots for users who want to watch the math.
+	//   - Advanced:  technical knobs (speed, alignment thresholds, latency
+	//                tuning); the only place to override AUTO defaults.
+	//   - Logs:      debug-log CSV files for bug reports. Lives in the
+	//                umbrella's global Logs tab now.
 	if (ImGui::BeginTabBar("CCalTabs", 0)) {
 		if (ImGui::BeginTabItem("Basic")) {
 			CCal_BasicInfo();
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Headset")) {
+			CCal_DrawBoundaryTab();
 			ImGui::EndTabItem();
 		}
 
@@ -303,6 +359,15 @@ void BuildContinuousCalDisplay() {
 		// (file list, enable toggle, drift dump button, Explorer link)
 		// surfaces there via SpaceCalibratorPlugin::DrawLogsSection.
 		ImGui::EndTabBar();
+	}
+
+	// Head-mount offset modal. Must be called outside the tab-item scope (ImGui
+	// modals are rendered at the top of the window stack, not inside the tab).
+	// Returns true on the frame the user clicks Save; the shared IPC helper
+	// then sends the updated config to the driver so it picks up the new
+	// offset and calibrated flag.
+	if (wkopenvr::headmount::DrawOffsetModal()) {
+		SendHeadMountConfigFromCalCtx();
 	}
 
 	if (!s_inUmbrella) {
@@ -363,19 +428,17 @@ inline const char* GetPrettyTrackingSystemName(const std::string& value) {
 
 
 
-// One-shot mode's Settings tab. Mirrors the Common Settings panel from
-// CCal_BasicInfo (continuous mode) but trimmed to what a one-shot user
-// actually touches: jitter / lock / recal-on-movement / static-recal /
-// debug logs. Continuous-only knobs (recalibration threshold, alignment
-// thresholds, latency tuning) live in the Advanced tab, which is shared
-// verbatim with continuous mode.
+// One-shot mode's Settings tab. Trimmed to what a one-shot user actually
+// touches: outlier rejection, universe-shift correction, calibration speed,
+// chaperone bounds, maintenance. Continuous-only knobs (Lock relative
+// position, Recalibrate on movement, recalibration threshold, alignment
+// thresholds, latency tuning, slew rate) live on the continuous Basic /
+// Advanced tabs where they actually do something.
 //
 // The reasoning for having both this AND CCal_BasicInfo's Common settings
 // rather than one shared function: the surrounding contexts differ -- the
 // continuous Basic tab has device-status table + Cancel/Restart/Pause action
-// buttons above, this one is just the settings. Splitting keeps each call
-// site readable; the per-row code is short enough that the duplication isn't
-// worth a parameter-explosion in a shared helper.
+// buttons above, this one is just the settings.
 static void OneShot_DrawSettings() {
 	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
 	ImGui::BeginGroupPanel("Settings", panelSize);
@@ -388,85 +451,17 @@ static void OneShot_DrawSettings() {
 		// (Jitter threshold moved to the Advanced tab -- it's a rarely-touched
 		// knob, surfaced there alongside the rest of the deeper math settings.)
 
-		// --- Lock relative position (tristate) ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Lock relative position");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::PushID("oneshot_lock_mode");
-		const char* lockLabels[] = { "Off", "On", "Auto" };
-		const CalibrationContext::LockMode lockModes[] = {
-			CalibrationContext::LockMode::OFF,
-			CalibrationContext::LockMode::ON,
-			CalibrationContext::LockMode::AUTO
-		};
-		for (int i = 0; i < 3; ++i) {
-			if (i > 0) ImGui::SameLine();
-			if (ImGui::RadioButton(lockLabels[i], CalCtx.lockRelativePositionMode == lockModes[i])) {
-				const auto prev = CalCtx.lockRelativePositionMode;
-				CalCtx.lockRelativePositionMode = lockModes[i];
-				SaveProfile(CalCtx);
-				// Force the resolved value to update immediately and clear any
-				// active reanchor-suppression so a user-driven mode change
-				// isn't held off by the gate. The gate exists to prevent
-				// reanchor noise from flapping the lock; a deliberate UI
-				// action is the opposite -- explicit intent that should
-				// take effect this frame.
-				CalCtx.autoLockReanchorSuppressUntil = 0.0;
-				CalCtx.ResolveLockMode();
-				char lmbuf[200];
-				snprintf(lmbuf, sizeof lmbuf,
-					"lock_mode_ui_write: site=oneshot prev=%d now=%d resolved_lockRel=%d (suppress_cleared)",
-					(int)prev, (int)CalCtx.lockRelativePositionMode,
-					(int)CalCtx.lockRelativePosition);
-				Metrics::WriteLogAnnotation(lmbuf);
-			}
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(
-				"Off:  the math is free to re-solve the relative pose every cycle. Right for\n"
-				"      independent devices (HMD on head + body tracker on hip).\n"
-				"On:   freeze the relative pose once calibrated. Right for rigid setups\n"
-				"      (tracker glued to HMD, taped to a controller).\n"
-				"Auto: detect rigid attachment from observed motion. Recommended.");
-		}
-		ImGui::PopID();
+		// (Lock relative position and Recalibrate on movement moved to the
+		// continuous-cal Basic tab. Both knobs only behave during continuous
+		// refinement -- Lock gates the relative-pose constraint inside
+		// ComputeIncremental, Recalibrate-on-movement drives the slew-rate
+		// cap on per-frame transform updates. Rendering them on the one-shot
+		// Settings tab created the impression they affect the one-shot solve,
+		// which they do not.)
 
-		// --- Recalibrate on movement ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Recalibrate on movement");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##oneshot_recal_on_move", &CalCtx.recalibrateOnMovement)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Calibration corrections converge at a capped rate: imperceptible when still\n"
-				"(default ~0.5 mm/sec), brisk when moving (default ~10 mm/sec). Tune on Advanced.\n"
-				"Default ON.");
-		}
-
-		// (Static recalibration toggle removed -- it's now always-on, gated
-		// implicitly by Lock relative position. Independent devices have
-		// nothing locked to snap to, so the feature is a no-op for them;
-		// rigid setups get the snap-back automatically.)
-
-		// --- Hide tracker ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Hide tracker (during cal)");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##oneshot_hide_tracker", &CalCtx.quashTargetInContinuous)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while calibration runs.\n"
-				"Use when the target would otherwise show as a duplicate of the reference\n"
-				"(e.g. a Vive tracker taped to a Quest controller for one-shot calibration).");
-		}
+		// (Hide tracker controls moved out of one-shot Settings. The
+		// calibration-target hide lives on the Advanced tab (continuous-only).
+		// The head-mount tracker hide lives on the Headset tab.)
 
 		// --- Ignore outliers ---
 		ImGui::TableNextRow();
@@ -589,92 +584,10 @@ static void OneShot_DrawSettings() {
 	}
 	ImGui::EndGroupPanel();
 
-	// Recenter playspace -- manual chaperone shift for "the headset
-	// re-localized and now the chaperone is in the wrong place around me."
-	// User-triggered (not automatic) because they can see the misalignment
-	// directly. We don't claim to detect "when" they should click; we just
-	// surface the most recent detected event below as a nudge so they know
-	// roughly when their tracking last shifted.
-	//
-	// Two-step interaction: button opens a confirm popup that tells the
-	// user where to stand FIRST, since the recenter snapshot uses their
-	// current position as the new chaperone centre. Without the prompt the
-	// user might click before getting into position and end up with the
-	// chaperone offset from where they actually meant.
-	ImGui::Spacing();
-	ImGui::BeginGroupPanel("Recenter playspace", panelSize);
-	{
-		ImGui::TextWrapped(
-			"If your headset has re-localized and the chaperone bounds are now "
-			"in the wrong place relative to where you actually are, click the "
-			"button below. Floor height and yaw are preserved -- only the "
-			"chaperone's X/Z origin shifts.");
-		ImGui::Spacing();
-
-		ImGui::BeginDisabled(!IsVRReady());
-		if (ImGui::Button("Recenter playspace to my current position")) {
-			ImGui::OpenPopup("Recenter playspace?");
-		}
-		ImGui::EndDisabled();
-		if (!IsVRReady() && ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Waiting for SteamVR.");
-		}
-
-		// Confirm modal. Keeps the click intentional: the user has to
-		// physically position themselves before the snapshot, which is the
-		// part the modal copy is for.
-		if (ImGui::BeginPopupModal("Recenter playspace?", nullptr,
-				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-			ImGui::TextWrapped(
-				"Stand at the centre of your play area, facing forward, then "
-				"click Confirm. Your headset's current position will become "
-				"the new chaperone centre.");
-			ImGui::Spacing();
-			ImGui::TextDisabled(
-				"Floor height and yaw are preserved. Only X/Z (where you "
-				"are in the room) shifts. Reversible: click again later if "
-				"you over-shoot.");
-			ImGui::Spacing();
-			if (ImGui::Button("Confirm##recenter_confirm",
-					ImVec2(180, 0))) {
-				const bool ok = RecenterPlayspaceToCurrentHmd();
-				if (!ok) {
-					CalCtx.Log("Recenter playspace failed -- check the log for details.\n");
-				}
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel##recenter_cancel",
-					ImVec2(120, 0))) {
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-
-		// Surface the detector's most recent event. The detector is
-		// logging-only; this is the user-visible side of the same data.
-		double age = 0, deltaM = 0, deltaDeg = 0;
-		if (LastDetectedRelocalization(age, deltaM, deltaDeg)) {
-			ImGui::TextDisabled(
-				"Last detected re-localization: %.0f s ago (%.1f cm, %.1f deg).",
-				age, deltaM * 100.0, deltaDeg);
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("The drift detector logs HMD re-localization events when it sees the\n"
-				                  "HMD's reported pose jump while base stations and body trackers stayed put.\n"
-				                  "If this number is small (< 60 s) and you're noticing chaperone drift,\n"
-				                  "clicking the button above is probably the right fix.");
-			}
-		} else {
-			ImGui::TextDisabled(
-				"No re-localization detected this session.");
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("Detector requires at least 2 Lighthouse base stations to fire.\n"
-				                  "If you don't have base stations, the detector is silent and the\n"
-				                  "button above is your only signal.");
-			}
-		}
-	}
-	ImGui::EndGroupPanel();
+	// (Recenter playspace removed: in the lighthouse-anchored boundary model
+	// the chaperone is built from boundary vertices in lighthouse space and
+	// shifting the SZP to the HMD's reported position would push the boundary
+	// off the user's physical room.)
 
 	// Wizard / reset actions, grouped in their own panel so they don't read
 	// as floating buttons under the Settings table.
@@ -964,6 +877,15 @@ void BuildMenu(bool runningInOverlay)
 					ImGui::TextWrapped("Tip: try rotating the tracker more (point it in different directions).");
 				}
 				ImGui::PopStyleColor();
+			}
+
+			ImGui::Spacing();
+			if (ImGui::Button("Cancel calibration", ImVec2(-1.0f, ImGui::GetTextLineHeight() * 1.6f))) {
+				CancelCalibration("ui_oneshot_progress");
+				ImGui::CloseCurrentPopup();
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Stop this calibration run and discard the samples collected so far.");
 			}
 		}
 

@@ -22,7 +22,7 @@
 // require a deliberate two-touch acknowledgement, not to gate releases.
 // ---------------------------------------------------------------------------
 TEST(ProtocolTest, VersionPinnedToCurrent) {
-    EXPECT_EQ(protocol::Version, 24u)
+    EXPECT_EQ(protocol::Version, 25u)
         << "Protocol version changed without updating the test pin. If this is "
            "intentional: bump the literal here and add a row to wiki/Driver-"
            "Protocol.md describing the new version's wire-format changes.";
@@ -201,4 +201,25 @@ TEST(ProtocolTest, SetTrackingSystemFallbackZeroInitDefault) {
     EXPECT_FALSE(fb.enabled);
     EXPECT_EQ(fb.system_name[0], '\0');
     EXPECT_DOUBLE_EQ(fb.scale, 0.0); // POD zero-init
+}
+
+// ---------------------------------------------------------------------------
+// v25: SetHeadMountConfig. The struct carries two serial-length char buffers,
+// three translation doubles, and four quaternion doubles -- its size exceeds
+// SetDeviceTransform (intentional; the Request union grows). Verify the fields
+// are accessible and zero out correctly under value-init.
+// ---------------------------------------------------------------------------
+TEST(ProtocolTest, SetHeadMountConfigLayout) {
+    protocol::SetHeadMountConfig hm{};
+    EXPECT_EQ(hm.mode, 0u);
+    EXPECT_EQ(hm.deviceId, 0);
+    EXPECT_EQ(hm.trackerSerial[0], '\0');
+    EXPECT_EQ(hm.trackerTrackingSystem[0], '\0');
+    EXPECT_DOUBLE_EQ(hm.headFromTrackerTrans[0], 0.0);
+    EXPECT_DOUBLE_EQ(hm.headFromTrackerRot[3], 0.0);  // qw slot zero on POD init
+    EXPECT_FALSE(hm.hideTracker);
+    EXPECT_FALSE(hm.offsetCalibrated);
+    // The struct must be at least as large as two tracking-system buffers
+    // (64 bytes) plus translation (24) plus quaternion (32) plus header fields.
+    EXPECT_GT(sizeof(protocol::SetHeadMountConfig), sizeof(protocol::SetDeviceTransform));
 }

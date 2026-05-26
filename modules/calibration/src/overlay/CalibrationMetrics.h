@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <string>
 #include <utility>
@@ -148,6 +149,32 @@ namespace Metrics {
 	extern TimeSeries<double> quashApplyRate;
 
 	extern TimeSeries<bool> calibrationApplied;
+
+	// Head-mount tracker diagnostics. headMountActive records whether the
+	// feature is engaged; headMountResidualMm is the per-tick reprojection
+	// error (mm) between the tracker-derived HMD position and the observed
+	// HMD pose. questHmdVsProxyDeltaMm tracks disagreement between the Quest
+	// HMD and the lighthouse-derived proxy -- spikes here indicate a
+	// worldFromDriver shift that Corroborate mode should suppress.
+	extern TimeSeries<bool>     headMountActive;
+	extern TimeSeries<double>   headMountResidualMm;
+	extern TimeSeries<double>   questHmdVsProxyDeltaMm;
+	// Snap suppression and driver-synth fallback counts for the head-mount
+	// Corroborate and DriverSynth paths. Monotonically increasing per session;
+	// delta between rows gives the per-tick rate.
+	extern TimeSeries<uint32_t> snapSuppressedCount;
+	extern TimeSeries<uint32_t> driverSynthFallbackCount;
+	// Safety boundary state. boundaryActive is true while the simplified
+	// PC-side boundary is pushed to SteamVR chaperone. chaperoneRePushCount
+	// counts how many times the boundary was re-pushed after a Quest Guardian
+	// event clobbered it.
+	extern TimeSeries<bool>     boundaryActive;
+	extern TimeSeries<uint32_t> chaperoneRePushCount;
+	// ADB/Guardian state. guardianPaused is true while the ADB guardian-pause
+	// command is in effect. adbConnected is true when the ADB subprocess has
+	// an active connection to the headset.
+	extern TimeSeries<bool>     guardianPaused;
+	extern TimeSeries<bool>     adbConnected;
 
 	extern bool enableLogs;
 

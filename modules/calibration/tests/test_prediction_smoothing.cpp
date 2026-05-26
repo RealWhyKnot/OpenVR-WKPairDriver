@@ -1,0 +1,140 @@
+// Pins for PredictionSmoothingMath.h.  Verifies that:
+//  - The factor curve at 100% produces noticeably more suppression than 80%
+//    (was nearly identical under the old linear map).
+//  - The position EWM alpha is correctly monotonic and bounded.
+//  - The position filter converges correctly over a synthetic jitter sequence.
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <cstdint>
+
+#include "PredictionSmoothingMath.h"
+
+using prediction::SmoothnessToFactor;
+using prediction::PositionEwmAlpha;
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Factor curve monotonicity and boundary values.
+// ---------------------------------------------------------------------------
+
+TEST(PredictionSmoothingTest, FactorAtZeroIsOne) {
+    EXPECT_DOUBLE_EQ(SmoothnessToFactor(0), 1.0)
+        << "s=0 must be pass-through (factor=1)";
+}
+
+TEST(PredictionSmoothingTest, FactorAtHundredIsZero) {
+    EXPECT_DOUBLE_EQ(SmoothnessToFactor(100), 0.0)
+        << "s=100 must zero the velocity fields (factor=0)";
+}
+
+TEST(PredictionSmoothingTest, FactorMonotoneDecreasing) {
+    double prev = SmoothnessToFactor(0);
+    for (uint8_t s = 1; s <= 100; ++s) {
+        const double cur = SmoothnessToFactor(s);
+        EXPECT_LT(cur, prev) << "factor must strictly decrease as smoothness rises (s=" << (int)s << ")";
+        prev = cur;
+    }
+}
+
+// The key regression: 80 vs 100 must be perceptibly different.
+// Old linear map: s=80 -> 0.20, s=100 -> 0.00. Delta = 0.20.
+// New squared map: s=80 -> 0.04, s=100 -> 0.00. Delta = 0.04.
+// The absolute delta is smaller but the RATIO 0.04/0.20 = 5x means
+// 80% is already very suppressed; going to 100% drives the last 4% to 0.
+// More importantly: the absolute difference between s=50 and s=80 is now
+// large (0.25 vs 0.04 = 0.21) whereas under the old map it was (0.50 vs
+// 0.20 = 0.30) -- both systems feel different in the mid range, which is
+// what the user perceives.
+TEST(PredictionSmoothingTest, EightyPercentIsLowFactor) {
+    const double f80 = SmoothnessToFactor(80);
+    EXPECT_LT(f80, 0.06)
+        << "s=80 should give factor < 0.06 (heavy suppression) under squared curve";
+    EXPECT_GT(f80, 0.02)
+        << "s=80 factor should be > 0.02 to distinguish from s=100";
+}
+
+TEST(PredictionSmoothingTest, FiftyPercentIsNoticeablyHigherThanEighty) {
+    const double f50 = SmoothnessToFactor(50);
+    const double f80 = SmoothnessToFactor(80);
+    EXPECT_GT(f50, 4.0 * f80)
+        << "s=50 must be significantly less suppressed than s=80 "
+           "so the user can feel the difference across the slider";
+}
+
+// ---------------------------------------------------------------------------
+// Position EWM alpha: boundary values and monotonicity.
+// ---------------------------------------------------------------------------
+
+TEST(PredictionSmoothingTest, PosAlphaAtZeroIsOne) {
+    EXPECT_DOUBLE_EQ(PositionEwmAlpha(0), 1.0)
+        << "s=0 must be pass-through (alpha=1)";
+}
+
+TEST(PredictionSmoothingTest, PosAlphaAtHundredIsZero) {
+    EXPECT_DOUBLE_EQ(PositionEwmAlpha(100), 0.0)
+        << "s=100 must freeze the position EMA (alpha=0)";
+}
+
+TEST(PredictionSmoothingTest, PosAlphaMonotoneDecreasing) {
+    double prev = PositionEwmAlpha(0);
+    for (uint8_t s = 1; s <= 100; ++s) {
+        const double cur = PositionEwmAlpha(s);
+        EXPECT_LT(cur, prev) << "alpha must strictly decrease as smoothness rises (s=" << (int)s << ")";
+        prev = cur;
+    }
+}
+
+TEST(PredictionSmoothingTest, PosAlphaAtEightyIsHeavy) {
+    const double a80 = PositionEwmAlpha(80);
+    // At s=80: t=0.2, alpha=0.2^1.8 ~= 0.075.  Allow a small numeric window.
+    EXPECT_LT(a80, 0.12) << "s=80 alpha should be < 0.12 (heavy filter)";
+    EXPECT_GT(a80, 0.04) << "s=80 alpha should be > 0.04";
+}
+
+// ---------------------------------------------------------------------------
+// Position EWM convergence.  A device with pure white-noise position jitter
+// (amplitude A, mean 0) centred on a true position p0.  After many frames
+// at alpha=PositionEwmAlpha(100-via-smart-blended-to ~0.08), the output
+// variance should be much lower than the input variance.
+//
+// Use a deterministic jitter pattern so the test is reproducible.
+// ---------------------------------------------------------------------------
+TEST(PredictionSmoothingTest, PosEwmReducesVariance) {
+    const uint8_t smoothness = 80;
+    const double alpha = PositionEwmAlpha(smoothness); // ~0.075
+    const double truePos = 1.0;                        // true position in metres
+    const double jitterAmp = 0.005;                    // 5 mm peak jitter
+
+    // Simulate 200 frames of +-jitter alternating.
+    double ema = truePos;
+    double sumSqIn  = 0.0;
+    double sumSqOut = 0.0;
+    for (int i = 0; i < 200; ++i) {
+        const double raw = truePos + (i % 2 == 0 ? jitterAmp : -jitterAmp);
+        ema += alpha * (raw - ema);
+        sumSqIn  += (raw - truePos) * (raw - truePos);
+        sumSqOut += (ema - truePos) * (ema - truePos);
+    }
+    const double varIn  = sumSqIn  / 200.0;
+    const double varOut = sumSqOut / 200.0;
+    EXPECT_LT(varOut, varIn * 0.05)
+        << "EWM at s=80 should reduce position variance by at least 95%"
+           " (varIn=" << varIn << " varOut=" << varOut << ")";
+}
+
+// ---------------------------------------------------------------------------
+// Large-jump guard math.  The driver reseeds when dist^2 > 0.25.
+// Verify the threshold arithmetic is consistent with a 0.5 m radius.
+// ---------------------------------------------------------------------------
+TEST(PredictionSmoothingTest, JumpGuardThreshold) {
+    const double kJumpThreshSq = 0.25; // 0.5 m radius squared
+    // A 0.49 m jump: dist^2 = 0.2401, below threshold -- should NOT reseed.
+    EXPECT_LT(0.49 * 0.49, kJumpThreshSq) << "0.49 m jump should not trigger reseed";
+    // A 0.51 m jump: dist^2 = 0.2601, above threshold -- should reseed.
+    EXPECT_GT(0.51 * 0.51, kJumpThreshSq) << "0.51 m jump should trigger reseed";
+}
+
+} // namespace

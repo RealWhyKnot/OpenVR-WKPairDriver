@@ -6,6 +6,9 @@
 #include "CalibrationMetrics.h"
 #include "CalibrationPoseSampling.h"
 #include "CalibrationProfileApply.h"
+#include "CommonModeCoherence.h"
+#include "HeadMountPoseSampling.h"
+#include "SnapSuppression.h"
 #include "ReanchorChiSquareDetector.h"
 #include "RecoveryDeltaBuffer.h"
 #include "RestLockedYaw.h"
@@ -31,6 +34,11 @@ spacecal::liveness::TrackerLivenessState g_refLiveness;
 spacecal::liveness::TrackerLivenessState g_tgtLiveness;
 bool g_refWasOffline = false;
 bool g_tgtWasOffline = false;
+
+// Single monotonic snap-suppression counter shared by all detection sites so
+// Metrics::snapSuppressedCount is a non-decreasing series across the session.
+// This file is single-threaded (called only from CalibrationTick); no mutex needed.
+static uint32_t g_snapSuppressedCount = 0;
 
 namespace {
 
@@ -328,6 +336,12 @@ namespace {
 		std::map<int32_t, Eigen::Vector3d> prevBodyTrans;
 		double lastFireTime = -1e9;
 
+		// Head-mount tracker position from the previous tick, used by the
+		// snap-suppression corroboration check (site 504). Only valid when
+		// havePrevHmTracker is true; reset whenever the tracker loses validity.
+		bool   havePrevHeadTracker = false;
+		Eigen::Vector3d prevHeadTrackerTrans = Eigen::Vector3d::Zero();
+
 		// Snapshot of the most recent fire's measured deltas, exposed via
 		// LastDetectedRelocalization() so the UI can surface "your last
 		// detected drift event was X cm at T seconds ago" alongside the
@@ -441,6 +455,13 @@ namespace {
 	double g_reanchorChiLastTickTime = -1.0;
 	double g_reanchorChiLastLogTime  = -1e9;
 
+	// Parallel chi-square on the head-mount tracker (site 1213 corroboration).
+	// Runs alongside g_reanchorChiState when mode >= Corroborate. When the HMD
+	// chi-square fires but the tracker chi-square stays quiet, the event is
+	// classified as a SLAM snap rather than a real pose shift.
+	spacecal::reanchor_chi::DetectorState g_reanchorChiTrackerState;
+	double g_reanchorChiTrackerLastTickTime = -1.0;
+
 	constexpr double kRelocHmdJumpM       = 0.05;   // 5 cm
 	constexpr double kRelocBodyMaxDeltaM  = 0.05;   // 5 cm (any body tracker moving more = rule out)
 	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
@@ -483,6 +504,9 @@ namespace {
 	constexpr double kRelocAutoRecoverThrottleSec  = 30.0;  // 30 s between recovers
 	constexpr double kRelocAutoRecoverPostStallSec = 10.0;  // 10 s after stall recovery
 
+	// Snap-suppression corroboration thresholds are in SnapSuppression.h as
+	// spacecal::snap_suppression::kSnapHmdJumpM / kSnapTrackerMaxDispM.
+
 	void TickHmdRelocalizationDetectorImpl(double now) {
 		if (!vr::VRSystem()) return;
 
@@ -495,6 +519,7 @@ namespace {
 			// Reset cache so the post-calibration baseline is fresh.
 			g_relocDetector.havePrevHmd = false;
 			g_relocDetector.prevBodyTrans.clear();
+			g_relocDetector.havePrevHeadTracker = false;
 			return;
 		}
 
@@ -550,6 +575,7 @@ namespace {
 
 			s.havePrevHmd = false;
 			s.prevBodyTrans.clear();
+			s.havePrevHeadTracker = false;
 			s.lastHmdInvalidTime = now;
 			return;
 		}
@@ -633,6 +659,42 @@ namespace {
 			if (d > bodyMaxDelta) bodyMaxDelta = d;
 		}
 
+		// Head-mount tracker displacement over this tick. Used by the snap-
+		// suppression corroboration check: a Quest SLAM snap moves the HMD pose
+		// without moving the physical head, so the lighthouse-tracked head-
+		// mount tracker should report near-zero displacement even when the HMD
+		// reports a large jump.
+		//
+		// Only computed when mode >= Corroborate and the tracker is valid and
+		// fresh. On validity loss the cache is cleared so the next valid tick
+		// starts a fresh window.
+		double headTrackerDelta = -1.0;   // negative = no valid reading this tick
+		{
+			const auto& hm = CalCtx.headMount;
+			const bool corroborateActive =
+				hm.mode >= HeadMountMode::Corroborate
+				&& hm.deviceID >= 0
+				&& (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount;
+			if (corroborateActive) {
+				const auto& tp = CalCtx.devicePoses[hm.deviceID];
+				const bool trackerValid = tp.poseIsValid && tp.deviceIsConnected
+					&& tp.result == vr::ETrackingResult::TrackingResult_Running_OK;
+				if (trackerValid) {
+					const Eigen::Vector3d trackerTrans(
+						tp.vecPosition[0], tp.vecPosition[1], tp.vecPosition[2]);
+					if (s.havePrevHeadTracker) {
+						headTrackerDelta = (trackerTrans - s.prevHeadTrackerTrans).norm();
+					}
+					s.prevHeadTrackerTrans = trackerTrans;
+					s.havePrevHeadTracker = true;
+				} else {
+					s.havePrevHeadTracker = false;
+				}
+			} else {
+				s.havePrevHeadTracker = false;
+			}
+		}
+
 		// Trigger evaluation. Need a previous HMD pose and >=2 base stations
 		// (so condition 2 isn't trivially passing). Note we still update the
 		// cache even when no trigger fires -- always tracking the latest
@@ -684,18 +746,20 @@ namespace {
 					Metrics::WriteLogAnnotation(baseBuf);
 				}
 
-				// "Who moved" diagnostic: when relocalization fires, integrate
-				// each tracking system's reported velocity over the last tick
-				// and compare to the observed pose delta. Quest-re-anchor
-				// signature: the HMD's velocity-integrated displacement is
-				// near zero (the Quest didn't physically move; its world
-				// frame jumped). A genuine fast head movement that slipped
-				// through the gates would have velocity-integrated displacement
-				// comparable to the observed delta. This is logging-only --
-				// the auto-recover decision still runs from the existing
-				// triple-AND gate; the annotation just gives the log enough
-				// data to distinguish "Quest re-anchored" from "base station
-				// bumped" from "false-positive on fast natural motion".
+				// "Who moved" diagnostic: compare the HMD's observed pose delta
+				// against an independent displacement estimate. Quest re-anchor
+				// signature: the HMD's world frame jumped while physical motion
+				// was near zero (Quest didn't physically move).
+				//
+				// Displacement estimate source (kHeadMountCorroboration path):
+				//   When head-mount mode >= Corroborate and the tracker is valid
+				//   this tick, use the tracker's ACTUAL pose-to-pose displacement
+				//   (headTrackerDelta, already computed above). This is more
+				//   accurate than velocity-integrated IMU for re-anchor
+				//   detection: the lighthouse tracker's world frame is stable,
+				//   so its reported displacement directly reflects real motion.
+				//   Falls back to the velocity-integrated HMD estimate when the
+				//   tracker is unavailable.
 				{
 					const double dt = std::max(1e-3, now - s.lastTickLogTime);  // ~ tick interval
 					auto vmag = [](const double v[3]) -> double {
@@ -705,9 +769,21 @@ namespace {
 						const double m = vmag(v);
 						return std::isfinite(m) ? m : 0.0;
 					};
+
+					// Choose displacement estimate. Prefer the head-mount tracker
+					// actual displacement (kHeadMountCorroboration) when valid,
+					// fall back to velocity-integrated HMD estimate otherwise.
+					const bool useHeadMount =
+						headTrackerDelta >= 0.0
+						&& CalCtx.headMount.mode >= HeadMountMode::Corroborate;
 					const auto& hmdRawNow = CalCtx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
-					const double hmdSpeed = vmagFinite(hmdRawNow.vecVelocity);
-					const double hmdImuDisp = hmdSpeed * dt;
+					const double hmdSpeed    = vmagFinite(hmdRawNow.vecVelocity);
+					const double hmdImuDisp  = hmdSpeed * dt;
+					const double hmdDispEst  = useHeadMount ? headTrackerDelta : hmdImuDisp;
+					const auto   dispSource  = useHeadMount
+						? spacecal::coherence::CorroborationSource::kHeadMountCorroboration
+						: spacecal::coherence::CorroborationSource::kExtraPairs;
+					(void)dispSource;  // used in log label only
 
 					// Body-tracker (other-system) integrated displacement: max
 					// across all body trackers. If this is near zero, no body
@@ -728,20 +804,22 @@ namespace {
 					}
 
 					// Ratio interpretation (for the human grepping this later):
-					//   hmdRatio = observedHmdDelta / hmdImuDisp
+					//   hmdRatio = observedHmdDelta / hmdDispEst
 					//     >> 1: HMD's world frame jumped without device moving
 					//           (most likely Quest re-anchor)
 					//     ~= 1: HMD device physically moved (gate should have
 					//           rejected on bodyMaxDelta but did not -- worth
 					//           investigating; possible false positive)
-					//   bodyRatio similar for the body trackers.
-					const double hmdRatio = (hmdImuDisp > 1e-6) ? (hmdDelta / hmdImuDisp) : -1.0;
-					char wmoBuf[320];
+					//   dispSource field shows which estimate was used.
+					const double hmdRatio = (hmdDispEst > 1e-6) ? (hmdDelta / hmdDispEst) : -1.0;
+					char wmoBuf[384];
 					snprintf(wmoBuf, sizeof wmoBuf,
-						"who_moved: dt=%.4f hmd_observed=%.3f hmd_imu_disp=%.4f hmd_ratio=%.2f"
-						" body_observed_max=%.3f body_imu_disp_max=%.4f body_count=%d",
-						dt, hmdDelta, hmdImuDisp, hmdRatio,
-						bodyMaxDelta, bodyMaxImuDisp, bodyCount);
+						"who_moved: dt=%.4f hmd_observed=%.3f hmd_disp_est=%.4f hmd_ratio=%.2f"
+						" body_observed_max=%.3f body_imu_disp_max=%.4f body_count=%d"
+						" disp_source=%s",
+						dt, hmdDelta, hmdDispEst, hmdRatio,
+						bodyMaxDelta, bodyMaxImuDisp, bodyCount,
+						useHeadMount ? "head_mount" : "hmd_imu");
 					Metrics::WriteLogAnnotation(wmoBuf);
 				}
 
@@ -829,71 +907,125 @@ namespace {
 		{
 			const double hmdDelta = currentHmdDelta;
 			const Eigen::Vector3d dpos = hmdPose.translation() - s.prevHmd.translation();
-			char logbuf[384];
-			snprintf(logbuf, sizeof logbuf,
-				"auto_recover_from_relocalization: hmdDelta=%.3f dpos=(%.3f,%.3f,%.3f) rotRad=%.3f"
-				" priorState=%s priorValid=%d secSinceStall=%.2f -> calibration cleared, continuous-cal restarting",
-				hmdDelta, dpos.x(), dpos.y(), dpos.z(), s.lastFireRotRad,
-				(CalCtx.state == CalibrationState::Continuous) ? "Continuous" : "ContinuousStandby",
-				(int)calibration.isValid(), secSinceStall);
-			Metrics::WriteLogAnnotation(logbuf);
 
-			// Step 0 (audit UX #3): snapshot the pre-recovery calibration
-			// state so the UI's "Undo" button can restore it. Snapshot the
-			// CalCtx fields the recovery is about to clear -- restoring
-			// these is sufficient to put the user back in the wedged
-			// calibration (which is, after all, what they were running
-			// happily in until the false-positive auto-recovery clobbered
-			// it). Reset the dismissed flag so this new event gets a
-			// fresh banner even if a previous one was dismissed.
-			s.lastAutoRecoverSnapshot.valid                      = true;
-			s.lastAutoRecoverSnapshot.refToTargetPose            = CalCtx.refToTargetPose;
-			s.lastAutoRecoverSnapshot.relativePosCalibrated      = CalCtx.relativePosCalibrated;
-			s.lastAutoRecoverSnapshot.hasAppliedCalibrationResult = CalCtx.hasAppliedCalibrationResult;
-			s.autoRecoverBannerDismissed                         = false;
-
-			// Steps 1-4: wipe + restart cold. The helper does
-			// calibration.Clear() + zero CalCtx fields (incl. calibratedTranslation
-			// / calibratedRotation, which Clear() doesn't touch -- this was the
-			// 2026-05-03 SaveProfile-persisted-wedge bug; see the helper's
-			// comment) + StartContinuousCalibration() + posts the user-facing
-			// message AFTER the restart (StartContinuousCalibration clears
-			// CalCtx.messages internally). Step 5 (the user banner) is folded
-			// in via the helper's userFacingMessage argument.
+			// Head-mount corroboration: when mode >= Corroborate and the tracker
+			// produced a valid displacement reading this tick, check whether the
+			// tracker actually moved. A Quest SLAM snap relocates the HMD's world
+			// frame without any physical head motion, so the lighthouse-tracked
+			// head-mount should report near-zero displacement even for a 30+ cm
+			// HMD jump. When the HMD exceeds kSnapHmdJumpM but the tracker stays
+			// below kSnapTrackerMaxDispM, classify as snap and substitute a fast
+			// re-anchor (profile snap to saved state + grace window) for the
+			// destructive full recovery.
 			//
-			// SaveProfile is intentionally NOT called here. The next valid
-			// ComputeIncremental will write the post-recovery values via the
-			// existing path at the end of CalibrationTick, which is exactly
-			// what we want.
+			// Falls back to full recovery unchanged when: corroborate mode is off,
+			// the tracker was invalid this tick (headTrackerDelta < 0), or both
+			// the HMD AND tracker exceeded their thresholds (genuine physical jump).
+			const bool snapCorroborated = spacecal::snap_suppression::IsJumpClassifiedAsSnap(
+				CalCtx.headMount.mode, hmdDelta, headTrackerDelta);
 
-			// Rec C: push the HMD-jump direction and magnitude into the
-			// rolling buffer before recovery clears state. Subsequent ticks
-			// can predict the next jump from these accumulated events and
-			// apply a small fraction as a bounded-rate translation nudge,
-			// shrinking the magnitude of the next observed event if the
-			// drift trend is consistent.
-			spacecal::recovery_delta::Push(g_recoveryDeltaBuffer, dpos, now);
-			{
-				char b[200];
-				snprintf(b, sizeof b,
-					"[drift][recovery-buffer] event_pushed mag_cm=%.2f dpos=(%.3f,%.3f,%.3f) live_count=%zu",
-					hmdDelta * 100.0, dpos.x(), dpos.y(), dpos.z(),
-					spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer));
-				Metrics::WriteLogAnnotation(b);
+			if (snapCorroborated) {
+				// SLAM snap confirmed: HMD jumped but tracker didn't.
+				// Increment the shared session counter and push so the TimeSeries
+				// stays monotonically increasing across all suppression sites.
+				++g_snapSuppressedCount;
+				Metrics::snapSuppressedCount.Push(g_snapSuppressedCount);
+
+				char snapbuf[384];
+				snprintf(snapbuf, sizeof snapbuf,
+					"[snap-suppress] classified Quest SLAM snap:"
+					" hmd_delta_mm=%.1f tracker_delta_mm=%.1f"
+					" -> full_recovery suppressed, fast_reanchor requested",
+					hmdDelta * 1000.0, headTrackerDelta * 1000.0);
+				Metrics::WriteLogAnnotation(snapbuf);
+
+				// Fast re-anchor: snap to the saved profile and arm the
+				// warm-restart validation grace window. The saved profile was
+				// correct before the Quest SLAM snap; re-applying it without
+				// clearing the solver lets the continuous-cal loop converge
+				// back to the pre-snap state rather than starting from zero.
+				// This is the same path as the warm-restart engage (see
+				// Calibration.cpp::ShouldEngage) but fired from the snap
+				// classification rather than the proximity sensor.
+				CalCtx.warmRestartGraceSamples = spacecal::warm_restart::kGraceSamples;
+				CalCtx.warmRestartMadAtSnap    = CalCtx.autoLockMadFloor;
+				CalCtx.warmRestartValidationState =
+					spacecal::warm_restart::ValidationOutcome::Inconclusive;
+				CalCtx.postSnapErrorSumMm         = 0.0;
+				CalCtx.postSnapErrorSampleCount   = 0;
+				CalCtx.warmRestartLastConsumedErrTs =
+					Metrics::error_currentCal.lastTs();
+				CalCtx.warmRestartSnapTime         = Metrics::CurrentTime;
+				g_snapNextProfileApply             = true;
+			} else {
+				char logbuf[384];
+				snprintf(logbuf, sizeof logbuf,
+					"auto_recover_from_relocalization: hmdDelta=%.3f dpos=(%.3f,%.3f,%.3f) rotRad=%.3f"
+					" priorState=%s priorValid=%d secSinceStall=%.2f trackerDelta=%.4f"
+					" -> calibration cleared, continuous-cal restarting",
+					hmdDelta, dpos.x(), dpos.y(), dpos.z(), s.lastFireRotRad,
+					(CalCtx.state == CalibrationState::Continuous) ? "Continuous" : "ContinuousStandby",
+					(int)calibration.isValid(), secSinceStall,
+					headTrackerDelta);
+				Metrics::WriteLogAnnotation(logbuf);
+
+				// Step 0 (audit UX #3): snapshot the pre-recovery calibration
+				// state so the UI's "Undo" button can restore it. Snapshot the
+				// CalCtx fields the recovery is about to clear -- restoring
+				// these is sufficient to put the user back in the wedged
+				// calibration (which is, after all, what they were running
+				// happily in until the false-positive auto-recovery clobbered
+				// it). Reset the dismissed flag so this new event gets a
+				// fresh banner even if a previous one was dismissed.
+				s.lastAutoRecoverSnapshot.valid                      = true;
+				s.lastAutoRecoverSnapshot.refToTargetPose            = CalCtx.refToTargetPose;
+				s.lastAutoRecoverSnapshot.relativePosCalibrated      = CalCtx.relativePosCalibrated;
+				s.lastAutoRecoverSnapshot.hasAppliedCalibrationResult = CalCtx.hasAppliedCalibrationResult;
+				s.autoRecoverBannerDismissed                         = false;
+
+				// Steps 1-4: wipe + restart cold. The helper does
+				// calibration.Clear() + zero CalCtx fields (incl. calibratedTranslation
+				// / calibratedRotation, which Clear() doesn't touch -- this was the
+				// 2026-05-03 SaveProfile-persisted-wedge bug; see the helper's
+				// comment) + StartContinuousCalibration() + posts the user-facing
+				// message AFTER the restart (StartContinuousCalibration clears
+				// CalCtx.messages internally). Step 5 (the user banner) is folded
+				// in via the helper's userFacingMessage argument.
+				//
+				// SaveProfile is intentionally NOT called here. The next valid
+				// ComputeIncremental will write the post-recovery values via the
+				// existing path at the end of CalibrationTick, which is exactly
+				// what we want.
+
+				// Rec C: push the HMD-jump direction and magnitude into the
+				// rolling buffer before recovery clears state. Subsequent ticks
+				// can predict the next jump from these accumulated events and
+				// apply a small fraction as a bounded-rate translation nudge,
+				// shrinking the magnitude of the next observed event if the
+				// drift trend is consistent.
+				spacecal::recovery_delta::Push(g_recoveryDeltaBuffer, dpos, now);
+				{
+					char b[200];
+					snprintf(b, sizeof b,
+						"[drift][recovery-buffer] event_pushed mag_cm=%.2f dpos=(%.3f,%.3f,%.3f) live_count=%zu",
+						hmdDelta * 100.0, dpos.x(), dpos.y(), dpos.z(),
+						spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer));
+					Metrics::WriteLogAnnotation(b);
+				}
+
+				char uimsg[128];
+				snprintf(uimsg, sizeof uimsg,
+					"Quest re-localized (%.0f cm jump). Recalibrating...\n",
+					hmdDelta * 100.0);
+				// Arm the recovery-convergence watch so the next post-recovery
+				// usingRelPose_fired event can emit a `[recovery][converged]`
+				// line tying physical jump severity to convergence time. Uses
+				// Metrics::CurrentTime so the CalibrationCalc reader sees the
+				// same clock epoch (it doesn't include GLFW).
+				CalCtx.recoveryWaitingSince = Metrics::CurrentTime;
+				CalCtx.recoveryHmdDeltaAtStart = hmdDelta;
+				RecoverFromWedgedCalibration(uimsg, "quest_relocalization_recovery");
 			}
-
-			char uimsg[128];
-			snprintf(uimsg, sizeof uimsg,
-				"Quest re-localized (%.0f cm jump). Recalibrating...\n",
-				hmdDelta * 100.0);
-			// Arm the recovery-convergence watch so the next post-recovery
-			// usingRelPose_fired event can emit a `[recovery][converged]`
-			// line tying physical jump severity to convergence time. Uses
-			// Metrics::CurrentTime so the CalibrationCalc reader sees the
-			// same clock epoch (it doesn't include GLFW).
-			CalCtx.recoveryWaitingSince = Metrics::CurrentTime;
-			CalCtx.recoveryHmdDeltaAtStart = hmdDelta;
-			RecoverFromWedgedCalibration(uimsg, "quest_relocalization_recovery");
 
 			s.lastAutoRecoverTime = now;
 		}
@@ -1254,6 +1386,125 @@ bool TickReanchorChiSquare(double now) {
 			g_reanchorChiState.freezeUntil,
 			CalCtx.autoLockReanchorSuppressUntil);
 		Metrics::WriteLogAnnotation(buf);
+	}
+
+	// Parallel chi-square on the head-mount tracker (site 1213 corroboration).
+	// When HMD chi-square fires but the tracker chi-square stays below threshold,
+	// the HMD jump is a SLAM snap: the physical head did not move and the
+	// lighthouse-tracked head-mount should show a normal (non-spike) residual.
+	// In that case suppress full recovery and substitute a fast re-anchor, same
+	// as the 30 cm jump detector's snap path.
+	//
+	// The tracker detector runs with the same algorithm as the HMD detector so
+	// the comparison is apples-to-apples: both see a chi-square spike when their
+	// respective device's world-frame jumps unexpectedly.
+	{
+		const auto& hm = CalCtx.headMount;
+		const bool corroborateActive =
+			hm.mode >= HeadMountMode::Corroborate
+			&& hm.deviceID >= 0
+			&& (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount;
+
+		if (!corroborateActive) {
+			// Mode off or tracker unresolved: reset the tracker state so it
+			// starts fresh if corroboration is later enabled.
+			spacecal::reanchor_chi::Reset(g_reanchorChiTrackerState);
+			g_reanchorChiTrackerLastTickTime = -1.0;
+		} else {
+			const auto& trackerRaw = CalCtx.devicePoses[hm.deviceID];
+			const bool trackerValid = trackerRaw.poseIsValid && trackerRaw.deviceIsConnected
+				&& trackerRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+
+			if (!trackerValid) {
+				spacecal::reanchor_chi::Reset(g_reanchorChiTrackerState);
+				g_reanchorChiTrackerLastTickTime = -1.0;
+			} else {
+				// Build world-space tracker pose using the same decomposition
+				// as the HMD path above.
+				const Eigen::Quaterniond tWfd(
+					trackerRaw.qWorldFromDriverRotation.w,
+					trackerRaw.qWorldFromDriverRotation.x,
+					trackerRaw.qWorldFromDriverRotation.y,
+					trackerRaw.qWorldFromDriverRotation.z);
+				const Eigen::Vector3d tWfdT(
+					trackerRaw.vecWorldFromDriverTranslation[0],
+					trackerRaw.vecWorldFromDriverTranslation[1],
+					trackerRaw.vecWorldFromDriverTranslation[2]);
+				const Eigen::Quaterniond tRot(
+					trackerRaw.qRotation.w, trackerRaw.qRotation.x,
+					trackerRaw.qRotation.y, trackerRaw.qRotation.z);
+				const Eigen::Vector3d tPos(
+					trackerRaw.vecPosition[0], trackerRaw.vecPosition[1],
+					trackerRaw.vecPosition[2]);
+				const Eigen::Vector3d trackerWorldT = tWfdT + tWfd * tPos;
+				const Eigen::Quaterniond trackerWorldR = (tWfd * tRot).normalized();
+
+				double trackerDt = 0.0;
+				if (g_reanchorChiTrackerLastTickTime > 0.0)
+					trackerDt = now - g_reanchorChiTrackerLastTickTime;
+				g_reanchorChiTrackerLastTickTime = now;
+
+				const bool trackerFired = spacecal::reanchor_chi::TickAndCheckCandidate(
+					g_reanchorChiTrackerState, trackerWorldT, trackerWorldR, now, trackerDt);
+
+				// Classification: HMD fired but tracker did not -> SLAM snap.
+				// Guard on the tracker having warmed up (varianceCount >= 20,
+				// matching the existing warm gate inside TickAndCheckCandidate)
+				// to avoid false classifications on session startup noise.
+				const bool trackerWarmed = g_reanchorChiTrackerState.varianceCount >= 20;
+				const bool chiSnap = spacecal::snap_suppression::IsChiSquareClassifiedAsSnap(
+					CalCtx.headMount.mode, fired, trackerFired, trackerWarmed);
+				if (chiSnap) {
+					// SLAM snap classified from chi-square. Substitute fast
+					// re-anchor for the full recovery the freeze window would
+					// otherwise let the 30 cm detector do.
+					++g_snapSuppressedCount;
+					Metrics::snapSuppressedCount.Push(g_snapSuppressedCount);
+
+					// Fast re-anchor: arm the warm-restart grace window without
+					// clearing calibration state. Same path as the 30 cm snap
+					// suppression (site 504) and the warm-restart engage path.
+					CalCtx.warmRestartGraceSamples = spacecal::warm_restart::kGraceSamples;
+					CalCtx.warmRestartMadAtSnap    = CalCtx.autoLockMadFloor;
+					CalCtx.warmRestartValidationState =
+						spacecal::warm_restart::ValidationOutcome::Inconclusive;
+					CalCtx.postSnapErrorSumMm         = 0.0;
+					CalCtx.postSnapErrorSampleCount   = 0;
+					CalCtx.warmRestartLastConsumedErrTs =
+						Metrics::error_currentCal.lastTs();
+					CalCtx.warmRestartSnapTime         = Metrics::CurrentTime;
+					g_snapNextProfileApply             = true;
+
+					static double s_snapLogTime = -1e9;
+					if ((now - s_snapLogTime) >= 1.0) {
+						s_snapLogTime = now;
+						char sbuf[320];
+						snprintf(sbuf, sizeof sbuf,
+							"[snap-suppress] chi-square parallel test classified snap:"
+							" hmd_mahal=%.2f tracker_mahal=%.2f threshold=%.2f"
+							" -> full_recovery suppressed, fast_reanchor requested",
+							g_reanchorChiState.lastChiSquared,
+							g_reanchorChiTrackerState.lastChiSquared,
+							spacecal::reanchor_chi::kChiSquare6DoF_p1e4);
+						Metrics::WriteLogAnnotation(sbuf);
+					}
+				} else if (fired && trackerFired && !chiSnap) {
+					// Both fired: genuine shared-frame event or physical jump.
+					// Let the normal freeze path handle it.
+					static double s_bothLogTime = -1e9;
+					if ((now - s_bothLogTime) >= 1.0) {
+						s_bothLogTime = now;
+						char bbuf[280];
+						snprintf(bbuf, sizeof bbuf,
+							"[snap-suppression][chi-square-both-fired] hmd_chi_sq=%.3f"
+							" tracker_chi_sq=%.3f -> not a SLAM snap",
+							g_reanchorChiState.lastChiSquared,
+							g_reanchorChiTrackerState.lastChiSquared);
+						Metrics::WriteLogAnnotation(bbuf);
+					}
+				}
+			}
+		}
 	}
 
 	// Freeze-cleared edge log. When the detector transitions from frozen=1
