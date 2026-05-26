@@ -110,28 +110,13 @@ void PhantomPlugin::SendDeviceOptIn(const std::string& serial, bool enabled)
 
 void PhantomPlugin::DrawTab(openvr_pair::overlay::ShellContext&)
 {
-    if (ImGui::BeginTabBar("PhantomTabs", ImGuiTabBarFlags_None)) {
-        if (ImGui::BeginTabItem("Dropouts")) {
-            DrawDropoutsTab();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Calibration")) {
-            DrawCalibrationTab();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Absent")) {
-            DrawAbsentTab();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Diagnostics")) {
-            DrawDiagnosticsTab();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Advanced")) {
-            DrawAdvancedTab();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+    openvr_pair::overlay::ui::TabBarScope tabs("PhantomTabs");
+    if (tabs) {
+        openvr_pair::overlay::ui::DrawTabItem("Dropouts", [&] { DrawDropoutsTab(); });
+        openvr_pair::overlay::ui::DrawTabItem("Calibration", [&] { DrawCalibrationTab(); });
+        openvr_pair::overlay::ui::DrawTabItem("Absent", [&] { DrawAbsentTab(); });
+        openvr_pair::overlay::ui::DrawTabItem("Diagnostics", [&] { DrawDiagnosticsTab(); });
+        openvr_pair::overlay::ui::DrawTabItem("Advanced", [&] { DrawAdvancedTab(); });
     }
 
     if (!connectError_.empty() && !ipc_.IsConnected()) {
@@ -226,8 +211,9 @@ void PhantomPlugin::DrawDiagnosticsTab()
         return;
     }
 
-    if (ImGui::BeginTable("PhantomDiag", 5,
-            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+    openvr_pair::overlay::ui::TableScope table("PhantomDiag", 5,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH);
+    if (table) {
         ImGui::TableSetupColumn("Serial");
         ImGui::TableSetupColumn("State");
         ImGui::TableSetupColumn("Drops");
@@ -250,7 +236,6 @@ void PhantomPlugin::DrawDiagnosticsTab()
             ImGui::TableNextColumn();
             ImGui::Text("%u", d.longest_dropout_ms);
         }
-        ImGui::EndTable();
     }
 }
 

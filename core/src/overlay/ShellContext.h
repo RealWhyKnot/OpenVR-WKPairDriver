@@ -12,6 +12,8 @@ struct ShellContext
 	std::wstring logRoot;
 	std::vector<std::wstring> driverResourceDirs;
 	std::string status;
+	bool vrConnected = false;
+	bool dashboardVisible = false;
 
 	std::wstring FlagPath(const char *flagFileName) const;
 	bool IsFlagPresent(const char *flagFileName) const;

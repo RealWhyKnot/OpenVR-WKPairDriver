@@ -39,7 +39,8 @@ void SmoothingPlugin::DrawFingersTab()
 		dirty = true;
 	}
 
-	ImGui::BeginDisabled(cfg_.smoothness == 0);
+	openvr_pair::overlay::ui::DisabledSection smoothingEnabled(
+		cfg_.smoothness == 0, "Raise Strength above 0% to enable per-finger controls.");
 
 	openvr_pair::overlay::ui::DrawSectionHeading("Per-finger");
 	openvr_pair::overlay::ui::DrawTextWrapped(
@@ -47,8 +48,9 @@ void SmoothingPlugin::DrawFingersTab()
 		"smoothing produces an artifact without giving up the feature on the other nine.");
 	ImGui::Spacing();
 
-	if (ImGui::BeginTable("fingers_grid", 6,
-		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV))
+	openvr_pair::overlay::ui::TableScope fingerTable("fingers_grid", 6,
+		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
+	if (fingerTable)
 	{
 		ImGui::TableSetupColumn("Hand");
 		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
@@ -70,10 +72,10 @@ void SmoothingPlugin::DrawFingersTab()
 				if (ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("%s %s", kHandLabels[hand], kFingerLabels[finger]);
 				}
+				smoothingEnabled.AttachReasonTooltip();
 				ImGui::PopID();
 			}
 		}
-		ImGui::EndTable();
 	}
 
 	ImGui::Spacing();
@@ -101,8 +103,9 @@ void SmoothingPlugin::DrawFingersTab()
 		"value. Useful when one finger needs more or less smoothing than the rest.");
 	ImGui::Spacing();
 
-	if (ImGui::BeginTable("fingers_strength_grid", 6,
-		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV))
+	openvr_pair::overlay::ui::TableScope strengthTable("fingers_strength_grid", 6,
+		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
+	if (strengthTable)
 	{
 		ImGui::TableSetupColumn("Hand");
 		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
@@ -132,13 +135,11 @@ void SmoothingPlugin::DrawFingersTab()
 						kHandLabels[hand], kFingerLabels[finger], cfg_.smoothness);
 				}
 				ImGui::EndDisabled();
+				smoothingEnabled.AttachReasonTooltip();
 				ImGui::PopID();
 			}
 		}
-		ImGui::EndTable();
 	}
-
-	ImGui::EndDisabled();
 
 	if (dirty) {
 		SaveConfig(cfg_);

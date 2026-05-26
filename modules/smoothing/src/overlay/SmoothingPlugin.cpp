@@ -284,17 +284,17 @@ void SmoothingPlugin::DrawTab(openvr_pair::overlay::ShellContext &)
 		ImGui::Separator();
 	}
 
-	if (ImGui::BeginTabBar("smoothing_tabs")) {
-		if (ImGui::BeginTabItem("Settings")) { DrawSettingsTab(); ImGui::EndTabItem(); }
+	openvr_pair::overlay::ui::TabBarScope tabs("smoothing_tabs");
+	if (tabs) {
+		openvr_pair::overlay::ui::DrawTabItem("Settings", [&] { DrawSettingsTab(); });
 		// Advanced tab is a placeholder with no knobs of its own right now.
 		// Commented out (not deleted) so the DrawAdvancedTab() implementation
 		// below is preserved for the next time we have an advanced knob to
 		// land -- re-enable this tab item rather than re-discovering where
 		// the entry point lives.
-		// if (ImGui::BeginTabItem("Advanced")) { DrawAdvancedTab(); ImGui::EndTabItem(); }
+		// openvr_pair::overlay::ui::DrawTabItem("Advanced", [&] { DrawAdvancedTab(); });
 		// Logs moved to the umbrella's global Logs tab; DrawLogsTab's body is
 		// hosted there via FeaturePlugin::DrawLogsSection.
-		ImGui::EndTabBar();
 	}
 
 	openvr_pair::overlay::ShellFooterStatus footer;
@@ -306,23 +306,28 @@ void SmoothingPlugin::DrawTab(openvr_pair::overlay::ShellContext &)
 void SmoothingPlugin::DrawSettingsTab()
 {
 	bool smart = cfg_.smart_smoothing;
-	if (ImGui::Checkbox("Smart smoothing", &smart)) {
-		cfg_.smart_smoothing = smart;
-		SaveConfig(cfg_);
-		// Push the new flag down to every device that already has a saved
-		// per-tracker value. ReplayDevicePredictions walks the saved map
-		// and calls SendDevicePrediction, which now carries cfg_.smart_smoothing
-		// alongside each device's smoothness. Devices without a saved value
-		// pick up the flag the first time the user touches their slider.
-		ReplayDevicePredictions(smart ? "smart-toggle-on" : "smart-toggle-off");
-		SM_LOG("[smart] master toggle set to %s", smart ? "on" : "off");
-	}
-	openvr_pair::overlay::ui::TooltipForLastItem(
-		"Adapts the prediction strength to how much each tracker is moving.\n"
-		"Stationary: full slider strength (kills resting jitter when holding\n"
-		"or aiming the controller).\n"
-		"Walking / fast aim: relaxed toward 0 (no judder, no lag).\n"
-		"Affects prediction only -- finger smoothing is unchanged.");
+	openvr_pair::overlay::ui::DrawSettingTable("smoothing_general_settings", 160.0f,
+		[&](openvr_pair::overlay::ui::SettingTableScope &table) {
+			openvr_pair::overlay::ui::SettingRow(table, "Smart smoothing", [&] {
+				if (openvr_pair::overlay::ui::CheckboxWithTooltip(
+						"##smart_smoothing", &smart,
+						"Adapts the prediction strength to how much each tracker is moving.\n"
+						"Stationary: full slider strength (kills resting jitter when holding\n"
+						"or aiming the controller).\n"
+						"Walking / fast aim: relaxed toward 0 (no judder, no lag).\n"
+						"Affects prediction only -- finger smoothing is unchanged.")) {
+					cfg_.smart_smoothing = smart;
+					SaveConfig(cfg_);
+					// Push the new flag down to every device that already has a saved
+					// per-tracker value. ReplayDevicePredictions walks the saved map
+					// and calls SendDevicePrediction, which now carries cfg_.smart_smoothing
+					// alongside each device's smoothness. Devices without a saved value
+					// pick up the flag the first time the user touches their slider.
+					ReplayDevicePredictions(smart ? "smart-toggle-on" : "smart-toggle-off");
+					SM_LOG("[smart] master toggle set to %s", smart ? "on" : "off");
+				}
+			});
+		});
 	ImGui::Spacing();
 
 	openvr_pair::overlay::ui::DrawSectionHeading("Prediction");

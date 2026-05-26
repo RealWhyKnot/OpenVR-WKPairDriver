@@ -1,0 +1,113 @@
+#include <gtest/gtest.h>
+
+#include "UiCore.h"
+
+#include <imgui.h>
+
+#include <utility>
+
+namespace {
+
+class UiCoreTest : public ::testing::Test
+{
+protected:
+	void SetUp() override
+	{
+		ImGui::CreateContext();
+		ImGuiIO &io = ImGui::GetIO();
+		io.IniFilename = nullptr;
+		io.Fonts->AddFontDefault();
+		unsigned char *pixels = nullptr;
+		int width = 0;
+		int height = 0;
+		io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+		openvr_pair::overlay::ui::ApplyOverlayStyle();
+		openvr_pair::overlay::ui::SetTheme(openvr_pair::overlay::ui::ThemeId::Legacy);
+	}
+
+	void TearDown() override
+	{
+		ImGui::DestroyContext();
+	}
+
+	template<typename Body>
+	void RenderAt(const ImVec2 &size, Body &&body)
+	{
+		ImGuiIO &io = ImGui::GetIO();
+		io.DisplaySize = size;
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(size);
+		ImGui::Begin("ui_core_test", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		std::forward<Body>(body)();
+		ImGui::End();
+		ImGui::Render();
+
+		ASSERT_NE(nullptr, ImGui::GetDrawData());
+		EXPECT_GT(ImGui::GetDrawData()->TotalVtxCount, 0);
+	}
+};
+
+} // namespace
+
+TEST_F(UiCoreTest, PanelAndSettingTableRenderAtSmallAndDashboardSizes)
+{
+	for (const ImVec2 size : { ImVec2(640.0f, 480.0f), ImVec2(1200.0f, 780.0f) }) {
+		RenderAt(size, [] {
+			bool enabled = true;
+			int amount = 42;
+
+			openvr_pair::overlay::ui::DrawPanel("Settings", [&] {
+				openvr_pair::overlay::ui::DrawSettingTable("settings_grid", 160.0f,
+					[&](openvr_pair::overlay::ui::SettingTableScope &table) {
+						openvr_pair::overlay::ui::SettingRow(table, "Enabled", [&] {
+							openvr_pair::overlay::ui::CheckboxWithTooltip(
+								"##enabled", &enabled, "Controls whether this setting is active.");
+						});
+						openvr_pair::overlay::ui::SettingRow(table, "Amount", [&] {
+							openvr_pair::overlay::ui::SliderIntWithTooltip(
+								"##amount", &amount, 0, 100, "%d%%", "Shared integer slider.");
+						});
+					});
+			});
+		});
+	}
+}
+
+TEST_F(UiCoreTest, TabHelpersRenderNestedScrollableContent)
+{
+	RenderAt(ImVec2(1200.0f, 780.0f), [] {
+		openvr_pair::overlay::ui::TabBarScope tabs("tabs");
+		ASSERT_TRUE((bool)tabs);
+		openvr_pair::overlay::ui::DrawTabItem("Settings", [] {
+			openvr_pair::overlay::ui::DrawTextWrapped("Settings body");
+		});
+		openvr_pair::overlay::ui::DrawScrollableTabItem("Logs", [] {
+			openvr_pair::overlay::ui::DrawTextWrapped("Scrollable body");
+		});
+	});
+}
+
+TEST_F(UiCoreTest, BannersDisabledStateAndActionsRender)
+{
+	RenderAt(ImVec2(640.0f, 480.0f), [] {
+		openvr_pair::overlay::ui::DrawErrorBanner("Error", "Detail");
+		openvr_pair::overlay::ui::DrawWaitingBanner("Waiting for state.");
+
+		{
+			openvr_pair::overlay::ui::DisabledSection disabled(true, "Disabled for test.");
+			bool checked = false;
+			openvr_pair::overlay::ui::CheckboxWithTooltip("Disabled checkbox", &checked, "Checkbox tooltip.");
+			disabled.AttachReasonTooltip();
+		}
+
+		openvr_pair::overlay::ui::DrawActionRow("actions", {
+			openvr_pair::overlay::ui::ActionButton{ "Primary", "Primary action.", false, nullptr, ImVec2(120.0f, 0.0f), [] {} },
+			openvr_pair::overlay::ui::ActionButton{ "Blocked", nullptr, true, "Blocked action.", ImVec2(120.0f, 0.0f), [] {} },
+		});
+	});
+}

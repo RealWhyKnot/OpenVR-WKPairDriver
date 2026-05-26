@@ -3,11 +3,11 @@
 #include "ManifestRegistration.h"
 #include "Migration.h"
 #include "ShellContext.h"
+#include "ShellUi.h"
 #include "Theme.h"
 #include "UiHelpers.h"
 #include "UpdateNotice.h"
 #include "VrOverlayHost.h"
-#include "DebugLogging.h"
 
 #if WKOPENVR_BUILD_IS_DEV
 #include "testharness/TestHarnessRunner.h"
@@ -33,7 +33,6 @@
 
 #include <cstdio>
 #include <exception>
-#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -94,225 +93,6 @@ std::vector<std::unique_ptr<openvr_pair::overlay::FeaturePlugin>> CreatePlugins(
 	plugins.push_back(CreatePhantomPlugin());
 #endif
 	return plugins;
-}
-
-void DrawTransientStatus(openvr_pair::overlay::ShellContext &context)
-{
-	// Transient feedback (elevated module toggles, IPC heartbeat hiccups)
-	// drawn as a thin coloured line just above the bottom edge. The version
-	// stamp and driver-status dot live on each plugin's own footer (SC,
-	// InputHealth, Smoothing) so the shell doesn't duplicate them.
-	if (context.status.empty()) return;
-	const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
-	const float windowHeight = ImGui::GetWindowHeight();
-	const float padding = ImGui::GetStyle().WindowPadding.y;
-	ImGui::SetCursorPosY(windowHeight - lineHeight * 3.0f - padding);
-	ImGui::Separator();
-	openvr_pair::overlay::ui::DrawTextWrapped(context.status.c_str());
-}
-
-void DrawGlobalLogs(openvr_pair::overlay::ShellContext &context,
-	std::vector<std::unique_ptr<openvr_pair::overlay::FeaturePlugin>> &plugins)
-{
-	// One tab to find every plugin's log surface. Replaces the per-feature
-	// Logs sub-tab that used to live inside each plugin -- the user reported
-	// having to remember which plugin owned which log file. Each plugin's
-	// DrawLogsSection emits into a collapsing header so a long SC panel does
-	// not push Smoothing / InputHealth off-screen.
-	openvr_pair::overlay::ui::DrawTextWrapped(
-		"Per-module logs. All overlay-side logs land in "
-		"%LocalAppDataLow%\\WKOpenVR\\Logs\\; driver-side logs land in "
-		"%LocalAppDataLow%\\WKOpenVR\\Logs\\.");
-	ImGui::Spacing();
-
-	openvr_pair::overlay::ui::DrawSectionHeading("Debug logging");
-	const bool forced = openvr_pair::common::IsDebugLoggingForcedOn();
-	bool debugLogging = openvr_pair::common::IsDebugLoggingEnabled();
-	if (forced) {
-		debugLogging = true;
-		ImGui::BeginDisabled();
-	}
-	if (openvr_pair::overlay::ui::CheckboxWithTooltip(
-			"Enable debug logging", &debugLogging,
-			"Release builds stay quiet until this is enabled.\n"
-			"Dev builds keep it on so repro sessions leave a diagnostic trail.\n"
-			"State is shared by the overlay, driver, and host sidecars.")) {
-		openvr_pair::common::SetDebugLoggingEnabled(debugLogging);
-	}
-	if (forced) {
-		ImGui::EndDisabled();
-		ImGui::SameLine();
-		ImGui::TextDisabled("(dev build: always on)");
-	} else {
-		ImGui::SameLine();
-		ImGui::TextDisabled(debugLogging ? "(on)" : "(off)");
-	}
-
-	const bool effectiveDebugLogging = openvr_pair::common::IsDebugLoggingEnabled();
-	for (auto &plugin : plugins) {
-		plugin->OnDebugLoggingChanged(effectiveDebugLogging);
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	bool anyDrawn = false;
-	for (auto &plugin : plugins) {
-		if (!plugin->IsInstalled(context)) continue;
-		ImGui::PushID(plugin->Name());
-		// SetNextItemOpen(true) on first frame so the user does not have to
-		// click into every section to see content. Subsequent frames respect
-		// whatever the user left the header at.
-		ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
-		if (ImGui::CollapsingHeader(plugin->Name())) {
-			ImGui::Indent();
-			plugin->DrawLogsSection(context);
-			ImGui::Unindent();
-		}
-		ImGui::PopID();
-		anyDrawn = true;
-	}
-	if (!anyDrawn) {
-		ImGui::TextDisabled("No installed feature plugins.");
-	}
-}
-
-void DrawModules(openvr_pair::overlay::ShellContext &context,
-	std::vector<std::unique_ptr<openvr_pair::overlay::FeaturePlugin>> &plugins)
-{
-	// Visual intent: the value the checkbox should display while the
-	// elevated helper is in flight. Cleared as soon as ShellContext is no
-	// longer tracking a pending toggle for this flag (process exited, with
-	// or without writing the file).
-	static std::map<std::string, bool> wanted;
-
-	ImGui::TextUnformatted("Modules");
-	openvr_pair::overlay::ui::DrawTextWrapped(
-		"Toggle features on or off. Each change pops a UAC prompt. "
-		"Changes take effect the next time SteamVR loads the driver.");
-	ImGui::Spacing();
-	if (ImGui::BeginTable("modules", 3,
-		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-		// Module name stretches left so Status + Enabled hug the right edge.
-		// Status is wide enough to hold "Enabling -- takes effect on next
-		// SteamVR launch" without wrapping; Enabled holds the checkbox plus
-		// the "Enabled" header without ImGui ellipsizing it (the 70 px the
-		// column originally had ate the header text).
-		ImGui::TableSetupColumn("Module",  ImGuiTableColumnFlags_WidthStretch, 1.0f);
-		ImGui::TableSetupColumn("Status",  ImGuiTableColumnFlags_WidthFixed,  340.0f);
-		ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed,  100.0f);
-		ImGui::TableHeadersRow();
-
-		for (auto &plugin : plugins) {
-			const bool installed = plugin->IsInstalled(context);
-			const std::string key = plugin->FlagFileName();
-			const bool isPending = context.IsTogglePending(key.c_str());
-
-			auto it = wanted.find(key);
-			if (!isPending && it != wanted.end()) {
-				wanted.erase(it);
-				it = wanted.end();
-			}
-			const bool displayState = (it != wanted.end()) ? it->second : installed;
-
-			ImGui::TableNextRow();
-
-			// Column 0: module name (left).
-			ImGui::TableNextColumn();
-			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted(plugin->Name());
-
-			// Column 1: status text, right-aligned within its fixed column.
-			// During a pending toggle the row is the only place the user can
-			// learn the change is in flight and won't take effect until the
-			// next SteamVR launch -- that's the reason status isn't merged
-			// into the checkbox.
-			ImGui::TableNextColumn();
-			ImGui::AlignTextToFramePadding();
-			const openvr_pair::overlay::ui::SemanticPalette &pal =
-				openvr_pair::overlay::ui::GetPalette();
-			const char *statusText = nullptr;
-			ImVec4 statusColor{};
-			bool statusColored = false;
-			if (isPending) {
-				statusText = (it != wanted.end() && it->second)
-					? "Enabling -- takes effect on next SteamVR launch"
-					: "Disabling -- takes effect on next SteamVR launch";
-				statusColor = pal.statusPending;
-				statusColored = true;
-			} else if (installed) {
-				statusText = "Enabled";
-				statusColor = pal.statusOk;
-				statusColored = true;
-			} else {
-				statusText = "Disabled";
-			}
-			openvr_pair::overlay::ui::RightAlignText(statusText, statusColor, statusColored);
-
-			// Column 2: enabled checkbox, far right. When a UAC toggle is
-			// in flight, disable the checkbox and surface the reason on
-			// hover so the user is not staring at an unresponsive control.
-			// Also block disabling the OSC Router while Face Tracking or
-			// Captions are enabled: those features publish OSC through the
-			// router, so turning it off would silently kill their output to
-			// VRChat.
-			ImGui::TableNextColumn();
-			ImGui::PushID(key.c_str());
-			const std::string pendingReason =
-				"Waiting for the elevated helper to finish. Reopens after SteamVR picks up the change.";
-			const bool isRouterRow = (key == "enable_oscrouter.flag");
-			const bool routerDependentOn = isRouterRow && displayState &&
-				(context.IsFlagPresent("enable_facetracking.flag") ||
-				 context.IsFlagPresent("enable_captions.flag"));
-			const char *blockReason = nullptr;
-			bool blocked = isPending;
-			if (isPending) {
-				blockReason = pendingReason.c_str();
-			} else if (routerDependentOn) {
-				blocked = true;
-				blockReason =
-					"Face Tracking and Captions publish through the OSC Router. "
-					"Disable those modules first if you really want to turn the router off.";
-			}
-			openvr_pair::overlay::ui::DisabledSection disabled(
-				blocked, blockReason);
-			bool checkbox = displayState;
-			const std::string tooltip = std::string("Enable or disable ") + plugin->Name() +
-			                            " for this profile. Takes effect next SteamVR launch.";
-			if (openvr_pair::overlay::ui::CheckboxWithTooltip(
-					"##enabled", &checkbox, tooltip.c_str())) {
-				wanted[key] = checkbox;
-				context.SetFlagPresent(plugin->FlagFileName(), checkbox);
-			}
-			disabled.AttachReasonTooltip();
-			ImGui::PopID();
-		}
-		ImGui::EndTable();
-	}
-}
-
-void DrawThemes(openvr_pair::overlay::ShellContext & /*context*/)
-{
-	using namespace openvr_pair::overlay::ui;
-
-	DrawSectionHeading("Color theme");
-	DrawTextWrapped("Choose a color theme. Changes apply immediately and persist across launches.");
-	ImGui::Spacing();
-
-	const ThemeId current = GetCurrentThemeId();
-	for (int i = 0; i < (int)ThemeId::Count_; ++i) {
-		const ThemeId id = (ThemeId)i;
-		const bool selected = (id == current);
-		ImGui::PushID(i);
-		if (ImGui::RadioButton(ThemeName(id), selected)) {
-			SetTheme(id);
-		}
-		ImGui::SameLine();
-		ImGui::TextDisabled("%s", ThemeCaption(id));
-		ImGui::PopID();
-	}
-
 }
 
 } // namespace
@@ -514,6 +294,8 @@ int main(int argc, char **argv)
 		// ones. When the dashboard is not visible no mouse events
 		// fire and GLFW's position is used unchanged.
 		const bool dashboardVisible = vrOverlay->TickFrame();
+		context.vrConnected = vrOverlay->VrConnected();
+		context.dashboardVisible = dashboardVisible;
 
 		ImGuiIO &io = ImGui::GetIO();
 		if (dashboardVisible) {
@@ -534,63 +316,7 @@ int main(int argc, char **argv)
 
 		ImGui::NewFrame();
 
-		const ImGuiViewport *vp = ImGui::GetMainViewport();
-		ImGui::SetNextWindowPos(vp->WorkPos);
-		ImGui::SetNextWindowSize(vp->WorkSize);
-		// NoScrollbar/NoScrollWithMouse: every feature tab that needs to
-		// scroll already owns an inner child for it (e.g. SC's
-		// "SCTabBody" reserves footer space and scrolls the rest). If
-		// the outer shell window also offered its own scrollbar, those
-		// tabs would render two vertical scrollbars side by side.
-		ImGuiWindowFlags flags =
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-			ImGuiWindowFlags_NoBringToFrontOnFocus |
-			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-		ImGui::Begin("WKOpenVR", nullptr, flags);
-
-		// Each tab's content gets its own scrollable child so tabs that
-		// emit more rows than the window can fit (Smoothing's per-tracker
-		// sliders, Modules, Logs, etc.) remain scrollable even while the
-		// outer shell window stays NoScrollbar -- the outer-scrollbar
-		// suppression is what stops the SC tab from rendering two
-		// scrollbars on top of its own inner SCTabBody. The ##tab_body
-		// id is safe to repeat across tabs because BeginTabItem pushes
-		// its own ID scope.
-		if (ImGui::BeginTabBar("tabs")) {
-			for (auto &plugin : plugins) {
-				if (!plugin->IsInstalled(context)) continue;
-				if (ImGui::BeginTabItem(plugin->Name())) {
-					ImGui::BeginChild("##tab_body", ImVec2(0, 0));
-					plugin->DrawTab(context);
-					ImGui::EndChild();
-					ImGui::EndTabItem();
-				}
-			}
-			if (ImGui::BeginTabItem("Logs")) {
-				ImGui::BeginChild("##tab_body", ImVec2(0, 0));
-				DrawGlobalLogs(context, plugins);
-				ImGui::EndChild();
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Modules")) {
-				ImGui::BeginChild("##tab_body", ImVec2(0, 0));
-				DrawModules(context, plugins);
-				ImGui::EndChild();
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Themes")) {
-				ImGui::BeginChild("##tab_body", ImVec2(0, 0));
-				DrawThemes(context);
-				ImGui::EndChild();
-				ImGui::EndTabItem();
-			}
-			ImGui::EndTabBar();
-		}
-
-		DrawTransientStatus(context);
-
-		ImGui::End();
+		DrawShellWindow(context, plugins);
 		ImGui::Render();
 
 		// Two render paths share one ImGui::GetDrawData() call: the

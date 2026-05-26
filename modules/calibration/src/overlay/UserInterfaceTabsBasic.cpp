@@ -9,6 +9,8 @@
 #include <imgui/imgui.h>
 #include "imgui_extensions.h"
 
+void SaveProfile(CalibrationContext& ctx);
+
 static inline const char* GetPrettyTrackingSystemName(const std::string& value) {
 	// To comply with SteamVR branding guidelines (page 29), we rename devices under lighthouse tracking to SteamVR Tracking.
 	if (value == "lighthouse" || value == "aapvr") {
@@ -16,6 +18,7 @@ static inline const char* GetPrettyTrackingSystemName(const std::string& value) 
 	}
 	return value.c_str();
 }
+
 
 // Mirror of the "Reference HMD not detected" banner from BuildMenu, rendered
 // inside the continuous-cal Status tab so the user sees it even when they jump
@@ -77,7 +80,7 @@ void CCal_BasicInfo() {
 	// owns its own width so we don't pass a non-zero panelSize here -- letting
 	// the panel auto-fit its content prevents a stray right-edge gap when the
 	// table is narrower than the window.
-	ImGui::BeginGroupPanel("Devices", panelSize);
+	openvr_pair::overlay::ui::DrawPanel("Devices", [&] {
 	if (ImGui::BeginTable("DeviceInfo", 2, 0)) {
 		ImGui::TableSetupColumn("Reference device");
 		ImGui::TableSetupColumn("Target device");
@@ -130,12 +133,12 @@ void CCal_BasicInfo() {
 
 		ImGui::EndTable();
 	}
-	ImGui::EndGroupPanel(); // Devices
+	}, panelSize);
 
 	// --- Actions panel -----------------------------------------------------
 	// Three-way grid (Cancel | Restart sampling | Pause) inside a group panel
 	// so it visually matches the rest of Basic.
-	ImGui::BeginGroupPanel("Actions", panelSize);
+	openvr_pair::overlay::ui::DrawPanel("Actions", [&] {
 	float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
 
 	// (Removed 2026-05-04: "Recalibrate from scratch" button. The wedge case
@@ -204,14 +207,14 @@ void CCal_BasicInfo() {
 	// session-control buttons above.
 	DrawProfileMismatchBanner();
 
-	ImGui::EndGroupPanel(); // Actions
+	}, panelSize);
 
 	// === Common settings ===================================================
 	// The handful of settings most users actually touch.  Two-column table
 	// inside the panel so labels and sliders/checkboxes line up cleanly --
 	// the previous Text + SameLine + Slider layout was readable but the
 	// columns wandered with label width.
-	ImGui::BeginGroupPanel("Common settings", panelSize);
+	openvr_pair::overlay::ui::DrawPanel("Common settings", [&] {
 
 	// Two-column grid: label on the left, control on the right. Lets each row
 	// have a consistent baseline regardless of label length, instead of the
@@ -322,7 +325,12 @@ void CCal_BasicInfo() {
 		ImGui::EndTable();
 	}
 
-	ImGui::EndGroupPanel(); // Common settings
+	}, panelSize);
+
+	// Head-mount tracker, drawable boundary, and Quest Guardian pause all
+	// live on the Stability tab now -- they form one coherent journey
+	// (drift -> boundary -> guardian) that doesn't belong inside the
+	// continuous-cal status surface.
 
 	// === Status messages ===================================================
 	// Whatever the calibration state machine has logged this session, plus

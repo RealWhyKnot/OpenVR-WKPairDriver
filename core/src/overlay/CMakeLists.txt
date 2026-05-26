@@ -30,6 +30,36 @@ else()
 	set(OPENVR_PAIR_RC_SOURCES "")
 endif()
 
+add_library(openvr_pair_overlay_ui STATIC
+	Theme.cpp
+	Theme.h
+	UiControls.cpp
+	UiControls.h
+	UiCore.h
+	UiHelpers.h
+	UiLayout.cpp
+	UiLayout.h
+	UiTables.cpp
+	UiTables.h)
+
+target_include_directories(openvr_pair_overlay_ui PUBLIC
+	${CMAKE_CURRENT_LIST_DIR}
+	${CMAKE_SOURCE_DIR}/lib
+	${CMAKE_SOURCE_DIR}/lib/imgui)
+
+target_link_libraries(openvr_pair_overlay_ui PUBLIC
+	pair_imgui)
+
+target_compile_definitions(openvr_pair_overlay_ui PRIVATE
+	NOMINMAX
+	UNICODE
+	_UNICODE
+	IMGUI_DEFINE_MATH_OPERATORS)
+
+if(MSVC)
+	target_compile_options(openvr_pair_overlay_ui PRIVATE /W4 /wd4100)
+endif()
+
 add_executable(OpenVRPairOverlay WIN32
 	CalibrationAnchor.cpp
 	CalibrationAnchor.h
@@ -47,7 +77,8 @@ add_executable(OpenVRPairOverlay WIN32
 	ShellContext.h
 	ShellFooter.cpp
 	ShellFooter.h
-	Theme.cpp
+	ShellUi.cpp
+	ShellUi.h
 	Theme.h
 	UiHelpers.h
 	UpdateNotice.cpp
@@ -71,6 +102,7 @@ target_include_directories(OpenVRPairOverlay PRIVATE
 
 target_link_libraries(OpenVRPairOverlay PRIVATE
 	openvr_pair_common
+	openvr_pair_overlay_ui
 	pair_imgui
 	pair_implot
 	pair_gl3w
