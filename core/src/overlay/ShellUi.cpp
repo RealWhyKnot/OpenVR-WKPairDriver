@@ -208,21 +208,23 @@ void DrawShellWindow(ShellContext &context, std::vector<std::unique_ptr<FeatureP
 
 	ImGui::Begin("WKOpenVR", nullptr, flags);
 
-	ui::TabBarScope tabs("tabs");
-	if (tabs) {
-		for (auto &plugin : plugins) {
-			if (!plugin->IsInstalled(context)) continue;
-			DrawFeatureTab(context, *plugin);
+	{
+		ui::TabBarScope tabs("tabs");
+		if (tabs) {
+			for (auto &plugin : plugins) {
+				if (!plugin->IsInstalled(context)) continue;
+				DrawFeatureTab(context, *plugin);
+			}
+			ui::DrawScrollableTabItem("Logs", [&] {
+				DrawLogsTab(context, plugins);
+			});
+			ui::DrawScrollableTabItem("Modules", [&] {
+				DrawModulesTab(context, plugins);
+			});
+			ui::DrawScrollableTabItem("Themes", [&] {
+				DrawThemesTab(context);
+			});
 		}
-		ui::DrawScrollableTabItem("Logs", [&] {
-			DrawLogsTab(context, plugins);
-		});
-		ui::DrawScrollableTabItem("Modules", [&] {
-			DrawModulesTab(context, plugins);
-		});
-		ui::DrawScrollableTabItem("Themes", [&] {
-			DrawThemesTab(context);
-		});
 	}
 
 	DrawTransientStatus(context);
