@@ -5,9 +5,11 @@
 #include "DebugTab.h"
 #include "DiagnosticsTab.h"
 #include "IPCClient.h"
+#include "InputHealthUiLogic.h"
 #include "LearningEngine.h"
 #include "Logging.h"
 #include "SettingsTab.h"
+#include "ShellContext.h"
 #include "ShellFooter.h"
 #include "SnapshotReader.h"
 #include "UiHelpers.h"
@@ -177,12 +179,13 @@ void InputHealthPlugin::SendReset(uint64_t serial_hash, bool reset_passive, bool
 	}
 }
 
-void InputHealthPlugin::DrawStatusBanner()
+void InputHealthPlugin::DrawStatusBanner(bool dashboardVisible)
 {
 	// Connection state lives in the shared footer; the live IPC / shmem /
 	// publish_tick triple lives on the Logs tab. The top banner is reserved
 	// for actual errors so a narrow window does not overflow with noise.
-	if (!last_error_.empty()) {
+	if (inputhealth::ui::ShouldShowDriverProblemBanner(
+			dashboardVisible, !last_error_.empty())) {
 		openvr_pair::overlay::ui::DrawErrorBanner(
 			"InputHealth driver problem",
 			last_error_.c_str());
@@ -216,17 +219,17 @@ void InputHealthPlugin::DrawLogsTab()
 	inputhealth::ui::DrawLogsTab(*this);
 }
 
-void InputHealthPlugin::DrawTab(openvr_pair::overlay::ShellContext &)
+void InputHealthPlugin::DrawTab(openvr_pair::overlay::ShellContext &context)
 {
-	DrawStatusBanner();
+	DrawStatusBanner(context.dashboardVisible);
 
-	if (ImGui::BeginTabBar("inputhealth_tabs")) {
-		if (ImGui::BeginTabItem("Diagnostics")) { DrawDiagnosticsTab(); ImGui::EndTabItem(); }
-		if (ImGui::BeginTabItem("Settings"))    { DrawSettingsTab();    ImGui::EndTabItem(); }
-		if (ImGui::BeginTabItem("Advanced"))    { DrawAdvancedTab();    ImGui::EndTabItem(); }
+	openvr_pair::overlay::ui::TabBarScope tabs("inputhealth_tabs");
+	if (tabs) {
+		openvr_pair::overlay::ui::DrawTabItem("Diagnostics", [&] { DrawDiagnosticsTab(); });
+		openvr_pair::overlay::ui::DrawTabItem("Settings", [&] { DrawSettingsTab(); });
+		openvr_pair::overlay::ui::DrawTabItem("Advanced", [&] { DrawAdvancedTab(); });
 		// Logs moved to the umbrella's global Logs tab; the InputHealth-specific
 		// list of files + IPC state surface there via DrawLogsSection().
-		ImGui::EndTabBar();
 	}
 
 	openvr_pair::overlay::ShellFooterStatus footer;

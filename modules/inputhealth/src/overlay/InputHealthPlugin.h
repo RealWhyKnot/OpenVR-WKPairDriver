@@ -71,7 +71,7 @@ private:
 	std::chrono::steady_clock::time_point last_connection_check_{};
 
 	void MaintainDriverConnection();
-	void DrawStatusBanner();
+	void DrawStatusBanner(bool dashboardVisible);
 	void DrawDiagnosticsTab();
 	void DrawSettingsTab();
 	void DrawAdvancedTab();

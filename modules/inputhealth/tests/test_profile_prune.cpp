@@ -109,6 +109,17 @@ void DeleteFile(const std::wstring &path)
 } // namespace
 
 // ---------------------------------------------------------------------------
+// DeviceProfile default values.
+// ---------------------------------------------------------------------------
+
+TEST(DeviceProfileDefaults, RestRecenterIsOnByDefault)
+{
+    const DeviceProfile p;
+    EXPECT_TRUE(p.enable_rest_recenter)
+        << "New profiles must default rest-recenter to on";
+}
+
+// ---------------------------------------------------------------------------
 // After LoadAll, a profile with eye/pupil entries has those pruned.
 // Valid trigger and stick entries are preserved.
 // ---------------------------------------------------------------------------

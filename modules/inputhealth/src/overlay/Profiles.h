@@ -43,7 +43,7 @@ struct DeviceProfile
 	// Preferences. Defaults match the driver-side InputHealthConfig
 	// defaults so a freshly-created profile does not surprise the user.
 	bool enable_diagnostics_only = true;
-	bool enable_rest_recenter    = false;
+	bool enable_rest_recenter    = true;
 	bool enable_trigger_remap    = false;
 	bool corrections_enabled     = true;
 
