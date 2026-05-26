@@ -558,6 +558,7 @@ bool s_showWizard = false;
 bool s_awaitPolarityConfirm = false;
 char s_wifiHostPort[64] = {};
 char s_wifiCode[16] = {};
+char s_wifiConnectEndpoint[64] = {};
 
 wkopenvr::adb::SetupWizard* WizardPtr() {
     static wkopenvr::adb::SetupWizard inst(CCal_GetAdb());
@@ -570,17 +571,17 @@ wkopenvr::adb::SetupWizard* WizardPtr() {
 void DrawSetupWizardModal() {
     if (!s_showWizard) return;
 
-    ImGui::SetNextWindowSize(ImVec2(760.0f, 560.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(860.0f, 640.0f), ImGuiCond_Appearing);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
     if (ImGui::BeginPopupModal("Connect to Quest##wiz", &s_showWizard, 0)) {
-        ImGui::SetWindowFontScale(1.18f);
+        ImGui::SetWindowFontScale(1.22f);
 
         auto* wiz = WizardPtr();
         const auto& pal = openvr_pair::overlay::ui::GetPalette();
         const float actionHeight = ImGui::GetTextLineHeightWithSpacing() * 1.45f;
-        const ImVec2 actionButtonSize(260.0f, actionHeight);
+        const ImVec2 actionButtonSize(300.0f, actionHeight);
         auto ActionButton = [&](const char* label) {
             return ImGui::Button(label, actionButtonSize);
         };
@@ -592,7 +593,7 @@ void DrawSetupWizardModal() {
             { wkopenvr::adb::WizardStep::CheckDevAccount,"Meta developer account",
               "In the Meta Horizon app, open headset settings and turn Developer Mode on." },
             { wkopenvr::adb::WizardStep::CheckDevMode,   "USB authorization",
-              "Connect a USB-C data cable. In-headset, open Settings > Developer, turn on MTP Notification, then accept 'Allow USB debugging?'." },
+              "Connect a USB-C data cable, unlock the headset, then accept 'Allow USB debugging?'. MTP Notification is only the file-transfer notification; it does not authorize ADB." },
             { wkopenvr::adb::WizardStep::UsbPair,        "USB pairing",
               "Confirm the Quest is paired over USB." },
             { wkopenvr::adb::WizardStep::WifiTcpip,      "Enable Wi-Fi ADB",
@@ -600,7 +601,7 @@ void DrawSetupWizardModal() {
             { wkopenvr::adb::WizardStep::WifiDiscover,   "Discover Quest IP",
               "Read the Quest's Wi-Fi IP via the USB connection." },
             { wkopenvr::adb::WizardStep::WifiPair,       "Wi-Fi pair",
-              "Unplug USB. On the Quest, open Settings > System > Developer > Wireless ADB. Enter the host:port and 6-digit code shown on-screen." },
+              "On the Quest, open Settings > System > Developer > Wireless ADB. Enter the pairing host:port, pairing code, and connect endpoint shown in-headset." },
             { wkopenvr::adb::WizardStep::WifiVerify,     "Verify Wi-Fi",
               "Connect over Wi-Fi and probe the Guardian property." },
         };
@@ -646,16 +647,35 @@ void DrawSetupWizardModal() {
                 break;
             case wkopenvr::adb::WizardStep::WifiPair:
                 ImGui::SetNextItemWidth(420.0f);
-                ImGui::InputText("Host:port##wiz_hp", s_wifiHostPort, sizeof(s_wifiHostPort));
+                ImGui::InputText("Pairing host:port##wiz_hp", s_wifiHostPort, sizeof(s_wifiHostPort));
                 ImGui::SetNextItemWidth(180.0f);
-                ImGui::InputText("Code##wiz_code",   s_wifiCode,     sizeof(s_wifiCode));
+                ImGui::InputText("Pairing code##wiz_code",   s_wifiCode,     sizeof(s_wifiCode));
+                if (wiz->DiscoveredEndpoint().empty()) {
+                    ImGui::SetNextItemWidth(420.0f);
+                    ImGui::InputText("Connect endpoint##wiz_ep", s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("The endpoint from the Wireless ADB screen, usually IP:port. This is not always the same port as the pairing host:port.");
+                    }
+                } else {
+                    ImGui::TextDisabled("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                }
                 if (ActionButton("Pair##pair")) {
                     wiz->RunWifiPair(s_wifiHostPort, s_wifiCode);
                 }
                 break;
             case wkopenvr::adb::WizardStep::WifiVerify:
+                if (wiz->DiscoveredEndpoint().empty()) {
+                    ImGui::SetNextItemWidth(420.0f);
+                    ImGui::InputText("Connect endpoint##wiz_verify_ep", s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
+                } else {
+                    ImGui::TextDisabled("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                }
                 if (ActionButton("Verify##verify")) {
-                    auto res = wiz->RunWifiVerify();
+                    const std::string manualEndpoint =
+                        wiz->DiscoveredEndpoint().empty()
+                            ? std::string(s_wifiConnectEndpoint)
+                            : std::string();
+                    auto res = wiz->RunWifiVerify(manualEndpoint);
                     if (res.status == wkopenvr::adb::StepStatus::Passed) {
                         wkopenvr::adb::ProbeGuardianPolarity(CCal_GetAdb());
                         const std::string ep = wiz->DiscoveredEndpoint();
@@ -678,6 +698,20 @@ void DrawSetupWizardModal() {
                 ImGui::PushStyleColor(ImGuiCol_Text, pal.statusError);
                 ImGui::TextWrapped("%s", res.detail.c_str());
                 ImGui::PopStyleColor();
+            }
+            if ((cur == wkopenvr::adb::WizardStep::CheckDevMode ||
+                 cur == wkopenvr::adb::WizardStep::UsbPair) &&
+                res.status == wkopenvr::adb::StepStatus::Failed) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("No USB prompt?");
+                ImGui::TextWrapped("Retry restarts the ADB server and checks the headset state. Wireless ADB skips the USB authorization path if your headset shows Wireless ADB pairing details.");
+                if (ImGui::Button("Try to show USB prompt##retry_usb", actionButtonSize)) {
+                    wiz->RunRetryUsbPrompt();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Use Wireless ADB instead##wireless_fallback", actionButtonSize)) {
+                    wiz->UseWirelessFallback();
+                }
             }
         } else if (s_awaitPolarityConfirm) {
             // Polarity confirmation. The setprop value semantic flipped at
@@ -742,7 +776,12 @@ void DrawSetupWizardModal() {
 
         if (!wiz->IsDone()) {
             ImGui::Spacing();
-            if (ImGui::Button("Reset", ImVec2(120.0f, actionHeight * 0.85f))) wiz->Reset();
+            if (ImGui::Button("Reset", ImVec2(120.0f, actionHeight * 0.85f))) {
+                wiz->Reset();
+                s_wifiHostPort[0] = '\0';
+                s_wifiCode[0] = '\0';
+                s_wifiConnectEndpoint[0] = '\0';
+            }
         }
 
         ImGui::EndPopup();

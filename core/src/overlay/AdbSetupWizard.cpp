@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace wkopenvr::adb {
 
@@ -13,6 +14,14 @@ namespace wkopenvr::adb {
 // ---------------------------------------------------------------------------
 namespace {
 
+enum class UsbDeviceState {
+    NoDevice,
+    Unauthorized,
+    Offline,
+    Authorized,
+    Other
+};
+
 bool Contains(const std::string& haystack, const std::string& needle)
 {
     return haystack.find(needle) != std::string::npos;
@@ -20,11 +29,14 @@ bool Contains(const std::string& haystack, const std::string& needle)
 
 // True if the devices output has at least one non-header, non-empty line.
 // Any status (unauthorized, offline, device) counts as "something present."
-bool DevicesHasAnyEntry(const std::string& output)
+UsbDeviceState ClassifyDevices(const std::string& output)
 {
     std::istringstream ss(output);
     std::string line;
     bool pastHeader = false;
+    bool sawUnauthorized = false;
+    bool sawOffline = false;
+    bool sawOther = false;
     while (std::getline(ss, line)) {
         // Strip \r
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -34,34 +46,59 @@ bool DevicesHasAnyEntry(const std::string& output)
         }
         if (!pastHeader) continue;
         if (line.empty()) continue;
-        return true;
+
+        std::istringstream tok(line);
+        std::string serial;
+        std::string state;
+        tok >> serial >> state;
+        if (state == "device") return UsbDeviceState::Authorized;
+        if (state == "unauthorized") sawUnauthorized = true;
+        else if (state == "offline") sawOffline = true;
+        else sawOther = true;
     }
-    return false;
+    if (sawUnauthorized) return UsbDeviceState::Unauthorized;
+    if (sawOffline) return UsbDeviceState::Offline;
+    if (sawOther) return UsbDeviceState::Other;
+    return UsbDeviceState::NoDevice;
 }
 
-// True if the devices output contains an authorized device line (status == "device").
+bool DevicesHasAnyEntry(const std::string& output)
+{
+    return ClassifyDevices(output) != UsbDeviceState::NoDevice;
+}
+
 bool DevicesHasAuthorized(const std::string& output)
 {
-    std::istringstream ss(output);
-    std::string line;
-    bool pastHeader = false;
-    while (std::getline(ss, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line == "List of devices attached") {
-            pastHeader = true;
-            continue;
-        }
-        if (!pastHeader) continue;
-        if (line.empty()) continue;
-        // A device line looks like: "<serial>\tdevice" or "<ip>:<port>\tdevice"
-        if (Contains(line, "\tdevice") || line.find("device") != std::string::npos) {
-            // Exclude lines that say "unauthorized" or "offline"
-            if (!Contains(line, "unauthorized") && !Contains(line, "offline")) {
-                return true;
-            }
-        }
+    return ClassifyDevices(output) == UsbDeviceState::Authorized;
+}
+
+const char* UsbStateLabel(UsbDeviceState state)
+{
+    switch (state) {
+    case UsbDeviceState::NoDevice:      return "no device";
+    case UsbDeviceState::Unauthorized:  return "unauthorized";
+    case UsbDeviceState::Offline:       return "offline";
+    case UsbDeviceState::Authorized:    return "authorized";
+    case UsbDeviceState::Other:         return "unknown";
     }
-    return false;
+    return "unknown";
+}
+
+std::string UsbStateHelp(UsbDeviceState state)
+{
+    switch (state) {
+    case UsbDeviceState::NoDevice:
+        return "No Quest detected. Use a USB-C data cable, unlock the headset, and keep Developer Mode enabled in the Meta Horizon app.";
+    case UsbDeviceState::Unauthorized:
+        return "Quest is visible but unauthorized. Put on the headset, unlock it, and accept 'Allow USB debugging?'. MTP Notification is only for file-transfer prompts; it does not authorize ADB. If the prompt still does not appear, leave USB plugged in and toggle Developer Mode off/on in the Meta Horizon app, then retry.";
+    case UsbDeviceState::Offline:
+        return "Quest is visible but offline. Replug USB, unlock the headset, and retry. If it stays offline, reboot the headset or try a different USB port/cable.";
+    case UsbDeviceState::Authorized:
+        return "USB debugging authorized.";
+    case UsbDeviceState::Other:
+        return "ADB sees a device, but not in an authorized Quest state. Replug USB, unlock the headset, and retry.";
+    }
+    return "Unknown USB state.";
 }
 
 } // anonymous namespace
@@ -126,6 +163,13 @@ StepResult SetupWizard::Commit(WizardStep step, StepResult result)
     return result;
 }
 
+void SetupWizard::UseWirelessFallback()
+{
+    m_discoveredEndpoint.clear();
+    m_step = WizardStep::WifiPair;
+    fprintf(stderr, "[adb-wizard] USB authorization bypassed -> wireless fallback\n");
+}
+
 // ---------------------------------------------------------------------------
 // CheckBinary
 // ---------------------------------------------------------------------------
@@ -184,7 +228,8 @@ StepResult SetupWizard::RunCheckDevAccount()
     }
 
     r.status = StepStatus::Passed;
-    r.detail = "Device visible to adb (account approved).";
+    r.detail = std::string("Device visible to adb (state: ") +
+               UsbStateLabel(ClassifyDevices(result.out)) + ").";
     return Commit(WizardStep::CheckDevAccount, r);
 }
 
@@ -208,20 +253,63 @@ StepResult SetupWizard::RunCheckDevMode()
         return Commit(WizardStep::CheckDevMode, r);
     }
 
-    if (Contains(result.out, "unauthorized")) {
+    const UsbDeviceState state = ClassifyDevices(result.out);
+    if (state == UsbDeviceState::Unauthorized) {
         r.status = StepStatus::Failed;
-        r.detail = "Accept the USB debugging prompt on the headset. If it is not visible, open Settings > Developer, turn on MTP Notification, then reconnect USB.";
+        r.detail = UsbStateHelp(state);
         return Commit(WizardStep::CheckDevMode, r);
     }
 
-    if (!DevicesHasAuthorized(result.out)) {
+    if (state != UsbDeviceState::Authorized) {
         r.status = StepStatus::Failed;
-        r.detail = "No authorized device found -- turn Developer Mode on in the Meta Horizon app and MTP Notification on in headset Developer settings.";
+        r.detail = UsbStateHelp(state);
         return Commit(WizardStep::CheckDevMode, r);
     }
 
     r.status = StepStatus::Passed;
     r.detail = "Developer mode confirmed.";
+    return Commit(WizardStep::CheckDevMode, r);
+}
+
+StepResult SetupWizard::RunRetryUsbPrompt()
+{
+    StepResult r;
+    r.status = StepStatus::InProgress;
+
+    const auto kill = m_adb.Run({"kill-server"}, std::chrono::seconds(3));
+    if (kill.timedOut) {
+        r.status = StepStatus::Failed;
+        r.detail = "adb kill-server timed out. Unplug USB, reconnect it, then retry.";
+        return Commit(WizardStep::CheckDevMode, r);
+    }
+
+    const auto start = m_adb.Run({"start-server"}, std::chrono::seconds(5));
+    if (start.timedOut || start.exitCode != 0) {
+        r.status = StepStatus::Failed;
+        r.detail = "adb start-server failed. Replug USB or restart WKOpenVR, then retry.";
+        return Commit(WizardStep::CheckDevMode, r);
+    }
+
+    UsbDeviceState lastState = UsbDeviceState::NoDevice;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const auto devices = m_adb.Run({"devices", "-l"}, std::chrono::seconds(3));
+        if (!devices.timedOut && devices.exitCode == 0) {
+            lastState = ClassifyDevices(devices.out);
+            if (lastState == UsbDeviceState::Authorized) {
+                r.status = StepStatus::Passed;
+                r.detail = "USB debugging authorized. Continuing setup.";
+                return Commit(WizardStep::CheckDevMode, r);
+            }
+        }
+
+        if (attempt < 3) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        }
+    }
+
+    r.status = StepStatus::Failed;
+    r.detail = std::string("USB prompt retry finished; state is ") +
+               UsbStateLabel(lastState) + ". " + UsbStateHelp(lastState);
     return Commit(WizardStep::CheckDevMode, r);
 }
 
@@ -240,9 +328,11 @@ StepResult SetupWizard::RunUsbPair()
         return Commit(WizardStep::UsbPair, r);
     }
 
-    if (!DevicesHasAuthorized(result.out)) {
+    const UsbDeviceState state = ClassifyDevices(result.out);
+    if (state != UsbDeviceState::Authorized) {
         r.status = StepStatus::Failed;
-        r.detail = "Quest not paired over USB -- accept the 'Allow USB debugging?' prompt in-headset, or toggle MTP Notification and reconnect USB.";
+        r.detail = std::string("Quest not paired over USB (state: ") +
+                   UsbStateLabel(state) + "). " + UsbStateHelp(state);
         return Commit(WizardStep::UsbPair, r);
     }
 
@@ -461,16 +551,20 @@ StepResult SetupWizard::RunWifiPair(const std::string& pairingHostPort,
 // ---------------------------------------------------------------------------
 // WifiVerify
 // ---------------------------------------------------------------------------
-StepResult SetupWizard::RunWifiVerify()
+StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
 {
     StepResult r;
     r.status = StepStatus::InProgress;
 
-    const std::string endpoint = m_discoveredEndpoint;
+    std::string endpoint = endpointOverride.empty() ? m_discoveredEndpoint : endpointOverride;
     if (endpoint.empty()) {
         r.status = StepStatus::Failed;
-        r.detail = "No endpoint discovered -- re-run the Discover step.";
+        r.detail = "No endpoint discovered. Enter the Quest Wireless ADB connect endpoint shown in-headset, or re-run Discover while USB is authorized.";
         return Commit(WizardStep::WifiVerify, r);
+    }
+
+    if (!endpointOverride.empty()) {
+        m_discoveredEndpoint = endpoint;
     }
 
     if (!m_adb.Connect(endpoint)) {

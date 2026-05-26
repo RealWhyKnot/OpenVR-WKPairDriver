@@ -50,6 +50,7 @@ public:
     StepResult RunCheckBinary();
     StepResult RunCheckDevAccount();
     StepResult RunCheckDevMode();
+    StepResult RunRetryUsbPrompt(); // restart adb server and poll for USB authorization
     StepResult RunUsbPair();        // verifies adb devices shows an authorized device
 
     StepResult RunWifiTcpip();
@@ -60,7 +61,11 @@ public:
     StepResult RunWifiPair(const std::string& pairingHostPort,
                            const std::string& pairingCode);
 
-    StepResult RunWifiVerify();     // connect over Wi-Fi, getprop ro.product.model
+    StepResult RunWifiVerify(const std::string& endpointOverride = {}); // connect over Wi-Fi, getprop ro.product.model
+
+    // Skip the USB-dependent Wi-Fi setup steps and let the user enter the
+    // headset's Wireless ADB pairing host:port, code, and connect endpoint.
+    void UseWirelessFallback();
 
     void Reset();
     bool IsDone() const;

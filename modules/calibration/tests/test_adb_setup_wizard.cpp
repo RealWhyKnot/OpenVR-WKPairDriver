@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -39,6 +40,35 @@ public:
         return r;
     }
 };
+
+class SequenceAdb : public AdbController {
+public:
+    std::vector<AdbController::Result> results;
+    mutable std::vector<std::vector<std::string>> calls;
+
+    bool BinaryAvailable() const override { return true; }
+
+    AdbController::Result Run(const std::vector<std::string>& args,
+                              std::chrono::milliseconds /*timeout*/) override
+    {
+        calls.push_back(args);
+        if (calls.size() <= results.size()) {
+            return results[calls.size() - 1];
+        }
+        AdbController::Result r;
+        r.exitCode = 0;
+        return r;
+    }
+};
+
+AdbController::Result AdbResult(std::string out, int exitCode = 0, bool timedOut = false)
+{
+    AdbController::Result r;
+    r.out = std::move(out);
+    r.exitCode = exitCode;
+    r.timedOut = timedOut;
+    return r;
+}
 
 } // namespace
 
@@ -156,7 +186,22 @@ TEST(AdbSetupWizardTest, CheckDevMode_fails_on_unauthorized)
     const StepResult r = wiz.RunCheckDevMode();
 
     EXPECT_EQ(r.status, StepStatus::Failed);
-    EXPECT_NE(r.detail.find("Accept the USB debugging prompt"), std::string::npos);
+    EXPECT_NE(r.detail.find("unauthorized"), std::string::npos);
+    EXPECT_NE(r.detail.find("Allow USB debugging"), std::string::npos);
+    EXPECT_NE(r.detail.find("MTP Notification"), std::string::npos);
+}
+
+TEST(AdbSetupWizardTest, CheckDevMode_fails_on_offline)
+{
+    StubAdb adb;
+    adb.stubOut  = "List of devices attached\nABCD1234\toffline\n";
+    adb.stubExit = 0;
+
+    SetupWizard wiz(adb);
+    const StepResult r = wiz.RunCheckDevMode();
+
+    EXPECT_EQ(r.status, StepStatus::Failed);
+    EXPECT_NE(r.detail.find("offline"), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +217,58 @@ TEST(AdbSetupWizardTest, CheckDevMode_passes_on_authorized_device)
     const StepResult r = wiz.RunCheckDevMode();
 
     EXPECT_EQ(r.status, StepStatus::Passed);
+}
+
+TEST(AdbSetupWizardTest, RetryUsbPrompt_restarts_server_and_passes_when_authorized)
+{
+    SequenceAdb adb;
+    adb.results = {
+        AdbResult(""), // kill-server
+        AdbResult("* daemon started successfully *\n"), // start-server
+        AdbResult("List of devices attached\nABCD1234\tunauthorized usb:1-1\n"),
+        AdbResult("List of devices attached\nABCD1234\tdevice product:hollywood model:Quest_3\n")
+    };
+
+    SetupWizard wiz(adb);
+    const StepResult r = wiz.RunRetryUsbPrompt();
+
+    ASSERT_EQ(r.status, StepStatus::Passed) << r.detail;
+    EXPECT_EQ(wiz.currentStep(), WizardStep::UsbPair);
+    ASSERT_GE(adb.calls.size(), 4u);
+    EXPECT_EQ(adb.calls[0], (std::vector<std::string>{"kill-server"}));
+    EXPECT_EQ(adb.calls[1], (std::vector<std::string>{"start-server"}));
+    EXPECT_EQ(adb.calls[2], (std::vector<std::string>{"devices", "-l"}));
+}
+
+TEST(AdbSetupWizardTest, RetryUsbPrompt_reports_final_state_when_still_unauthorized)
+{
+    SequenceAdb adb;
+    adb.results = {
+        AdbResult(""),
+        AdbResult("* daemon started successfully *\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n")
+    };
+
+    SetupWizard wiz(adb);
+    const StepResult r = wiz.RunRetryUsbPrompt();
+
+    EXPECT_EQ(r.status, StepStatus::Failed);
+    EXPECT_NE(r.detail.find("unauthorized"), std::string::npos);
+    EXPECT_EQ(wiz.currentStep(), WizardStep::Start);
+}
+
+TEST(AdbSetupWizardTest, UseWirelessFallback_jumps_to_wifi_pair)
+{
+    StubAdb adb;
+    SetupWizard wiz(adb);
+
+    wiz.UseWirelessFallback();
+
+    EXPECT_EQ(wiz.currentStep(), WizardStep::WifiPair);
+    EXPECT_TRUE(wiz.DiscoveredEndpoint().empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +426,27 @@ TEST(AdbSetupWizardTest, WifiVerify_passes_on_quest_model)
 
     const StepResult r = wiz2.RunWifiVerify();
     EXPECT_EQ(r.status, StepStatus::Passed) << "detail: " << r.detail;
+}
+
+TEST(AdbSetupWizardTest, WifiVerify_uses_manual_endpoint_after_wireless_fallback)
+{
+    SequenceAdb adb;
+    adb.results = {
+        AdbResult("Successfully paired to 192.168.1.10:37123\n"),
+        AdbResult("connected to 192.168.1.10:44999\n"),
+        AdbResult("Quest 3\n")
+    };
+
+    SetupWizard wiz(adb);
+    wiz.UseWirelessFallback();
+    ASSERT_EQ(wiz.RunWifiPair("192.168.1.10:37123", "123456").status, StepStatus::Passed);
+
+    const StepResult r = wiz.RunWifiVerify("192.168.1.10:44999");
+
+    EXPECT_EQ(r.status, StepStatus::Passed) << r.detail;
+    EXPECT_EQ(wiz.DiscoveredEndpoint(), "192.168.1.10:44999");
+    ASSERT_GE(adb.calls.size(), 2u);
+    EXPECT_EQ(adb.calls[1], (std::vector<std::string>{"connect", "192.168.1.10:44999"}));
 }
 
 // ---------------------------------------------------------------------------
