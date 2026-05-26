@@ -72,9 +72,9 @@ bool DrawOffsetModal() {
 
     ImVec2 vpSize = ImGui::GetMainViewport()->Size;
     ImGui::SetNextWindowPos(
-        ImVec2((vpSize.x - 480.0f) * 0.5f, (vpSize.y - 260.0f) * 0.5f),
+        ImVec2((vpSize.x - 480.0f) * 0.5f, (vpSize.y - 340.0f) * 0.5f),
         ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize(ImVec2(480.0f, 260.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 340.0f), ImGuiCond_Always);
 
     bool savedOffset = false;
 
@@ -109,18 +109,34 @@ bool DrawOffsetModal() {
             }
             else if (st == SolveState::Collecting) {
                 const size_t collected = s.solver.sampleCount();
-                const float  fraction  = static_cast<float>(collected) /
-                    static_cast<float>(Solver::kTargetSampleCount);
+                const CollectionReadiness ready = s.solver.readiness();
+                const float  fraction  = static_cast<float>(ready.overallScore);
                 char progLabel[64];
                 std::snprintf(progLabel, sizeof progLabel,
-                    "%zu / %zu samples", collected, Solver::kTargetSampleCount);
-                ImGui::ProgressBar(fraction > 1.0f ? 1.0f : fraction,
-                    ImVec2(-1.0f, 0.0f), progLabel);
-                ImGui::Spacing();
-                ImGui::TextUnformatted("Move head slowly through pitch, yaw, and roll...");
+                    "Readiness %d%%", static_cast<int>(ready.overallScore * 100.0));
+                ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), progLabel);
                 ImGui::Spacing();
 
-                bool canFinish = collected >= Solver::kTargetSampleCount;
+                auto ReadinessBar = [](const char* label, double score) {
+                    char text[48];
+                    std::snprintf(text, sizeof text, "%s %d%%",
+                        label, static_cast<int>(score * 100.0));
+                    ImGui::ProgressBar(static_cast<float>(score),
+                        ImVec2(-1.0f, 0.0f), text);
+                };
+                ReadinessBar("Pitch", ready.axisScore[0]);
+                ReadinessBar("Yaw", ready.axisScore[1]);
+                ReadinessBar("Roll", ready.axisScore[2]);
+                ReadinessBar("Consistency", ready.residualScore);
+                ImGui::Spacing();
+
+                char statusBuf[160];
+                std::snprintf(statusBuf, sizeof statusBuf,
+                    "%zu samples, residual %.2f mm", collected, ready.residualMm);
+                ImGui::TextDisabled("%s", statusBuf);
+                ImGui::Spacing();
+
+                bool canFinish = ready.ready;
                 if (!canFinish) ImGui::BeginDisabled();
                 if (ImGui::Button("Finish##hmt_finish")) {
                     s.solver.Finish();
@@ -146,8 +162,8 @@ bool DrawOffsetModal() {
                     {
                         char fbuf[96];
                         snprintf(fbuf, sizeof fbuf,
-                            "[head-mount-modal] finish requested: samples=%zu",
-                            collected);
+                            "[head-mount-modal] finish requested: samples=%zu readiness=%.2f",
+                            collected, ready.overallScore);
                         Metrics::WriteLogAnnotation(fbuf);
                     }
                 }

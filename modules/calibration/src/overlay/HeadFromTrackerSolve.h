@@ -14,6 +14,7 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,21 @@ struct SolveResult {
     double residualMm   = 0.0;
     int    samplesUsed  = 0;
     std::string failReason;   // empty on success
+};
+
+struct CollectionReadiness {
+    size_t samplesUsed = 0;
+    double sampleScore = 0.0;      // accepted samples / minimum sample floor
+    double motionScore = 0.0;      // weakest pitch/yaw/roll coverage score
+    double residualScore = 0.0;    // current residual fit against threshold
+    double overallScore = 0.0;     // min of sample/motion/residual scores
+    double residualMm = 0.0;
+    std::array<double, 3> axisRangeDeg{ 0.0, 0.0, 0.0 }; // pitch, yaw, roll
+    std::array<double, 3> axisScore{ 0.0, 0.0, 0.0 };
+    bool enoughSamples = false;
+    bool enoughMotion = false;
+    bool residualGood = false;
+    bool ready = false;
 };
 
 class Solver {
@@ -57,11 +73,15 @@ public:
     SolveState          state()       const { return m_state; }
     const SolveResult&  result()      const { return m_result; }
     size_t              sampleCount() const { return m_pairs.size(); }
+    CollectionReadiness readiness() const;
 
-    // Minimum fraction of target samples required for Finish to attempt the
-    // solve. Exposed so tests can override without needing template tricks.
+    // Collection readiness is threshold-based. kTargetSampleCount remains as
+    // the legacy high-water mark for tests and long noisy captures; Finish
+    // uses kMinReadySampleCount plus motion/residual quality gates.
     static constexpr double kMinHmdSpeedMps      = 0.05;
     static constexpr size_t kTargetSampleCount   = 200;
+    static constexpr size_t kMinReadySampleCount = 60;
+    static constexpr double kAxisRangeTargetDeg  = 20.0;
     static constexpr double kResidualThresholdMm = 5.0;
 
 private:

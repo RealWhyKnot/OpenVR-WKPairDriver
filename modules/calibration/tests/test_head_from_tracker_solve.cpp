@@ -8,6 +8,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
+#include <algorithm>
 #include <random>
 #include <cmath>
 
@@ -46,6 +47,23 @@ MakePairs(const Eigen::AffineCompact3d& T, int n, uint32_t seed = 42)
         Eigen::Affine3d tracker = MakePose(
             ang(rng), ang(rng) * 0.5, ang(rng) * 0.5,
             Eigen::Vector3d(tr(rng), tr(rng), tr(rng)));
+        Eigen::Affine3d hmd = tracker * Eigen::Affine3d(T);
+        out.emplace_back(hmd, tracker);
+    }
+    return out;
+}
+
+std::vector<std::pair<Eigen::Affine3d, Eigen::Affine3d>>
+MakeYawOnlyPairs(const Eigen::AffineCompact3d& T, int n)
+{
+    std::vector<std::pair<Eigen::Affine3d, Eigen::Affine3d>> out;
+    out.reserve(n);
+    for (int i = 0; i < n; i++) {
+        const double yaw = (-25.0 + 50.0 * static_cast<double>(i) /
+            static_cast<double>(std::max(1, n - 1))) * EIGEN_PI / 180.0;
+        Eigen::Affine3d tracker = MakePose(
+            yaw, 0.0, 0.0,
+            Eigen::Vector3d(0.01 * i, 1.6, 0.05));
         Eigen::Affine3d hmd = tracker * Eigen::Affine3d(T);
         out.emplace_back(hmd, tracker);
     }
@@ -107,12 +125,13 @@ TEST(Solver, FinishFailsFewSamples) {
     Solver s;
     s.Start();
 
-    // Feed only 50 samples (< kTargetSampleCount = 200).
+    // Feed fewer samples than the readiness floor.
     auto pairs = MakePairs(Eigen::AffineCompact3d::Identity(), 50);
     for (const auto& [hmd, tracker] : pairs) {
         s.Tick(hmd, tracker, 1.0);
     }
-    EXPECT_LT(s.sampleCount(), Solver::kTargetSampleCount);
+    EXPECT_LT(s.sampleCount(), Solver::kMinReadySampleCount);
+    EXPECT_FALSE(s.readiness().ready);
 
     s.Finish();
     EXPECT_EQ(s.state(), SolveState::Failed);
@@ -144,6 +163,54 @@ TEST(Solver, FinishFailsHighResidual) {
     EXPECT_EQ(s.state(), SolveState::Failed);
     EXPECT_EQ(s.result().failReason, "mount may be slipping");
     EXPECT_GT(s.result().samplesUsed, 0);
+}
+
+TEST(Solver, ReadinessRequiresPitchYawAndRollCoverage) {
+    Eigen::AffineCompact3d T = Eigen::AffineCompact3d::Identity();
+
+    Solver s;
+    s.Start();
+    auto pairs = MakeYawOnlyPairs(T, static_cast<int>(Solver::kTargetSampleCount));
+    for (const auto& [hmd, tracker] : pairs) {
+        s.Tick(hmd, tracker, 1.0);
+    }
+
+    const CollectionReadiness r = s.readiness();
+    EXPECT_TRUE(r.enoughSamples);
+    EXPECT_FALSE(r.ready);
+    EXPECT_GT(r.axisScore[1], 0.9);
+    EXPECT_LT(r.axisScore[0], 0.1);
+    EXPECT_LT(r.axisScore[2], 0.1);
+
+    s.Finish();
+    EXPECT_EQ(s.state(), SolveState::Failed);
+    EXPECT_EQ(s.result().failReason, "not enough motion");
+}
+
+TEST(Solver, ReadinessCanPassBeforeOldTargetCount) {
+    const double kYaw = 5.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d T;
+    T.linear() = (Eigen::AngleAxisd(kYaw, Eigen::Vector3d::UnitY())).toRotationMatrix();
+    T.translation() = Eigen::Vector3d(0.0, 0.01, -0.03);
+
+    auto pairs = MakePairs(T, static_cast<int>(Solver::kMinReadySampleCount) + 20);
+    ASSERT_LT(pairs.size(), Solver::kTargetSampleCount);
+
+    Solver s;
+    s.Start();
+    for (const auto& [hmd, tracker] : pairs) {
+        s.Tick(hmd, tracker, 1.0);
+    }
+
+    const CollectionReadiness r = s.readiness();
+    EXPECT_TRUE(r.ready);
+    EXPECT_TRUE(r.enoughSamples);
+    EXPECT_TRUE(r.enoughMotion);
+    EXPECT_TRUE(r.residualGood);
+
+    s.Finish();
+    EXPECT_EQ(s.state(), SolveState::Done)
+        << "failReason: " << s.result().failReason;
 }
 
 // --- Happy-path test: reconstruct known T --------------------------------
