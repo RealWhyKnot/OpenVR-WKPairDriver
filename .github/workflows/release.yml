@@ -306,6 +306,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           Copy-Item "$artifacts/resources/face-module-sync.ps1" "$stage/resources/face-module-sync.ps1"
 
+          # ADB platform-tools: bundled for the Guardian-pause feature.
+          # Apache-2.0 (GPL-3.0 compatible). Source is third_party/platform-tools/
+          # in the repository -- committed binaries, no download step needed.
+          New-Item -ItemType Directory -Force -Path "$stage/bin/adb" | Out-Null
+          Copy-Item "third_party/platform-tools/adb.exe"          "$stage/bin/adb/adb.exe"
+          Copy-Item "third_party/platform-tools/AdbWinApi.dll"    "$stage/bin/adb/AdbWinApi.dll"
+          Copy-Item "third_party/platform-tools/AdbWinUsbApi.dll" "$stage/bin/adb/AdbWinUsbApi.dll"
+          Copy-Item "third_party/platform-tools/adb-LICENSE.txt"  "$stage/bin/adb/adb-LICENSE.txt"
+
           # Stage the C# face-tracking host. CMake publishes it to
           # build/artifacts/FaceModuleHost/; the workflow runs cmake directly
           # so we copy it into the stage here. The driver's HostSupervisor
@@ -382,7 +391,11 @@ jobs:
             'build/driver_wkopenvr/driver.vrdrivermanifest',
             'build/driver_wkopenvr/resources/driver.vrresources',
             'build/driver_wkopenvr/resources/settings/default.vrsettings',
-            'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll'
+            'build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll',
+            'third_party/platform-tools/adb.exe',
+            'third_party/platform-tools/AdbWinApi.dll',
+            'third_party/platform-tools/AdbWinUsbApi.dll',
+            'third_party/platform-tools/adb-LICENSE.txt'
           )
           # Per-module artifacts: only verify the ones whose modules are
           # actually built into this release (the disabled-in-release marker

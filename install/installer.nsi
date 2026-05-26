@@ -177,6 +177,16 @@ Section "Install"
     SetOutPath "$INSTDIR\resources"
     File "${ARTIFACTS_BASEDIR}\resources\face-module-sync.ps1"
 
+    ; ADB platform-tools: adb.exe + Windows USB DLLs + license.
+    ; AdbController resolves these from <install-root>/bin/adb/ at runtime.
+    ; Platform-tools are Apache-2.0 (GPL-3.0 compatible). adb-LICENSE.txt is
+    ; the upstream NOTICE.txt from the Google platform-tools zip.
+    SetOutPath "$INSTDIR\bin\adb"
+    File "..\third_party\platform-tools\adb.exe"
+    File "..\third_party\platform-tools\AdbWinApi.dll"
+    File "..\third_party\platform-tools\AdbWinUsbApi.dll"
+    File "..\third_party\platform-tools\adb-LICENSE.txt"
+
     ; Start Menu shortcuts. The umbrella shortcut is always present.
     ; Per-feature aliases are dropped here only when the installer is
     ; pre-enabling exactly one feature; the umbrella installer (FEATURE=All)
@@ -444,6 +454,8 @@ Section "Uninstall"
         Delete "$INSTDIR\README.md"
         Delete "$INSTDIR\Uninstall.exe"
         RMDir /r "$INSTDIR\resources"
+        RMDir /r "$INSTDIR\bin\adb"
+        RMDir "$INSTDIR\bin"
         RMDir /r "$INSTDIR"
         IfFileExists "$INSTDIR\WKOpenVR.exe" instDirLocked deleteDone
         IfFileExists "$INSTDIR\openvr_api.dll" instDirLocked deleteDone
@@ -463,6 +475,8 @@ Section "Uninstall"
         Delete /REBOOTOK "$INSTDIR\README.md"
         Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
         RMDir /r /REBOOTOK "$INSTDIR\resources"
+        RMDir /r /REBOOTOK "$INSTDIR\bin\adb"
+        RMDir /REBOOTOK "$INSTDIR\bin"
         RMDir /REBOOTOK "$INSTDIR"
     deleteDone:
 

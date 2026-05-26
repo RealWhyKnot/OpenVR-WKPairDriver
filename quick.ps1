@@ -381,6 +381,20 @@ function Wait-ForWritableFile {
 	throw "Timed out waiting for writable file: $Path ($lastError)"
 }
 
+# adb spawns a background server (adb.exe) on first use; it persists across
+# WKOpenVR sessions and holds the installed adb.exe open. A normal upgrade
+# would then trip Wait-ForWritableFile. Kill any adb processes before the
+# copy loop runs.
+function Stop-AdbServer {
+	$procs = Get-Process -Name adb -ErrorAction SilentlyContinue
+	if (-not $procs) { return }
+	foreach ($p in $procs) {
+		try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
+	}
+	# Tiny grace period; Stop-Process is async on the file-handle release.
+	Start-Sleep -Milliseconds 250
+}
+
 function Copy-DriverTree {
 	param(
 		[Parameter(Mandatory=$true)]$Plan
@@ -454,6 +468,8 @@ function Refresh-Shortcuts {
 
 try {
 	$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
+
+	Stop-AdbServer
 
 	New-Item -ItemType Directory -Force -Path $plan.InstallDir | Out-Null
 	foreach ($file in $plan.OverlayFiles) {
@@ -605,6 +621,9 @@ $srcOpenVR = Join-Path $artifactsDir "openvr_api.dll"
 $srcManifest = Join-Path $artifactsDir "manifest.vrmanifest"
 $srcIcon = Join-Path $artifactsDir "dashboard_icon.png"
 
+$adbSourceDir = Join-Path $PSScriptRoot "third_party\platform-tools"
+$adbDestDir   = Join-Path $InstallDir "bin\adb"
+
 $required = @(
 	@("WKOpenVR.exe", $srcExe),
 	@("openvr_api.dll", $srcOpenVR),
@@ -622,7 +641,11 @@ $required = @(
 	@("captions host openvr_api.dll", (Join-Path $driverSourceDir "resources\captions\host\openvr_api.dll")),
 	@("captions-packs.json", (Join-Path $driverSourceDir "resources\captions\host\resources\captions-packs.json")),
 	@("install-captions-pack.ps1", (Join-Path $driverSourceDir "resources\captions\host\resources\install-captions-pack.ps1")),
-	@("WKOpenVRPhantomSidecar.exe", (Join-Path $driverSourceDir "resources\phantom\host\WKOpenVRPhantomSidecar.exe"))
+	@("WKOpenVRPhantomSidecar.exe", (Join-Path $driverSourceDir "resources\phantom\host\WKOpenVRPhantomSidecar.exe")),
+	@("adb.exe", (Join-Path $adbSourceDir "adb.exe")),
+	@("AdbWinApi.dll", (Join-Path $adbSourceDir "AdbWinApi.dll")),
+	@("AdbWinUsbApi.dll", (Join-Path $adbSourceDir "AdbWinUsbApi.dll")),
+	@("adb-LICENSE.txt", (Join-Path $adbSourceDir "adb-LICENSE.txt"))
 )
 
 Write-Step "Checking artifacts"
@@ -643,7 +666,11 @@ $plan = [ordered]@{
 		[ordered]@{ Label = "WKOpenVR.exe";       Source = $srcExe;        Destination = (Join-Path $InstallDir "WKOpenVR.exe") },
 		[ordered]@{ Label = "openvr_api.dll";    Source = $srcOpenVR;     Destination = (Join-Path $InstallDir "openvr_api.dll") },
 		[ordered]@{ Label = "manifest.vrmanifest"; Source = $srcManifest; Destination = (Join-Path $InstallDir "manifest.vrmanifest") },
-		[ordered]@{ Label = "dashboard_icon.png"; Source = $srcIcon;      Destination = (Join-Path $InstallDir "dashboard_icon.png") }
+		[ordered]@{ Label = "dashboard_icon.png"; Source = $srcIcon;      Destination = (Join-Path $InstallDir "dashboard_icon.png") },
+		[ordered]@{ Label = "bin\adb\adb.exe";          Source = (Join-Path $adbSourceDir "adb.exe");          Destination = (Join-Path $adbDestDir "adb.exe") },
+		[ordered]@{ Label = "bin\adb\AdbWinApi.dll";    Source = (Join-Path $adbSourceDir "AdbWinApi.dll");    Destination = (Join-Path $adbDestDir "AdbWinApi.dll") },
+		[ordered]@{ Label = "bin\adb\AdbWinUsbApi.dll"; Source = (Join-Path $adbSourceDir "AdbWinUsbApi.dll"); Destination = (Join-Path $adbDestDir "AdbWinUsbApi.dll") },
+		[ordered]@{ Label = "bin\adb\adb-LICENSE.txt";  Source = (Join-Path $adbSourceDir "adb-LICENSE.txt");  Destination = (Join-Path $adbDestDir "adb-LICENSE.txt") }
 	)
 	Shortcuts = @(
 		[ordered]@{ Name = "WKOpenVR.lnk";                    Arguments = "--launch=umbrella" },

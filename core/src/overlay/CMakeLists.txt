@@ -163,3 +163,23 @@ add_custom_command(TARGET OpenVRPairOverlay POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		"${CMAKE_SOURCE_DIR}/modules/facetracking/src/overlay/face-module-sync.ps1"
 		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/resources/face-module-sync.ps1")
+
+# Stage ADB platform-tools into bin/adb/ next to the exe.
+# AdbController resolves adb.exe from <exe_dir>/bin/adb/ at runtime.
+# The four files are committed under third_party/platform-tools/ (Apache-2.0).
+set(WKOPENVR_ADB_SRC "${CMAKE_SOURCE_DIR}/third_party/platform-tools")
+add_custom_command(TARGET OpenVRPairOverlay POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E make_directory
+		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/bin/adb"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${WKOPENVR_ADB_SRC}/adb.exe"
+		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/bin/adb/adb.exe"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${WKOPENVR_ADB_SRC}/AdbWinApi.dll"
+		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/bin/adb/AdbWinApi.dll"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${WKOPENVR_ADB_SRC}/AdbWinUsbApi.dll"
+		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/bin/adb/AdbWinUsbApi.dll"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${WKOPENVR_ADB_SRC}/adb-LICENSE.txt"
+		"$<TARGET_FILE_DIR:OpenVRPairOverlay>/bin/adb/adb-LICENSE.txt")
