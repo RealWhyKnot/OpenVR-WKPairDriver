@@ -295,6 +295,7 @@ TEST(ConfigurationTest, PublishCandidateGuardAllowsTranslationOnlyCandidate) {
         /*inContinuous=*/false,
         /*hasBaseline=*/false,
         /*hasAcceptedThisSession=*/false,
+        /*candidateFromRelPose=*/false,
         Eigen::Vector3d::Zero(),
         candidateCm,
         Eigen::Matrix3d::Identity());
@@ -310,12 +311,65 @@ TEST(ConfigurationTest, PublishCandidateGuardRejectsExactNoopCandidate) {
         /*inContinuous=*/false,
         /*hasBaseline=*/false,
         /*hasAcceptedThisSession=*/false,
+        /*candidateFromRelPose=*/false,
         Eigen::Vector3d::Zero(),
         Eigen::Vector3d::Zero(),
         Eigen::Matrix3d::Identity());
 
     EXPECT_FALSE(result.accepted);
     EXPECT_STREQ(result.reason, "identity_candidate");
+}
+
+TEST(ConfigurationTest, PublishCandidateGuardAllowsLargeFirstFullSolveCorrection) {
+    const Eigen::Vector3d baselineCm(-160.0, 210.0, -115.0);
+    const Eigen::Vector3d candidateCm(230.0, 150.0, 125.0);
+
+    const auto result = spacecal::continuous::EvaluatePublishCandidate(
+        /*inContinuous=*/true,
+        /*hasBaseline=*/true,
+        /*hasAcceptedThisSession=*/false,
+        /*candidateFromRelPose=*/false,
+        baselineCm,
+        candidateCm,
+        Eigen::AngleAxisd(0.5, Eigen::Vector3d::UnitY()).toRotationMatrix());
+
+    EXPECT_TRUE(result.accepted);
+    EXPECT_STREQ(result.reason, "accepted");
+    EXPECT_GT(result.jumpM, spacecal::continuous::kMaxFirstAcceptedJumpM);
+}
+
+TEST(ConfigurationTest, PublishCandidateGuardKeepsRelPoseFirstJumpLimit) {
+    const Eigen::Vector3d baselineCm(-160.0, 210.0, -115.0);
+    const Eigen::Vector3d candidateCm(230.0, 150.0, 125.0);
+
+    const auto result = spacecal::continuous::EvaluatePublishCandidate(
+        /*inContinuous=*/true,
+        /*hasBaseline=*/true,
+        /*hasAcceptedThisSession=*/false,
+        /*candidateFromRelPose=*/true,
+        baselineCm,
+        candidateCm,
+        Eigen::AngleAxisd(0.5, Eigen::Vector3d::UnitY()).toRotationMatrix());
+
+    EXPECT_FALSE(result.accepted);
+    EXPECT_STREQ(result.reason, "jump_exceeds_limit");
+}
+
+TEST(ConfigurationTest, PublishCandidateGuardKeepsSteadyLimitForFullSolves) {
+    const Eigen::Vector3d baselineCm(10.0, 20.0, 30.0);
+    const Eigen::Vector3d candidateCm(10.0, 20.0, 80.1);
+
+    const auto result = spacecal::continuous::EvaluatePublishCandidate(
+        /*inContinuous=*/true,
+        /*hasBaseline=*/true,
+        /*hasAcceptedThisSession=*/true,
+        /*candidateFromRelPose=*/false,
+        baselineCm,
+        candidateCm,
+        Eigen::Matrix3d::Identity());
+
+    EXPECT_FALSE(result.accepted);
+    EXPECT_STREQ(result.reason, "jump_exceeds_limit");
 }
 
 TEST(ConfigurationTest, RelPoseTrustRequiresLockedCalibratedPose) {

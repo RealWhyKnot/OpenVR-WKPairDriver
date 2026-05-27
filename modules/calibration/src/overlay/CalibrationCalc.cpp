@@ -131,6 +131,7 @@ void CalibrationCalc::PushSample(const Sample& sample) {
 void CalibrationCalc::Clear() {
 	m_estimatedTransformation.setIdentity();
 	m_isValid = false;
+	m_lastComputeUsedRelPose = false;
 	m_samples.clear();
 	m_rotationFrozen.clear();
 	m_axisVariance = 0.0;
@@ -158,6 +159,7 @@ void CalibrationCalc::SeedEstimatedTransformation(const Eigen::AffineCompact3d& 
 
 	m_estimatedTransformation = transform;
 	m_isValid = true;
+	m_lastComputeUsedRelPose = false;
 	m_consecutiveRejections = 0;
 	m_rejectReasonTag.clear();
 	m_healthyHoldAnnotated = false;
@@ -1281,6 +1283,8 @@ namespace {
 }
 
 bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
+	m_lastComputeUsedRelPose = false;
+
 	// Splice in any frozen rotation-phase samples for the duration of this
 	// solve. No-op when the user is in continuous mode or did a single-phase
 	// one-shot (m_rotationFrozen empty). See the RotationFreezeSplice comment
@@ -1393,6 +1397,7 @@ void CalibrationCalc::ComputeInstantOffset() {
 
 bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers) {
 	Metrics::RecordTimestamp();
+	m_lastComputeUsedRelPose = false;
 
 	// Same minimum-sample guard as ComputeOneshot; see comment there.
 	if (m_samples.size() < 6) {
@@ -1414,6 +1419,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			Metrics::error_byRelPose.Push(relPoseError * 1000);
 
 			m_isValid = true;
+			m_lastComputeUsedRelPose = true;
 			m_estimatedTransformation = byRelPose;
 			return true;
 		}
@@ -1734,6 +1740,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			}
 		}
 		m_isValid = true;
+		m_lastComputeUsedRelPose = usingRelPose;
 		m_axisVariance = newVariance;
 
 		if (!usingRelPose) {

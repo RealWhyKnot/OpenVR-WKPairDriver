@@ -9,6 +9,7 @@
 namespace spacecal::continuous {
 
 constexpr double kMaxFirstAcceptedJumpM = 1.0;
+constexpr double kMaxFirstFullSolveAcceptedJumpM = 5.0;
 constexpr double kMaxSteadyAcceptedJumpM = 0.25;
 constexpr double kMinPublishRotationRad = 1e-3;
 constexpr double kMinPublishTranslationCm = 0.1;
@@ -54,7 +55,8 @@ inline CandidateGuardResult EvaluateCandidate(
 	bool hasAcceptedThisSession,
 	const Eigen::Vector3d& baselineTranslationCm,
 	const Eigen::Vector3d& candidateTranslationCm,
-	const Eigen::Matrix3d& candidateRotation)
+	const Eigen::Matrix3d& candidateRotation,
+	double firstAcceptedLimitM = kMaxFirstAcceptedJumpM)
 {
 	if (!candidateTranslationCm.allFinite() || !candidateRotation.allFinite()) {
 		return { false, "non_finite", 0.0 };
@@ -68,7 +70,7 @@ inline CandidateGuardResult EvaluateCandidate(
 		(candidateTranslationCm - baselineTranslationCm).norm() * 0.01;
 	const double limitM = hasAcceptedThisSession
 		? kMaxSteadyAcceptedJumpM
-		: kMaxFirstAcceptedJumpM;
+		: firstAcceptedLimitM;
 
 	if (std::isfinite(jumpM) && jumpM > limitM) {
 		return { false, "jump_exceeds_limit", jumpM };
@@ -89,6 +91,7 @@ inline PublishCandidateGuardResult EvaluatePublishCandidate(
 	bool inContinuous,
 	bool hasBaseline,
 	bool hasAcceptedThisSession,
+	bool candidateFromRelPose,
 	const Eigen::Vector3d& baselineTranslationCm,
 	const Eigen::Vector3d& candidateTranslationCm,
 	const Eigen::Matrix3d& candidateRotation)
@@ -122,7 +125,8 @@ inline PublishCandidateGuardResult EvaluatePublishCandidate(
 		hasAcceptedThisSession,
 		baselineTranslationCm,
 		candidateTranslationCm,
-		candidateRotation);
+		candidateRotation,
+		candidateFromRelPose ? kMaxFirstAcceptedJumpM : kMaxFirstFullSolveAcceptedJumpM);
 	result.accepted = jumpGuard.accepted;
 	result.reason = jumpGuard.reason;
 	result.jumpM = jumpGuard.jumpM;

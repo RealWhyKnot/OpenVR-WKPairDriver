@@ -9,6 +9,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -84,17 +85,34 @@ namespace {
 		memcpy(payload.target_system, system.data(), copyLen);
 	}
 
-	void SendDeviceTransformIfChanged(uint32_t id, const protocol::SetDeviceTransform& payload) {
-		if (id >= vr::k_unMaxTrackedDeviceCount) return;
+	bool SendDeviceTransformIfChanged(uint32_t id, const protocol::SetDeviceTransform& payload) {
+		if (id >= vr::k_unMaxTrackedDeviceCount) return false;
 		auto& cache = g_lastApplied[id];
 		if (cache.valid && TransformPayloadEqual(cache.payload, payload)) {
-			return;
+			return false;
 		}
 		protocol::Request req(protocol::RequestSetDeviceTransform);
 		req.setDeviceTransform = payload;
 		Driver.SendBlocking(req);
 		cache.valid = true;
 		cache.payload = payload;
+		char buf[512];
+		snprintf(buf, sizeof buf,
+			"profile_apply_device_sent: id=%u enabled=%d target_system='%s'"
+			" trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f scale=%.4f lerp=%d quash=%d"
+			" recalibrateOnMovement=%d state=%d",
+			id, (int)payload.enabled, payload.target_system,
+			payload.translation.v[0] * 100.0,
+			payload.translation.v[1] * 100.0,
+			payload.translation.v[2] * 100.0,
+			std::sqrt(
+				payload.translation.v[0] * payload.translation.v[0] +
+				payload.translation.v[1] * payload.translation.v[1] +
+				payload.translation.v[2] * payload.translation.v[2]) * 100.0,
+			payload.scale, (int)payload.lerp, (int)payload.quash,
+			(int)payload.recalibrateOnMovement, (int)CalCtx.state);
+		Metrics::WriteLogAnnotation(buf);
+		return true;
 	}
 
 	// Per-tracking-system cache so multi-ecosystem setups (3+ systems) don't
@@ -144,6 +162,16 @@ namespace {
 		// Legacy single-slot cache kept for any code that still reads it.
 		g_lastFallback = payload;
 		g_lastFallbackSent = true;
+		char buf[480];
+		snprintf(buf, sizeof buf,
+			"profile_apply_fallback_sent: system='%s' enabled=%d"
+			" trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f scale=%.4f"
+			" recalibrateOnMovement=%d state=%d",
+			systemName.c_str(), (int)enabled,
+			translationCm.x(), translationCm.y(), translationCm.z(),
+			translationCm.norm(), scale,
+			(int)recalibrateOnMovement, (int)CalCtx.state);
+		Metrics::WriteLogAnnotation(buf);
 	}
 
 	void InvalidateTransformCacheForId(uint32_t id) {
@@ -216,6 +244,13 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	// Snapshot of which IDs got adopted this scan and what serial/model they had.
 	// Compared against g_lastAdoptedTrackers below to log new-adoption / disconnect events.
 	std::map<uint32_t, AdoptedTracker> currentAdopted;
+	int scanInvalidClass = 0;
+	int scanDisabledProfile = 0;
+	int scanTrackingSystemError = 0;
+	int scanHmd = 0;
+	int scanNonTargetSystem = 0;
+	int scanTargetMatched = 0;
+	int scanPayloadSent = 0;
 
 	// If the calibrated target tracking system changed (or profile was loaded/cleared),
 	// invalidate all per-ID caches so we re-establish correct state on every device.
@@ -305,6 +340,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	{
 		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid) {
+			++scanInvalidClass;
 			// Device disappeared. Clear our cache for this slot so a future device
 			// that gets assigned this ID starts from a known-clean state.
 			if (!g_lastSeenSerial[id].empty() || g_lastApplied[id].valid) {
@@ -345,6 +381,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (!ctx.enabled)
 		{
+			++scanDisabledProfile;
 			ResetAndDisableOffsets(id);
 			continue;
 		}
@@ -354,6 +391,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (err != vr::TrackedProp_Success)
 		{
+			++scanTrackingSystemError;
 			ResetAndDisableOffsets(id);
 			continue;
 		}
@@ -362,6 +400,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (id == vr::k_unTrackedDeviceIndex_Hmd)
 		{
+			++scanHmd;
 			//auto p = ctx.devicePoses[id].mDeviceToAbsoluteTracking.m;
 			//printf("HMD %d: %f %f %f\n", id, p[0][3], p[1][3], p[2][3]);
 
@@ -410,9 +449,11 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (trackingSystem != ctx.targetTrackingSystem)
 		{
+			++scanNonTargetSystem;
 			ResetAndDisableOffsets(id, trackingSystem);
 			continue;
 		}
+		++scanTargetMatched;
 
 		const bool isFreshlyAdopted = !g_lastApplied[id].valid || !g_lastApplied[id].payload.enabled;
 
@@ -469,7 +510,9 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		// stationary. Default on at the profile level.
 		payload.recalibrateOnMovement = ctx.recalibrateOnMovement;
 
-		SendDeviceTransformIfChanged(id, payload);
+		if (SendDeviceTransformIfChanged(id, payload)) {
+			++scanPayloadSent;
+		}
 
 		// Record this ID as adopted (it's receiving a per-target-system transform with
 		// enabled=true). g_lastSeenSerial[id] is freshly populated above; pair it with
@@ -506,6 +549,30 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 	g_lastAdoptedTrackers = std::move(currentAdopted);
+	{
+		static double s_lastApplyScanSummary = -1e9;
+		if (Metrics::CurrentTime - s_lastApplyScanSummary >= 2.0 || targetSystemChanged) {
+			s_lastApplyScanSummary = Metrics::CurrentTime;
+			char summaryBuf[640];
+			snprintf(summaryBuf, sizeof summaryBuf,
+				"profile_apply_scan_summary: state=%d enabled=%d validProfile=%d"
+				" ref='%s' target='%s' profile_trans_cm=(%.2f,%.2f,%.2f)"
+				" profile_mag_cm=%.2f invalid=%d disabled=%d hmd=%d"
+				" trackingErr=%d nonTarget=%d targetMatched=%d payloadSent=%d"
+				" adopted=%zu fallbackSent=%d",
+				(int)CalCtx.state, (int)ctx.enabled, (int)ctx.validProfile,
+				ctx.referenceTrackingSystem.c_str(), ctx.targetTrackingSystem.c_str(),
+				ctx.calibratedTranslation.x(),
+				ctx.calibratedTranslation.y(),
+				ctx.calibratedTranslation.z(),
+				ctx.calibratedTranslation.norm(),
+				scanInvalidClass, scanDisabledProfile, scanHmd,
+				scanTrackingSystemError, scanNonTargetSystem, scanTargetMatched,
+				scanPayloadSent, g_lastAdoptedTrackers.size(),
+				(int)g_lastFallbackSent);
+			Metrics::WriteLogAnnotation(summaryBuf);
+		}
+	}
 
 	if (ctx.enabled && ctx.chaperone.valid && ctx.chaperone.autoApply)
 	{

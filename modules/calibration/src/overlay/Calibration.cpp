@@ -64,6 +64,20 @@ CalibrationContext CalCtx;
 // directly from earlier in the translation unit.
 static double g_runtimeWedgeSince = -1.0;
 
+static const char* CalibrationStateName(CalibrationState state)
+{
+	switch (state) {
+	case CalibrationState::None: return "None";
+	case CalibrationState::Begin: return "Begin";
+	case CalibrationState::Rotation: return "Rotation";
+	case CalibrationState::Translation: return "Translation";
+	case CalibrationState::Editing: return "Editing";
+	case CalibrationState::Continuous: return "Continuous";
+	case CalibrationState::ContinuousStandby: return "ContinuousStandby";
+	default: return "Unknown";
+	}
+}
+
 static Eigen::AffineCompact3d ProfileTransform(Eigen::Vector3d eulerDeg, Eigen::Vector3d transCm)
 {
 	auto euler = eulerDeg * EIGEN_PI / 180.0;
@@ -2078,6 +2092,27 @@ void CalibrationTick(double time)
 	}
 
 	if (ctx.state == CalibrationState::None) {
+		static double s_lastNoneStateAnnotation = -1e9;
+		if (time - s_lastNoneStateAnnotation >= 5.0) {
+			s_lastNoneStateAnnotation = time;
+			char noneBuf[512];
+			snprintf(noneBuf, sizeof noneBuf,
+				"cal_state_none: validProfile=%d enabled=%d profile_trans_cm=(%.2f,%.2f,%.2f)"
+				" profile_mag_cm=%.2f ref='%s' target='%s' refID=%d targetID=%d"
+				" continuous_snapshot=%d last_accepted=%d",
+				(int)ctx.validProfile, (int)ctx.enabled,
+				ctx.calibratedTranslation.x(),
+				ctx.calibratedTranslation.y(),
+				ctx.calibratedTranslation.z(),
+				ctx.calibratedTranslation.norm(),
+				ctx.referenceTrackingSystem.c_str(),
+				ctx.targetTrackingSystem.c_str(),
+				ctx.referenceID, ctx.targetID,
+				(int)ctx.continuousStartSnapshot.captured,
+				(int)ctx.lastAcceptedContinuousSnapshot.captured);
+			Metrics::WriteLogAnnotation(noneBuf);
+		}
+
 		// Base station drift correction (one-shot mode only): catch SteamVR
 		// universe shifts so body trackers stay aligned with the user's
 		// physical position. No-op when no base stations are detected.
@@ -2431,6 +2466,42 @@ void CalibrationTick(double time)
 		if (!CalCtx.calibrationPaused) {
 			solveAttempted = true;
 			solveProducedCandidate = calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+			{
+				static double s_lastContinuousSolveAnnotation = -1e9;
+				if (solveProducedCandidate || time - s_lastContinuousSolveAnnotation >= 1.0) {
+					s_lastContinuousSolveAnnotation = time;
+					const char* rejectReason = Metrics::lastRejectReason.empty()
+						? "none"
+						: Metrics::lastRejectReason.c_str();
+					const char* calcRejectReason = calibration.m_rejectReasonTag.empty()
+						? "none"
+						: calibration.m_rejectReasonTag.c_str();
+					const Eigen::Vector3d candidateCm =
+						calibration.Transformation().translation() * 100.0;
+					char solveBuf[768];
+					snprintf(solveBuf, sizeof solveBuf,
+						"continuous_solve_tick: state=%d(%s) paused=%d attempted=1 produced=%d"
+						" calc_valid=%d source=%s sample_count=%zu required=%zu"
+						" relPosCal=%d lockRel=%d validProfile=%d hasAccepted=%d"
+						" candidate_cm=(%.2f,%.2f,%.2f) candidate_mag_cm=%.2f"
+						" reject_reason=%s calc_reject_reason=%s warm_grace=%d",
+						(int)ctx.state, CalibrationStateName(ctx.state),
+						(int)CalCtx.calibrationPaused,
+						(int)solveProducedCandidate,
+						(int)calibration.isValid(),
+						calibration.LastComputeUsedRelPose() ? "relpose" : "full",
+						calibration.SampleCount(), CalCtx.SampleCount(),
+						(int)CalCtx.relativePosCalibrated,
+						(int)CalCtx.lockRelativePosition,
+						(int)CalCtx.validProfile,
+						(int)CalCtx.lastAcceptedContinuousSnapshot.captured,
+						candidateCm.x(), candidateCm.y(), candidateCm.z(),
+						candidateCm.norm(),
+						rejectReason, calcRejectReason,
+						CalCtx.warmRestartGraceSamples);
+					Metrics::WriteLogAnnotation(solveBuf);
+				}
+			}
 
 			// Warm-restart grace counts down per Continuous-mode solve. When
 			// it hits zero, the prior-vs-new error gate snaps back on -- the
@@ -2588,6 +2659,21 @@ void CalibrationTick(double time)
 						Metrics::WriteLogAnnotation(tbuf);
 					}
 				}
+			}
+		}
+		else {
+			static double s_lastPausedSolveAnnotation = -1e9;
+			if (time - s_lastPausedSolveAnnotation >= 2.0) {
+				s_lastPausedSolveAnnotation = time;
+				char pausedBuf[320];
+				snprintf(pausedBuf, sizeof pausedBuf,
+					"continuous_solve_skipped: state=%d(%s) reason=paused sample_count=%zu required=%zu"
+					" validProfile=%d hasAccepted=%d",
+					(int)ctx.state, CalibrationStateName(ctx.state),
+					calibration.SampleCount(), CalCtx.SampleCount(),
+					(int)CalCtx.validProfile,
+					(int)CalCtx.lastAcceptedContinuousSnapshot.captured);
+				Metrics::WriteLogAnnotation(pausedBuf);
 			}
 		}
 
@@ -2773,19 +2859,23 @@ void CalibrationTick(double time)
 			inContinuousState && (hasAcceptedSnapshot || ctx.validProfile);
 		const auto guard = spacecal::continuous::EvaluatePublishCandidate(
 			inContinuousState, hasGuardBaseline, hasAcceptedSnapshot,
+			calibration.LastComputeUsedRelPose(),
 			guardBaseline, candidateTranslationCm, R);
 		if (!guard.accepted) {
 			const bool restoredPrior =
 				inContinuousState && RestoreCalibrationSolverFromProfile(ctx);
 			const char* baselineTag =
 				hasAcceptedSnapshot ? "last_accepted" : (ctx.validProfile ? "profile" : "none");
-			char rejBuf[512];
+			char rejBuf[768];
 			std::snprintf(rejBuf, sizeof rejBuf,
-				"calibration_candidate_rejected: finiteT=%d rotAngle=%.6f reason=%s jump_cm=%.2f baseline=%s "
+				"calibration_candidate_rejected: state=%d(%s) finiteT=%d rotAngle=%.6f reason=%s source=%s jump_cm=%.2f baseline=%s "
 				"baseline_cm=(%.2f,%.2f,%.2f) candidate_cm=(%.2f,%.2f,%.2f) candidate_mag_cm=%.2f restored_prior=%d",
+				(int)ctx.state,
+				CalibrationStateName(ctx.state),
 				guard.finiteTranslation ? 1 : 0,
 				guard.rotAngleRad,
 				guard.reason,
+				calibration.LastComputeUsedRelPose() ? "relpose" : "full",
 				guard.jumpM * 100.0,
 				baselineTag,
 				guardBaseline.x(),
@@ -2819,8 +2909,10 @@ void CalibrationTick(double time)
 
 			char acceptBuf[360];
 			std::snprintf(acceptBuf, sizeof acceptBuf,
-				"calibration_candidate_accepted: state=%d trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f relPosCal=%d validProfile=%d",
+				"calibration_candidate_accepted: state=%d(%s) source=%s trans_cm=(%.2f,%.2f,%.2f) mag_cm=%.2f relPosCal=%d validProfile=%d",
 				(int)ctx.state,
+				CalibrationStateName(ctx.state),
+				calibration.LastComputeUsedRelPose() ? "relpose" : "full",
 				ctx.calibratedTranslation.x(),
 				ctx.calibratedTranslation.y(),
 				ctx.calibratedTranslation.z(),
@@ -2848,11 +2940,14 @@ void CalibrationTick(double time)
 			const char* rejectReason = Metrics::lastRejectReason.empty()
 				? "none"
 				: Metrics::lastRejectReason.c_str();
-			char skipBuf[240];
+			char skipBuf[360];
 			std::snprintf(skipBuf, sizeof skipBuf,
-				"calibration_candidate_skipped: reason=no_new_solver_candidate calc_reject_reason=%s sample_count=%zu prior_valid=1",
+				"calibration_candidate_skipped: state=%d(%s) reason=no_new_solver_candidate"
+				" source=%s calc_reject_reason=%s sample_count=%zu required=%zu prior_valid=1",
+				(int)ctx.state, CalibrationStateName(ctx.state),
+				calibration.LastComputeUsedRelPose() ? "relpose" : "full",
 				rejectReason,
-				calibration.SampleCount());
+				calibration.SampleCount(), CalCtx.SampleCount());
 			Metrics::WriteLogAnnotation(skipBuf);
 		}
 	}

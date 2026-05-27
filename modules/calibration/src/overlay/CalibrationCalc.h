@@ -128,6 +128,10 @@ public:
 		return m_isValid;
 	}
 
+	bool LastComputeUsedRelPose() const {
+		return m_lastComputeUsedRelPose;
+	}
+
 	// Most recent RMS retargeting error of the applied calibration (the
 	// `priorCalibrationError` computed inside ComputeIncremental and
 	// pushed to Metrics::error_currentCal for the primary pair). Exposed
@@ -255,6 +259,7 @@ private:
 	bool m_isValid;
 	Eigen::AffineCompact3d m_estimatedTransformation;
 	bool m_relativePosCalibrated = false;
+	bool m_lastComputeUsedRelPose = false;
 
 	// Pre-allocated scratch matrices reused across solver invocations. With
 	// continuous calibration ticking at ~2 Hz against a 200-sample buffer, the
