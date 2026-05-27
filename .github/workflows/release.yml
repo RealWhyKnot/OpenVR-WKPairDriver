@@ -144,6 +144,7 @@ jobs:
 
           #define WKOPENVR_BUILD_STAMP "$version"
           #define WKOPENVR_BUILD_CHANNEL "release"
+          #define WKOPENVR_BUILD_IS_DEV 0
           "@
           }
 
