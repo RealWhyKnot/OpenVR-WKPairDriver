@@ -73,6 +73,13 @@ constexpr double kCusumDriftMm = 0.5;
 // rolling-median rule but still well-tunable if a user reports false fires.
 constexpr double kCusumThreshold = 5.0;
 
+// Do not accumulate CUSUM evidence for small residual wiggles. The old CUSUM
+// path could fire on a stream like 5.8 mm -> 9.6 mm: sustained, but still just
+// a few millimetres of solver noise while the full solve was motion-gated.
+// A real geometry shift should create at least a threshold-sized absolute
+// excursion, or the slower stuck-loop path can handle it without restart churn.
+constexpr double kCusumMinExcursionMm = 5.0;
+
 // Post-fire cooldown (seconds). After a geometry-shift recovery fires,
 // suppress further fires for this long. Real geometry shifts (lighthouse
 // bumped, tracker remounted) happen at minute-or-hour cadence; a window of
@@ -148,6 +155,14 @@ constexpr bool UpdateCusumGeometryShift(CusumState& state,
                                          double threshold = kCusumThreshold,
                                          double* outValueAtFire = nullptr,
                                          int* outSustainAtFire = nullptr) {
+    const double minExcursionMm =
+        (threshold < kCusumMinExcursionMm) ? threshold : kCusumMinExcursionMm;
+    if ((currentErrorMm - baselineMm) < minExcursionMm) {
+        state.S = 0.0;
+        state.sustainedAboveThreshold = 0;
+        return false;
+    }
+
     const double increment = (currentErrorMm - baselineMm) - driftMm;
     state.S = state.S + increment;
     if (state.S < 0.0) state.S = 0.0;

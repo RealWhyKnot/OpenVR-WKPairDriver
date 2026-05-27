@@ -254,6 +254,9 @@ public:
 	// the next successful accept so a subsequent fresh stuck-run still gets one
 	// annotation. Strictly diagnostic; doesn't affect math.
 	bool m_healthyHoldAnnotated = false;
+	// Same latch for motion-quality holds: planar motion means "wait for
+	// better samples", not "clear the saved profile and restart".
+	bool m_motionQualityHoldAnnotated = false;
 
 private:
 	bool m_isValid;

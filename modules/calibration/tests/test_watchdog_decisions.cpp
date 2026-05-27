@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include "CalibrationRejectReason.h"
 #include "WatchdogDecisions.h"
 
 using spacecal::watchdog::IsCalibrationHealthy;
@@ -100,3 +101,23 @@ static_assert(!ShouldClearViaWatchdog(true, 50, 0.001),
     "50 rejections + 1 mm prior must NOT clear (skip-fire path)");
 static_assert(!ShouldClearViaWatchdog(true, 49, 0.010),
     "49 rejections is below cap — must not yet clear");
+
+TEST(RejectReasonTest, MotionQualityReasonsAreClassified)
+{
+    using spacecal::reject_reason::IsMotionQualityGate;
+    using spacecal::reject_reason::NeedsMoreRotation;
+    using spacecal::reject_reason::NeedsMoreTranslation;
+
+    EXPECT_TRUE(NeedsMoreRotation("rotation_no_deltas"));
+    EXPECT_TRUE(NeedsMoreRotation("rotation_planar"));
+    EXPECT_TRUE(NeedsMoreTranslation("translation_no_deltas"));
+    EXPECT_TRUE(NeedsMoreTranslation("translation_planar"));
+    EXPECT_TRUE(NeedsMoreTranslation("axis_variance_low"));
+
+    EXPECT_TRUE(IsMotionQualityGate("rotation_planar"));
+    EXPECT_TRUE(IsMotionQualityGate("translation_planar"));
+    EXPECT_FALSE(IsMotionQualityGate("below_floor_or_worse"));
+    EXPECT_FALSE(IsMotionQualityGate("validate_failed"));
+    EXPECT_FALSE(IsMotionQualityGate(""));
+    EXPECT_FALSE(IsMotionQualityGate(nullptr));
+}

@@ -2,6 +2,7 @@
 #include "UserInterface.h"
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
+#include "CalibrationRejectReason.h"
 #include "IPCClient.h"
 #include "Protocol.h"
 #include "BuildStamp.h"
@@ -141,7 +142,18 @@ void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& accent) {
 		const double sinceAccept = now - Metrics::error_currentCal.lastTs();
 		const bool searching = Metrics::consecutiveRejections.last() > 10.0;
 		const bool recentlyUpdated = sinceAccept >= 0.0 && sinceAccept < 5.0;
-		if (searching) {
+		const char* rejectReason = Metrics::lastRejectReason.empty()
+			? ""
+			: Metrics::lastRejectReason.c_str();
+		if (searching && spacecal::reject_reason::NeedsMoreRotation(rejectReason)) {
+			label = "live -- need rotation";
+			tooltip = spacecal::reject_reason::UserHint(rejectReason);
+			accent = pal.statusPending;
+		} else if (searching && spacecal::reject_reason::NeedsMoreTranslation(rejectReason)) {
+			label = "live -- need movement";
+			tooltip = spacecal::reject_reason::UserHint(rejectReason);
+			accent = pal.statusPending;
+		} else if (searching) {
 			label = "live -- searching";
 			tooltip = "Continuous calibration is running but hasn't accepted a new estimate in a while.\n"
 			          "Usually means the user isn't moving enough to give the solver useful samples.\n"

@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
 #include "Protocol.h"
+#include "CalibrationRejectReason.h"
 #include "WatchdogDecisions.h"  // ShouldClearViaWatchdog, IsCalibrationHealthy
 #include "RobustScale.h"        // Qn, TukeyWeight, kQnConsistency, kTukeyTune (opt-in IRLS path)
 #include "BlendFilter.h"        // Kalman-filter blend (opt-in publish path)
@@ -139,6 +140,7 @@ void CalibrationCalc::Clear() {
 	m_relativePosCalibrated = false;
 	m_rotationConditionRatio = 0.0;
 	m_consecutiveRejections = 0;
+	m_motionQualityHoldAnnotated = false;
 	// Kalman blend filter resets here so post-Clear (recovery, geometry-shift,
 	// stuck-loop watchdog) restarts seed the filter from the next accept.
 	spacecal::blendfilter::Reset(m_blendFilter);
@@ -163,6 +165,7 @@ void CalibrationCalc::SeedEstimatedTransformation(const Eigen::AffineCompact3d& 
 	m_consecutiveRejections = 0;
 	m_rejectReasonTag.clear();
 	m_healthyHoldAnnotated = false;
+	m_motionQualityHoldAnnotated = false;
 	m_lastPriorRetargetingErrorM = std::numeric_limits<double>::infinity();
 
 	const Eigen::Quaterniond q(transform.rotation());
@@ -1754,6 +1757,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		m_rejectReasonTag.clear();
 		Metrics::lastRejectReason.clear();
 		m_healthyHoldAnnotated = false;
+		m_motionQualityHoldAnnotated = false;
 
 		return true;
 	}
@@ -1795,6 +1799,8 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 		const bool calibrationHealthy =
 			spacecal::watchdog::IsCalibrationHealthy(m_isValid, priorCalibrationError);
+		const bool waitingForMotionQuality =
+			spacecal::reject_reason::IsMotionQualityGate(m_rejectReasonTag.c_str());
 
 		// Surface the wedged-at-noise-floor symptom as a per-tick metric.
 		// Pushes 1.0 only when the watchdog WOULD have fired (we hit the
@@ -1823,6 +1829,18 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 				}
 				m_consecutiveRejections = MaxConsecutiveRejections - 5;
 				m_rejectReasonTag = "healthy_below_floor";
+				m_motionQualityHoldAnnotated = false;
+			} else if (waitingForMotionQuality) {
+				if (!m_motionQualityHoldAnnotated) {
+					char buf[220];
+					snprintf(buf, sizeof buf,
+						"watchdog_waiting: reason=%s prior_error=%.2fmm -- need better motion, keeping seeded profile",
+						m_rejectReasonTag.empty() ? "unknown" : m_rejectReasonTag.c_str(),
+						priorCalibrationError * 1000.0);
+					Metrics::WriteLogAnnotation(buf);
+					m_motionQualityHoldAnnotated = true;
+				}
+				m_consecutiveRejections = MaxConsecutiveRejections - 5;
 			} else {
 				CalCtx.Log("Continuous calibration appears stuck — recollecting samples\n");
 				Metrics::WriteLogAnnotation("watchdog: continuous calibration stuck, clearing");

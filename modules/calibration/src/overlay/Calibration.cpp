@@ -5,6 +5,7 @@
 #include "CalibrationDevicePoseUtils.h"
 #include "CalibrationPoseSampling.h"
 #include "CalibrationProfileApply.h"
+#include "CalibrationRejectReason.h"
 #include "CalibrationRecoveryTick.h"
 #include "CalibrationMetrics.h"
 #include "BuildChannel.h"
@@ -1662,6 +1663,29 @@ void CalibrationTick(double time)
 					g_cusumState.Reset();
 				}
 
+				if (fire
+					&& ctx.state == CalibrationState::Continuous
+					&& !ctx.lastAcceptedContinuousSnapshot.captured
+					&& spacecal::reject_reason::IsMotionQualityGate(
+						Metrics::lastRejectReason.c_str())
+					&& !spacecal::geometry_shift::IsCurrentErrorSpike(current, median))
+				{
+					char mqBuf[360];
+					snprintf(mqBuf, sizeof mqBuf,
+						"[geometry-shift][suppressed-by-motion-quality] current_mm=%.3f"
+						" median_mm=%.3f ratio=%.2fx cusum_S_at_fire=%.3f mode=%s"
+						" reject_reason=%s hasAccepted=0",
+						current, median, ratio, cusumValueAtFire,
+						useCusumGeometryShift ? "cusum" : "legacy",
+						Metrics::lastRejectReason.empty()
+							? "unknown"
+							: Metrics::lastRejectReason.c_str());
+					Metrics::WriteLogAnnotation(mqBuf);
+					fire = false;
+					g_geomShiftConsecutiveBadTicks = 0;
+					g_cusumState.Reset();
+				}
+
 				if (fire) {
 					// Diagnostic: fire annotation. The user-facing CalCtx.Log
 					// below goes to the UI message buffer, not the spacecal log.
@@ -2532,13 +2556,14 @@ void CalibrationTick(double time)
 							: calibration.m_rejectReasonTag.c_str());
 					const Eigen::Vector3d candidateCm =
 						calibration.Transformation().translation() * 100.0;
-					char solveBuf[768];
+					char solveBuf[960];
 					snprintf(solveBuf, sizeof solveBuf,
 						"continuous_solve_tick: state=%d(%s) paused=%d attempted=1 produced=%d"
 						" calc_valid=%d source=%s sample_count=%zu required=%zu"
 						" relPosCal=%d lockRel=%d validProfile=%d hasAccepted=%d"
 						" candidate_cm=(%.2f,%.2f,%.2f) candidate_mag_cm=%.2f"
-						" reject_reason=%s calc_reject_reason=%s warm_grace=%d",
+						" reject_reason=%s calc_reject_reason=%s reject_count=%d"
+						" rot_cond=%.4f trans_cond=%.4f warm_grace=%d",
 						(int)ctx.state, CalibrationStateName(ctx.state),
 						(int)CalCtx.calibrationPaused,
 						(int)solveProducedCandidate,
@@ -2552,6 +2577,9 @@ void CalibrationTick(double time)
 						candidateCm.x(), candidateCm.y(), candidateCm.z(),
 						candidateCm.norm(),
 						rejectReason, calcRejectReason,
+						calibration.m_consecutiveRejections,
+						calibration.m_rotationConditionRatio,
+						calibration.m_translationConditionRatio,
 						CalCtx.warmRestartGraceSamples);
 					Metrics::WriteLogAnnotation(solveBuf);
 				}

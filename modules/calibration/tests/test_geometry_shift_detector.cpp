@@ -134,6 +134,21 @@ TEST(CusumGeometryShiftTest, BelowDriftDoesNotFire) {
     EXPECT_DOUBLE_EQ(s.S, 0.0);
 }
 
+TEST(CusumGeometryShiftTest, SmallSustainedResidualRiseDoesNotAccumulate) {
+	using spacecal::geometry_shift::CusumState;
+	using spacecal::geometry_shift::UpdateCusumGeometryShift;
+	CusumState s{};
+
+	for (int i = 0; i < 100; ++i) {
+		EXPECT_FALSE(UpdateCusumGeometryShift(
+			s,
+			/*current=*/9.6,
+			/*baseline=*/5.8));
+		EXPECT_DOUBLE_EQ(s.S, 0.0);
+		EXPECT_EQ(s.sustainedAboveThreshold, 0);
+	}
+}
+
 TEST(CusumGeometryShiftTest, SustainedShiftFiresAfterSustainGate) {
     using spacecal::geometry_shift::CusumState;
     using spacecal::geometry_shift::UpdateCusumGeometryShift;

@@ -231,6 +231,37 @@ TEST(CalibrationCalcTest, SeededTransformDoesNotImplyIncrementalCandidate) {
     EXPECT_LT((calc.Transformation().translation() - trans).norm(), 1e-9);
 }
 
+TEST(CalibrationCalcTest, MotionQualityRejectsDoNotClearSeededProfile) {
+    const double yawRad = 20.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d trueProfile =
+        MakeTransform(yawRad, 0.0, 0.0, Eigen::Vector3d(-1.0, 2.0, -0.5));
+    Eigen::AffineCompact3d staleProfile = trueProfile;
+    staleProfile.translation() += Eigen::Vector3d(0.02, 0.0, 0.0);
+
+    CalibrationCalc calc;
+    calc.Clear();
+    calc.SeedEstimatedTransformation(staleProfile, /*annotate=*/false);
+
+    for (auto& s : MakeYOnlySamples(trueProfile, kSampleCount)) {
+        calc.PushSample(s);
+    }
+
+    bool lerp = false;
+    for (int i = 0; i < 60; ++i) {
+        EXPECT_FALSE(calc.ComputeIncremental(
+            lerp, /*threshold=*/1.5, /*relPoseMaxError=*/0.005, /*ignoreOutliers=*/false));
+    }
+
+    EXPECT_TRUE(calc.isValid())
+        << "Planar motion should wait for better samples, not clear the saved profile";
+    EXPECT_EQ(calc.m_watchdogResets, 0);
+    EXPECT_GT(calc.LastPriorErrorM(), 0.005)
+        << "The prior is intentionally stale enough that the old watchdog cleared it";
+    EXPECT_TRUE(calc.m_rejectReasonTag == "rotation_no_deltas"
+        || calc.m_rejectReasonTag == "rotation_planar")
+        << "unexpected reject reason: " << calc.m_rejectReasonTag;
+}
+
 // ---------------------------------------------------------------------------
 // Combined 10 deg yaw plus a (0.5, 0.1, -0.3) m offset. The solver should
 // recover both within tolerance from the same sample stream.
