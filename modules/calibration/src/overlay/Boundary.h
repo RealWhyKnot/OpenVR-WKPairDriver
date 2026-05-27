@@ -57,6 +57,13 @@ Eigen::Affine3d TransformPoseToStandingUniverse(
 bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices,
                      double floorY, double ceilingY);
 
+bool ShowWorkingChaperonePreview(
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY);
+
+void HideWorkingChaperonePreview();
+
 // Capture the live chaperone collision bounds for later restore.
 // Returns serialized bytes suitable for storage in BoundaryConfig::priorChaperone.
 std::vector<uint8_t> SnapshotCurrentChaperone();

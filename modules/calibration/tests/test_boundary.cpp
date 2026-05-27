@@ -346,6 +346,31 @@ TEST(CaptureSessionTest, ChoosesSteepestValidFloorRay) {
     EXPECT_NEAR(verts[0].z, expected.z(), 1e-9);
 }
 
+TEST(CaptureSessionTest, PointerPoseUsesTipMinusZOnly) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pointerPose = Eigen::Affine3d::Identity();
+    pointerPose.translation() = Eigen::Vector3d(0.50, 1.00, -0.25);
+    pointerPose.linear() = Eigen::AngleAxisd(
+        -45.0 * EIGEN_PI / 180.0,
+        Eigen::Vector3d::UnitX()).toRotationMatrix();
+
+    ASSERT_TRUE(session.TickPointerPose(pointerPose, true, 0.0));
+    ASSERT_EQ(session.rawVertexCount(), 1u);
+    const auto& verts = session.vertices();
+    ASSERT_EQ(verts.size(), 1u);
+
+    const Eigen::Vector3d ray =
+        pointerPose.rotation() * Eigen::Vector3d(0.0, 0.0, -1.0);
+    const double distance = -pointerPose.translation().y() / ray.y();
+    const Eigen::Vector3d expected = pointerPose.translation() + ray * distance;
+
+    EXPECT_NEAR(verts[0].x, expected.x(), 1e-9);
+    EXPECT_NEAR(verts[0].y, 0.0, 1e-9);
+    EXPECT_NEAR(verts[0].z, expected.z(), 1e-9);
+}
+
 TEST(CaptureSessionTest, FallsBackToControllerPositionWhenControllerIsBelowFloor) {
     CaptureSession session;
     session.Start();

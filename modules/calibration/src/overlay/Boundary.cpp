@@ -195,32 +195,12 @@ static bool ChaperoneSetupOk() {
     return vr::VRChaperoneSetup() != nullptr;
 }
 
-bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices,
-                     double floorY, double ceilingY) {
-    if (!ChaperoneSetupOk()) {
-        Metrics::WriteLogAnnotation(
-            "[boundary] chaperone push failed: vrchap setup returned error / not initialized");
-        return false;
-    }
+static std::vector<vr::HmdQuad_t> BuildWallQuads(
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY)
+{
     const size_t n = standingUniverseVertices.size();
-    if (n < 3) return false;
-
-    auto* setup = vr::VRChaperoneSetup();
-
-    // Bounding box for the play area size.
-    double minX = standingUniverseVertices[0].x, maxX = minX;
-    double minZ = standingUniverseVertices[0].z, maxZ = minZ;
-    for (const auto& v : standingUniverseVertices) {
-        if (v.x < minX) minX = v.x;
-        if (v.x > maxX) maxX = v.x;
-        if (v.z < minZ) minZ = v.z;
-        if (v.z > maxZ) maxZ = v.z;
-    }
-    setup->SetWorkingPlayAreaSize(
-        static_cast<float>(maxX - minX),
-        static_cast<float>(maxZ - minZ));
-
-    // Build wall quads: one HmdQuad_t per edge, spanning floorY to ceilingY.
     std::vector<vr::HmdQuad_t> quads;
     quads.reserve(n);
     const float fy = static_cast<float>(floorY);
@@ -247,8 +227,54 @@ bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices
         q.vCorners[3].v[2] = static_cast<float>(a.z);
         quads.push_back(q);
     }
+    return quads;
+}
 
+static void SetWorkingBoundary(
+    vr::IVRChaperoneSetup* setup,
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY)
+{
+    double minX = standingUniverseVertices[0].x, maxX = minX;
+    double minZ = standingUniverseVertices[0].z, maxZ = minZ;
+    for (const auto& v : standingUniverseVertices) {
+        if (v.x < minX) minX = v.x;
+        if (v.x > maxX) maxX = v.x;
+        if (v.z < minZ) minZ = v.z;
+        if (v.z > maxZ) maxZ = v.z;
+    }
+    setup->SetWorkingPlayAreaSize(
+        static_cast<float>(maxX - minX),
+        static_cast<float>(maxZ - minZ));
+
+    std::vector<vr::HmdVector2_t> perimeter;
+    perimeter.reserve(standingUniverseVertices.size());
+    for (const auto& v : standingUniverseVertices) {
+        vr::HmdVector2_t p{};
+        p.v[0] = static_cast<float>(v.x);
+        p.v[1] = static_cast<float>(v.z);
+        perimeter.push_back(p);
+    }
+    setup->SetWorkingPerimeter(perimeter.data(), static_cast<uint32_t>(perimeter.size()));
+
+    auto quads = BuildWallQuads(standingUniverseVertices, floorY, ceilingY);
     setup->SetWorkingCollisionBoundsInfo(quads.data(), static_cast<uint32_t>(quads.size()));
+}
+
+bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices,
+                     double floorY, double ceilingY) {
+    if (!ChaperoneSetupOk()) {
+        Metrics::WriteLogAnnotation(
+            "[boundary] chaperone push failed: vrchap setup returned error / not initialized");
+        return false;
+    }
+    const size_t n = standingUniverseVertices.size();
+    if (n < 3) return false;
+
+    auto* setup = vr::VRChaperoneSetup();
+
+    SetWorkingBoundary(setup, standingUniverseVertices, floorY, ceilingY);
     setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
 
     // Log on edge: vertex count changed or first push.
@@ -269,6 +295,37 @@ bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices
     }
 
     return true;
+}
+
+bool ShowWorkingChaperonePreview(
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY)
+{
+    static bool s_loggedUnavailable = false;
+    if (!ChaperoneSetupOk()) {
+        if (!s_loggedUnavailable) {
+            Metrics::WriteLogAnnotation(
+                "[boundary] working preview failed: vrchap setup returned error / not initialized");
+            s_loggedUnavailable = true;
+        }
+        return false;
+    }
+    s_loggedUnavailable = false;
+    if (standingUniverseVertices.size() < 3) return false;
+
+    auto* setup = vr::VRChaperoneSetup();
+    SetWorkingBoundary(setup, standingUniverseVertices, floorY, ceilingY);
+    setup->ShowWorkingSetPreview();
+    return true;
+}
+
+void HideWorkingChaperonePreview()
+{
+    if (!ChaperoneSetupOk()) return;
+    auto* setup = vr::VRChaperoneSetup();
+    setup->HideWorkingSetPreview();
+    setup->RevertWorkingCopy();
 }
 
 // ---------------------------------------------------------------------------

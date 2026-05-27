@@ -5,6 +5,12 @@
 #include "CalibrationRejectReason.h"
 #include "RotationMatrix3.h"    // AngleFromRotationMatrix3 / AxisFromRotationMatrix3 (clamped).
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <numeric>
+#include <vector>
+
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
 		(lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z),
@@ -102,6 +108,62 @@ namespace {
 			ds.target.normalize();
 		}
 		return ds;
+	}
+
+	double PercentileSorted(const std::vector<double>& sorted, double p)
+	{
+		if (sorted.empty()) return std::numeric_limits<double>::infinity();
+		if (sorted.size() == 1) return sorted[0];
+		const double pos = p * static_cast<double>(sorted.size() - 1);
+		const size_t lo = static_cast<size_t>(std::floor(pos));
+		const size_t hi = std::min(sorted.size() - 1, lo + 1);
+		const double frac = pos - static_cast<double>(lo);
+		return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
+	}
+
+	CalibrationResidualStats ResidualStatsFor(std::vector<double> residuals)
+	{
+		CalibrationResidualStats out;
+		out.count = static_cast<int>(residuals.size());
+		if (residuals.empty()) return out;
+
+		double sumSq = 0.0;
+		for (double r : residuals) sumSq += r * r;
+		std::sort(residuals.begin(), residuals.end());
+
+		out.medianM = PercentileSorted(residuals, 0.50);
+		out.p90M = PercentileSorted(residuals, 0.90);
+		out.p95M = PercentileSorted(residuals, 0.95);
+		out.maxM = residuals.back();
+		out.rmsM = std::sqrt(sumSq / static_cast<double>(residuals.size()));
+
+		std::vector<double> absDev;
+		absDev.reserve(residuals.size());
+		for (double r : residuals) absDev.push_back(std::abs(r - out.medianM));
+		std::sort(absDev.begin(), absDev.end());
+		out.madSigmaM = 1.4826 * PercentileSorted(absDev, 0.50);
+
+		const double outlierCut = out.medianM + std::max(0.010, 4.0 * out.madSigmaM);
+		int outliers = 0;
+		for (double r : residuals) {
+			if (r > outlierCut) ++outliers;
+		}
+		out.outlierFraction = static_cast<double>(outliers) /
+			static_cast<double>(residuals.size());
+		return out;
+	}
+
+	const char* Bool01(bool value)
+	{
+		return value ? "1" : "0";
+	}
+
+	double SafeRatio(double numerator, double denominator)
+	{
+		if (!std::isfinite(numerator) || !std::isfinite(denominator) || denominator <= 1e-12) {
+			return 0.0;
+		}
+		return std::max(0.0, std::min(1.0, numerator / denominator));
 	}
 }
 
@@ -661,6 +723,289 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 	return ok;
 }
 
+CalibrationQualityReport CalibrationCalc::EvaluateCalibrationQuality(
+	const Eigen::AffineCompact3d& calibration,
+	bool includeHoldout,
+	bool ignoreOutliers) const
+{
+	CalibrationQualityReport report;
+	report.sampleCount = m_samples.size();
+	report.posOffsetM = ComputeRefToTargetOffset(calibration);
+
+	std::vector<const Sample*> validSamples;
+	validSamples.reserve(m_samples.size());
+	Eigen::Vector3d refMin = Eigen::Vector3d::Constant(std::numeric_limits<double>::infinity());
+	Eigen::Vector3d refMax = -refMin;
+	Eigen::Vector3d targetMin = refMin;
+	Eigen::Vector3d targetMax = -targetMin;
+	std::vector<Eigen::Quaterniond> targetRotations;
+
+	std::vector<double> residuals;
+	residuals.reserve(m_samples.size());
+	for (const auto& sample : m_samples) {
+		if (!sample.valid) continue;
+		validSamples.push_back(&sample);
+		++report.validSampleCount;
+		if (sample.pairedMotionValid) ++report.pairedSampleCount;
+		refMin = refMin.cwiseMin(sample.ref.trans);
+		refMax = refMax.cwiseMax(sample.ref.trans);
+		targetMin = targetMin.cwiseMin(sample.target.trans);
+		targetMax = targetMax.cwiseMax(sample.target.trans);
+		targetRotations.emplace_back(sample.target.rot);
+
+		const auto updatedPose = ApplyTransform(sample.target, calibration);
+		const Eigen::Vector3d hmdPoseSpace =
+			sample.ref.rot * report.posOffsetM + sample.ref.trans;
+		residuals.push_back((updatedPose.trans - hmdPoseSpace).norm());
+	}
+
+	report.residuals = ResidualStatsFor(std::move(residuals));
+	report.legacyRmsPass = report.residuals.rmsM <= 0.100;
+
+	if (report.validSampleCount >= 2) {
+		report.refRangeM = refMax - refMin;
+		report.targetRangeM = targetMax - targetMin;
+		report.refSpanM = report.refRangeM.norm();
+		report.targetSpanM = report.targetRangeM.norm();
+	}
+
+	for (size_t i = 0; i < targetRotations.size(); ++i) {
+		for (size_t j = i + 1; j < targetRotations.size(); ++j) {
+			const double angleDeg = targetRotations[i].angularDistance(targetRotations[j]) *
+				(180.0 / EIGEN_PI);
+			if (angleDeg > report.rotationSpanDeg) {
+				report.rotationSpanDeg = angleDeg;
+			}
+		}
+	}
+
+	std::vector<DSample> rotationDeltas;
+	for (size_t i = 0; i < m_samples.size(); ++i) {
+		if (!m_samples[i].valid || !m_samples[i].pairedMotionValid) continue;
+		for (size_t j = 0; j < i; ++j) {
+			if (!m_samples[j].valid || !m_samples[j].pairedMotionValid) continue;
+			const auto delta = DeltaRotationSamples(m_samples[i], m_samples[j]);
+			if (delta.valid) rotationDeltas.push_back(delta);
+		}
+	}
+	report.validRotationPairCount = static_cast<int>(rotationDeltas.size());
+	if (rotationDeltas.size() >= 2) {
+		Eigen::MatrixXd refPoints(rotationDeltas.size(), 2);
+		Eigen::MatrixXd targetPoints(rotationDeltas.size(), 2);
+		Eigen::Vector2d refCentroid = Eigen::Vector2d::Zero();
+		Eigen::Vector2d targetCentroid = Eigen::Vector2d::Zero();
+		for (size_t i = 0; i < rotationDeltas.size(); ++i) {
+			refPoints.row(i) << rotationDeltas[i].ref.x(), rotationDeltas[i].ref.z();
+			targetPoints.row(i) << rotationDeltas[i].target.x(), rotationDeltas[i].target.z();
+			refCentroid += refPoints.row(i);
+			targetCentroid += targetPoints.row(i);
+		}
+		refCentroid /= static_cast<double>(rotationDeltas.size());
+		targetCentroid /= static_cast<double>(rotationDeltas.size());
+		for (size_t i = 0; i < rotationDeltas.size(); ++i) {
+			refPoints.row(i) -= refCentroid;
+			targetPoints.row(i) -= targetCentroid;
+		}
+		const Eigen::Matrix2d cross = refPoints.transpose() * targetPoints;
+		const Eigen::JacobiSVD<Eigen::Matrix2d> svd(cross);
+		const auto values = svd.singularValues();
+		report.rotationConditionRatio = SafeRatio(values.minCoeff(), values.maxCoeff());
+	}
+
+	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> translationDeltas;
+	const Eigen::Matrix3d rotation = calibration.rotation();
+	for (size_t i = 0; i < m_samples.size(); ++i) {
+		if (!m_samples[i].valid || !m_samples[i].pairedMotionValid) continue;
+		Sample s_i = m_samples[i];
+		s_i.target.rot = rotation * s_i.target.rot;
+		s_i.target.trans = rotation * s_i.target.trans;
+		for (size_t j = 0; j < i; ++j) {
+			if (!m_samples[j].valid || !m_samples[j].pairedMotionValid) continue;
+			Sample s_j = m_samples[j];
+			s_j.target.rot = rotation * s_j.target.rot;
+			s_j.target.trans = rotation * s_j.target.trans;
+
+			const auto QAi = s_i.ref.rot.transpose();
+			const auto QAj = s_j.ref.rot.transpose();
+			translationDeltas.push_back({
+				QAj * (s_j.ref.trans - s_j.target.trans) -
+					QAi * (s_i.ref.trans - s_i.target.trans),
+				QAj - QAi
+			});
+
+			const auto QBi = s_i.target.rot.transpose();
+			const auto QBj = s_j.target.rot.transpose();
+			translationDeltas.push_back({
+				QBj * (s_j.ref.trans - s_j.target.trans) -
+					QBi * (s_i.ref.trans - s_i.target.trans),
+				QBj - QBi
+			});
+		}
+	}
+	if (!translationDeltas.empty()) {
+		Eigen::MatrixXd coefficients(translationDeltas.size() * 3, 3);
+		for (size_t i = 0; i < translationDeltas.size(); ++i) {
+			for (int axis = 0; axis < 3; ++axis) {
+				coefficients.row(i * 3 + axis) = translationDeltas[i].second.row(axis);
+			}
+		}
+		const Eigen::BDCSVD<Eigen::MatrixXd> svd(coefficients);
+		const auto values = svd.singularValues();
+		const double maxSv = values.size() ? values.maxCoeff() : 0.0;
+		const double rankCut = std::max(1e-9, maxSv * 1e-6);
+		int rank = 0;
+		double minNonZero = std::numeric_limits<double>::infinity();
+		for (int i = 0; i < values.size(); ++i) {
+			if (values[i] > rankCut) {
+				++rank;
+				if (values[i] < minNonZero) minNonZero = values[i];
+			}
+		}
+		report.translationRank = rank;
+		report.translationConditionRatio = SafeRatio(minNonZero, maxSv);
+	}
+
+	if (includeHoldout && validSamples.size() >= 24) {
+		std::vector<double> heldoutResiduals;
+		const size_t kFolds = 4;
+		for (size_t fold = 0; fold < kFolds; ++fold) {
+			const size_t begin = (validSamples.size() * fold) / kFolds;
+			const size_t end = (validSamples.size() * (fold + 1)) / kFolds;
+			if (begin >= end || validSamples.size() - (end - begin) < 8) continue;
+
+			CalibrationCalc train;
+			train.enableStaticRecalibration = enableStaticRecalibration;
+			for (size_t i = 0; i < validSamples.size(); ++i) {
+				if (i >= begin && i < end) continue;
+				train.PushSample(*validSamples[i]);
+			}
+			const Eigen::AffineCompact3d foldCalibration =
+				train.ComputeCalibration(ignoreOutliers);
+			const Eigen::Vector3d foldOffset =
+				train.ComputeRefToTargetOffset(foldCalibration);
+			for (size_t i = begin; i < end; ++i) {
+				const Sample& sample = *validSamples[i];
+				const auto updatedPose = ApplyTransform(sample.target, foldCalibration);
+				const Eigen::Vector3d hmdPoseSpace =
+					sample.ref.rot * foldOffset + sample.ref.trans;
+				heldoutResiduals.push_back((updatedPose.trans - hmdPoseSpace).norm());
+			}
+		}
+		report.holdoutResiduals = ResidualStatsFor(std::move(heldoutResiduals));
+	}
+
+	const double jitterFloor = std::sqrt(
+		ReferenceJitter() * ReferenceJitter() +
+		TargetJitter() * TargetJitter());
+	const double residualNoise = std::isfinite(report.residuals.madSigmaM)
+		? report.residuals.madSigmaM
+		: 0.0;
+	const double motionSpanTerm = report.targetSpanM > 0.0
+		? (0.04 * report.targetSpanM) / std::sqrt(std::max(1, report.validSampleCount))
+		: 0.0;
+	const double noiseTerm = 5.0 * std::max(jitterFloor, residualNoise);
+	report.dynamicLimitM = std::min(0.100, std::max(0.025, std::max(noiseTerm, motionSpanTerm)));
+
+	report.geometryPass =
+		report.validSampleCount >= 24 &&
+		report.validRotationPairCount >= 10 &&
+		report.rotationSpanDeg >= 20.0 &&
+		report.targetSpanM >= 0.05 &&
+		report.translationRank >= 2 &&
+		report.translationConditionRatio >= 1e-4;
+
+	report.robustResidualPass =
+		report.residuals.count > 0 &&
+		report.residuals.p95M <= report.dynamicLimitM &&
+		report.residuals.outlierFraction <= 0.20;
+
+	report.holdoutPass =
+		report.holdoutResiduals.count == 0 ||
+		(report.holdoutResiduals.p90M <= report.dynamicLimitM &&
+		 report.holdoutResiduals.rmsM <= 0.100);
+
+	report.shadowDynamicPass =
+		report.geometryPass &&
+		report.robustResidualPass &&
+		report.holdoutPass &&
+		report.legacyRmsPass;
+
+	return report;
+}
+
+void CalibrationCalc::LogCalibrationQualitySnapshot(
+	const char* label,
+	const Eigen::AffineCompact3d& calibration,
+	bool includeHoldout,
+	bool ignoreOutliers) const
+{
+	const CalibrationQualityReport q =
+		EvaluateCalibrationQuality(calibration, includeHoldout, ignoreOutliers);
+	const Eigen::Quaterniond rot(calibration.rotation());
+	const Eigen::Vector3d euler =
+		calibration.rotation().eulerAngles(2, 1, 0) * (180.0 / EIGEN_PI);
+
+	char line1[900];
+	snprintf(line1, sizeof line1,
+		"[cal-quality][%s] samples=%zu valid=%d paired=%d rot_pairs=%d"
+		" ref_range_cm=(%.2f,%.2f,%.2f) target_range_cm=(%.2f,%.2f,%.2f)"
+		" ref_span_cm=%.2f target_span_cm=%.2f rot_span_deg=%.2f"
+		" rot_condition=%.9f trans_rank=%d trans_condition=%.9f"
+		" dynamic_limit_mm=%.2f legacy_pass=%s geometry_pass=%s robust_pass=%s holdout_pass=%s shadow_pass=%s",
+		label ? label : "candidate",
+		q.sampleCount,
+		q.validSampleCount,
+		q.pairedSampleCount,
+		q.validRotationPairCount,
+		q.refRangeM.x() * 100.0, q.refRangeM.y() * 100.0, q.refRangeM.z() * 100.0,
+		q.targetRangeM.x() * 100.0, q.targetRangeM.y() * 100.0, q.targetRangeM.z() * 100.0,
+		q.refSpanM * 100.0,
+		q.targetSpanM * 100.0,
+		q.rotationSpanDeg,
+		q.rotationConditionRatio,
+		q.translationRank,
+		q.translationConditionRatio,
+		q.dynamicLimitM * 1000.0,
+		Bool01(q.legacyRmsPass),
+		Bool01(q.geometryPass),
+		Bool01(q.robustResidualPass),
+		Bool01(q.holdoutPass),
+		Bool01(q.shadowDynamicPass));
+	Metrics::WriteLogAnnotation(line1);
+
+	char line2[900];
+	snprintf(line2, sizeof line2,
+		"[cal-quality][%s] transform trans_cm=(%.4f,%.4f,%.4f)"
+		" trans_mag_cm=%.4f quat=(%.9f,%.9f,%.9f,%.9f)"
+		" euler_zyx_deg=(%.4f,%.4f,%.4f)"
+		" offset_cm=(%.4f,%.4f,%.4f)"
+		" residual_mm median=%.3f mad_sigma=%.3f p90=%.3f p95=%.3f max=%.3f rms=%.3f outlier_frac=%.4f"
+		" holdout_mm count=%d median=%.3f p90=%.3f p95=%.3f rms=%.3f",
+		label ? label : "candidate",
+		calibration.translation().x() * 100.0,
+		calibration.translation().y() * 100.0,
+		calibration.translation().z() * 100.0,
+		calibration.translation().norm() * 100.0,
+		rot.w(), rot.x(), rot.y(), rot.z(),
+		euler.x(), euler.y(), euler.z(),
+		q.posOffsetM.x() * 100.0,
+		q.posOffsetM.y() * 100.0,
+		q.posOffsetM.z() * 100.0,
+		q.residuals.medianM * 1000.0,
+		q.residuals.madSigmaM * 1000.0,
+		q.residuals.p90M * 1000.0,
+		q.residuals.p95M * 1000.0,
+		q.residuals.maxM * 1000.0,
+		q.residuals.rmsM * 1000.0,
+		q.residuals.outlierFraction,
+		q.holdoutResiduals.count,
+		q.holdoutResiduals.medianM * 1000.0,
+		q.holdoutResiduals.p90M * 1000.0,
+		q.holdoutResiduals.p95M * 1000.0,
+		q.holdoutResiduals.rmsM * 1000.0);
+	Metrics::WriteLogAnnotation(line2);
+}
+
 
 // Given:
 //   R - the reference pose (in reference world space)
@@ -797,6 +1142,7 @@ namespace {
 bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 	RotationFreezeSplice splice(m_samples, m_rotationFrozen);
 	auto calibration = ComputeCalibration(ignoreOutliers);
+	LogCalibrationQualitySnapshot("oneshot_legacy_candidate", calibration, true, ignoreOutliers);
 
 	bool valid = ValidateCalibration(calibration);
 
@@ -825,6 +1171,12 @@ void CalibrationCalc::ComputeInstantOffset() {
 bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers) {
 	Metrics::RecordTimestamp();
 	m_lastComputeUsedRelPose = false;
+	static double s_lastHoldoutQualityLogAt = -1e9;
+	const bool includeHoldoutThisPass =
+		Metrics::CurrentTime - s_lastHoldoutQualityLogAt >= 5.0;
+	if (includeHoldoutThisPass) {
+		s_lastHoldoutQualityLogAt = Metrics::CurrentTime;
+	}
 
 	if (lockRelativePosition) {
 		Eigen::AffineCompact3d byRelPose;
@@ -832,6 +1184,13 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		Eigen::Vector3d relPosOffset;
 		if (CalibrateByRelPose(byRelPose) &&
 			ValidateCalibration(byRelPose, &relPoseError, &relPosOffset)) {
+			if (includeHoldoutThisPass) {
+				LogCalibrationQualitySnapshot(
+					"relpose_locked_candidate",
+					byRelPose,
+					true,
+					ignoreOutliers);
+			}
 
 			Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
 			Metrics::error_byRelPose.Push(relPoseError * 1000);
@@ -847,6 +1206,13 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	double priorCalibrationError = INFINITY;
 	Eigen::Vector3d priorPosOffset;
 	if (m_isValid && ValidateCalibration(m_estimatedTransformation, &priorCalibrationError, &priorPosOffset)) {
+		if (includeHoldoutThisPass) {
+			LogCalibrationQualitySnapshot(
+				"legacy_current",
+				m_estimatedTransformation,
+				true,
+				ignoreOutliers);
+		}
 		Metrics::posOffset_currentCal.Push(priorPosOffset * 1000);
 		Metrics::error_currentCal.Push(priorCalibrationError * 1000);
 		m_lastPriorRetargetingErrorM = priorCalibrationError;
@@ -860,6 +1226,13 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	double relPoseError = INFINITY;
 
 	if (enableStaticRecalibration && CalibrateByRelPose(byRelPose)) {
+		if (includeHoldoutThisPass) {
+			LogCalibrationQualitySnapshot(
+				"relpose_candidate",
+				byRelPose,
+				true,
+				ignoreOutliers);
+		}
 		Eigen::Vector3d relPosOffset;
 		if (ValidateCalibration(byRelPose, &relPoseError, &relPosOffset)) {
 			Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
@@ -886,6 +1259,13 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	bool shouldRapidCorrect = true;
 	if (!newCalibrationValid) {
 		calibration = ComputeCalibration(ignoreOutliers);
+		if (includeHoldoutThisPass) {
+			LogCalibrationQualitySnapshot(
+				"legacy_full_candidate",
+				calibration,
+				true,
+				ignoreOutliers);
+		}
 
 		newVariance = ComputeAxisVariance(calibration)(1);
 		Metrics::axisIndependence.Push(newVariance);

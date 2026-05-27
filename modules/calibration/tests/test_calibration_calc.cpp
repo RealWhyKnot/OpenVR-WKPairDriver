@@ -199,6 +199,50 @@ TEST(CalibrationCalcTest, IgnoreOutliersKeepsCleanFitNearTruth) {
     EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 2.0);
 }
 
+TEST(CalibrationCalcTest, QualityReportPassesWellCoveredLegacyFit) {
+    const double yawRad = 15.0 * EIGEN_PI / 180.0;
+    Eigen::Vector3d trans(0.35, -0.08, 0.22);
+    Eigen::AffineCompact3d expected = MakeTransform(yawRad, 0.0, 0.0, trans);
+
+    CalibrationCalc calc;
+    for (auto& s : MakeSamplePairs(expected, kSampleCount, 0x5150)) {
+        calc.PushSample(s);
+    }
+
+    ASSERT_TRUE(calc.ComputeOneshot(false));
+    const CalibrationQualityReport report =
+        calc.EvaluateCalibrationQuality(calc.Transformation(), true, false);
+
+    EXPECT_EQ(report.validSampleCount, kSampleCount);
+    EXPECT_TRUE(report.legacyRmsPass);
+    EXPECT_TRUE(report.geometryPass);
+    EXPECT_TRUE(report.robustResidualPass);
+    EXPECT_TRUE(report.holdoutPass);
+    EXPECT_TRUE(report.shadowDynamicPass);
+    EXPECT_GT(report.validRotationPairCount, 10);
+    EXPECT_GE(report.translationRank, 2);
+    EXPECT_TRUE(std::isfinite(report.dynamicLimitM));
+    EXPECT_LT(report.residuals.rmsM, 1e-4);
+    EXPECT_LT(report.holdoutResiduals.rmsM, 1e-3);
+}
+
+TEST(CalibrationCalcTest, QualityReportRejectsLowGeometryEvenWhenRmsIsSmall) {
+    CalibrationCalc calc;
+    for (int i = 0; i < 30; i++) {
+        const Eigen::Vector3d pos(i * 0.01, 0.0, 0.0);
+        calc.PushSample(MakePoseSample(pos, pos, 0.0, i * 0.01));
+    }
+
+    const CalibrationQualityReport report =
+        calc.EvaluateCalibrationQuality(Eigen::AffineCompact3d::Identity(), true, false);
+
+    EXPECT_TRUE(report.legacyRmsPass);
+    EXPECT_FALSE(report.geometryPass);
+    EXPECT_FALSE(report.shadowDynamicPass);
+    EXPECT_EQ(report.validRotationPairCount, 0);
+    EXPECT_LT(report.residuals.rmsM, 1e-6);
+}
+
 TEST(CalibrationCalcTest, DoesNotCrashOnSmallSampleBuffer) {
     Eigen::AffineCompact3d expected = MakeTransform(0.2, 0.0, 0.0, Eigen::Vector3d(0.1, 0.0, -0.2));
 

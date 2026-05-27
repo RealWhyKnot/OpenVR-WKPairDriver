@@ -178,6 +178,17 @@ FloorProjectionAttempt ProjectAimToFloor(
     return bestFailed;
 }
 
+FloorProjectionAttempt ProjectPointerPoseToFloor(
+    const Eigen::Affine3d& pointerPose,
+    double floorY)
+{
+    return ProjectSingleRayToFloor(
+        pointerPose,
+        Eigen::Vector3d(0.0, 0.0, -1.0),
+        "tip:-Z",
+        floorY);
+}
+
 std::vector<BoundaryVertex> RemoveNearDuplicates(
     const std::vector<BoundaryVertex>& raw,
     double minDistanceMeters)
@@ -294,10 +305,25 @@ void CaptureSession::Finish() {
 bool CaptureSession::Tick(const Eigen::Affine3d& controllerPose,
                           bool triggerHeld,
                           double floorY) {
+    return AppendProjection(controllerPose, triggerHeld, floorY, false);
+}
+
+bool CaptureSession::TickPointerPose(const Eigen::Affine3d& pointerPose,
+                                     bool triggerHeld,
+                                     double floorY) {
+    return AppendProjection(pointerPose, triggerHeld, floorY, true);
+}
+
+bool CaptureSession::AppendProjection(const Eigen::Affine3d& poseForLog,
+                                      bool triggerHeld,
+                                      double floorY,
+                                      bool pointerOnly) {
     if (m_state != CaptureState::Active) return false;
     if (!triggerHeld) return false;
 
-    const FloorProjectionAttempt projection = ProjectAimToFloor(controllerPose, floorY);
+    const FloorProjectionAttempt projection = pointerOnly
+        ? ProjectPointerPoseToFloor(poseForLog, floorY)
+        : ProjectAimToFloor(poseForLog, floorY);
     if (projection.status != FloorProjectionStatus::Ok) {
         ++m_projectionRejectLogCount;
         if (m_projectionRejectLogCount == 1 || (m_projectionRejectLogCount % 120) == 0) {

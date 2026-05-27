@@ -68,6 +68,41 @@ struct Sample
 	Sample(Pose ref, Pose target, double timestamp) : valid(true), ref(ref), target(target), timestamp(timestamp){ }
 };
 
+struct CalibrationResidualStats {
+	int count = 0;
+	double medianM = std::numeric_limits<double>::infinity();
+	double madSigmaM = std::numeric_limits<double>::infinity();
+	double p90M = std::numeric_limits<double>::infinity();
+	double p95M = std::numeric_limits<double>::infinity();
+	double maxM = std::numeric_limits<double>::infinity();
+	double rmsM = std::numeric_limits<double>::infinity();
+	double outlierFraction = 0.0;
+};
+
+struct CalibrationQualityReport {
+	size_t sampleCount = 0;
+	int validSampleCount = 0;
+	int pairedSampleCount = 0;
+	int validRotationPairCount = 0;
+	int translationRank = 0;
+	Eigen::Vector3d refRangeM = Eigen::Vector3d::Zero();
+	Eigen::Vector3d targetRangeM = Eigen::Vector3d::Zero();
+	double refSpanM = 0.0;
+	double targetSpanM = 0.0;
+	double rotationSpanDeg = 0.0;
+	double rotationConditionRatio = 0.0;
+	double translationConditionRatio = 0.0;
+	double dynamicLimitM = std::numeric_limits<double>::infinity();
+	bool legacyRmsPass = false;
+	bool geometryPass = false;
+	bool robustResidualPass = false;
+	bool holdoutPass = false;
+	bool shadowDynamicPass = false;
+	Eigen::Vector3d posOffsetM = Eigen::Vector3d::Zero();
+	CalibrationResidualStats residuals;
+	CalibrationResidualStats holdoutResiduals;
+};
+
 class CalibrationCalc {
 public:
 	static const double AxisVarianceThreshold;
@@ -255,4 +290,13 @@ public:
 	// CLI can score arbitrary candidate transforms against the current sample
 	// buffer without needing to call the private ComputeIncremental flow.
 	[[nodiscard]] bool ValidateCalibration(const Eigen::AffineCompact3d& calibration, double *errorOut = nullptr, Eigen::Vector3d* posOffsetV = nullptr);
+	CalibrationQualityReport EvaluateCalibrationQuality(
+		const Eigen::AffineCompact3d& calibration,
+		bool includeHoldout = true,
+		bool ignoreOutliers = false) const;
+	void LogCalibrationQualitySnapshot(
+		const char* label,
+		const Eigen::AffineCompact3d& calibration,
+		bool includeHoldout,
+		bool ignoreOutliers) const;
 };

@@ -26,6 +26,7 @@ public:
     // a new vertex is appended when triggerHeld AND that floor point has moved
     // at least kVertexDebounceMeters from the last recorded position.
     bool Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
+    bool TickPointerPose(const Eigen::Affine3d& pointerPose, bool triggerHeld, double floorY = 0.0);
 
     CaptureState state() const { return m_state; }
     uint64_t sessionId() const { return m_sessionId; }
@@ -40,6 +41,12 @@ private:
     size_t m_debounceRejectLogCount = 0;
     std::vector<BoundaryVertex> m_raw;
     std::vector<BoundaryVertex> m_simplified;
+
+    bool AppendProjection(
+        const Eigen::Affine3d& poseForLog,
+        bool triggerHeld,
+        double floorY,
+        bool pointerOnly);
 
     // Minimum motion required to record a new vertex (avoids duplicate points
     // while the user holds still with the trigger pressed).
