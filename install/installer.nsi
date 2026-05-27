@@ -83,7 +83,7 @@ Var vrRuntimePath
 ; Always re-resolved at install time so a moved SteamVR is picked up.
 ; --------------------------------------------------------------------------
 !macro ResolveRuntimePath
-    nsExec::ExecToStack 'powershell -NoProfile -Command "try { ((Get-Content -Raw \"$env:LOCALAPPDATA\openvr\openvrpaths.vrpath\" | ConvertFrom-Json).runtime)[0] } catch { exit 1 }"'
+    nsExec::ExecToStack 'powershell -NoProfile -Command "try { ((Get-Content -Raw \"$$env:LOCALAPPDATA\openvr\openvrpaths.vrpath\" | ConvertFrom-Json).runtime)[0] } catch { exit 1 }"'
     Pop $0
     Pop $vrRuntimePath
     StrCmp $0 "0" +3
@@ -385,7 +385,7 @@ Section "Uninstall"
     ; Re-resolve SteamVR runtime path. Fall back to the registry value when
     ; openvrpaths.vrpath is missing (SteamVR uninstalled after WKOpenVR).
     ClearErrors
-    nsExec::ExecToStack 'powershell -NoProfile -Command "try { ((Get-Content -Raw \"$env:LOCALAPPDATA\openvr\openvrpaths.vrpath\" | ConvertFrom-Json).runtime)[0] } catch { exit 1 }"'
+    nsExec::ExecToStack 'powershell -NoProfile -Command "try { ((Get-Content -Raw \"$$env:LOCALAPPDATA\openvr\openvrpaths.vrpath\" | ConvertFrom-Json).runtime)[0] } catch { exit 1 }"'
     Pop $0
     Pop $vrRuntimePath
     StrCmp $0 "0" runtimeResolved
