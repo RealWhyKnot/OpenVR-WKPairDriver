@@ -10,6 +10,14 @@
 
 namespace wkopenvr::adb {
 
+struct SavedEndpointReconnectResult {
+    bool endpointPresent = false;
+    bool connected = false;
+    bool reapplyAttempted = false;
+    bool reapplyConfirmed = false;
+    bool timedOut = false;
+};
+
 // Run the gated auto-apply sequence on startup. Returns true if Guardian is
 // paused on the headset at the end of the sequence. All preconditions (flags,
 // boundary, endpoint) are checked internally; failures are logged and the
@@ -42,5 +50,12 @@ bool SetGuardianPauseValueOverride(AdbController& adb, int newValue);
 // the connection drops while guardianPauseEnabled is true. Re-attempts pause
 // on connection restore; does not spam adb on every tick.
 void TickGuardianHealth(AdbController& adb);
+
+// Try the saved Wi-Fi ADB endpoint without rerunning the USB wizard. When
+// reapplyGuardianPause is true and the saved profile says Guardian should be
+// paused, this also re-runs the pause sequence after connecting.
+SavedEndpointReconnectResult ReconnectSavedEndpoint(
+    AdbController& adb,
+    bool reapplyGuardianPause);
 
 } // namespace wkopenvr::adb

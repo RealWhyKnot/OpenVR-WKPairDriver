@@ -28,7 +28,9 @@ char s_wifiCode[16] = {};
 char s_wifiConnectEndpoint[64] = {};
 std::string s_guardianError;
 std::string s_adbCleanupStatus;
+std::string s_adbReconnectStatus;
 bool s_adbCleanupHadWarning = false;
+bool s_adbReconnectHadWarning = false;
 
 wkopenvr::adb::SetupWizard* WizardPtr()
 {
@@ -111,6 +113,42 @@ void DrawAdbCleanupConfirmModal()
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
+}
+
+void TryReconnectSavedEndpointFromUi()
+{
+    const auto result = wkopenvr::adb::ReconnectSavedEndpoint(
+        CCal_GetAdb(),
+        CalCtx.adb.guardianPauseEnabled);
+
+    if (!result.endpointPresent) {
+        s_adbReconnectHadWarning = true;
+        s_adbReconnectStatus = "No saved endpoint is available yet. Run ADB setup once first.";
+        return;
+    }
+
+    if (!result.connected) {
+        s_adbReconnectHadWarning = true;
+        s_adbReconnectStatus =
+            "Saved endpoint did not answer. If the headset rebooted, Quest usually leaves classic Wi-Fi ADB mode; plug in USB and re-run setup once to enable Wi-Fi ADB again.";
+        return;
+    }
+
+    CalCtx.adb.setupCompleted = true;
+    SaveProfile(CalCtx);
+    s_guardianError.clear();
+    s_adbReconnectHadWarning = false;
+
+    if (result.reapplyAttempted && !result.reapplyConfirmed) {
+        s_adbReconnectHadWarning = true;
+        s_adbReconnectStatus =
+            "Reconnected to the saved endpoint, but Guardian pause did not confirm. Try Pause Quest Guardian again or re-run setup.";
+    } else if (result.reapplyConfirmed) {
+        s_adbReconnectStatus =
+            "Reconnected to the saved endpoint and re-applied the Guardian pause.";
+    } else {
+        s_adbReconnectStatus = "Reconnected to the saved endpoint.";
+    }
 }
 
 } // namespace
@@ -445,6 +483,17 @@ void CCal_DrawGuardianSection(ImVec2 panelSize)
 
     ImGui::Spacing();
 
+    if (!adbConn && !CalCtx.adb.savedEndpoint.empty()) {
+        if (ImGui::Button("Reconnect saved endpoint##adb_reconnect_saved")) {
+            TryReconnectSavedEndpointFromUi();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Try the saved Wi-Fi ADB endpoint without repeating the USB setup. If the Quest rebooted, Wi-Fi ADB may need to be enabled over USB again.");
+        }
+        ImGui::SameLine();
+    }
+
     if (!CalCtx.adb.setupCompleted || !adbConn) {
         if (ImGui::Button("Connect to Quest via ADB...")) {
             WizardPtr()->Reset();
@@ -529,6 +578,17 @@ void CCal_DrawGuardianSection(ImVec2 panelSize)
                 pal.bannerWarnBg, pal.bannerWarnTitle, pal.bannerWarnDetail);
         } else {
             openvr_pair::overlay::ui::DrawInfoBanner("ADB cleanup", s_adbCleanupStatus.c_str());
+        }
+    }
+
+    if (!s_adbReconnectStatus.empty()) {
+        ImGui::Spacing();
+        if (s_adbReconnectHadWarning) {
+            openvr_pair::overlay::ui::DrawBanner(
+                "ADB reconnect", s_adbReconnectStatus.c_str(),
+                pal.bannerWarnBg, pal.bannerWarnTitle, pal.bannerWarnDetail);
+        } else {
+            openvr_pair::overlay::ui::DrawInfoBanner("ADB reconnect", s_adbReconnectStatus.c_str());
         }
     }
 

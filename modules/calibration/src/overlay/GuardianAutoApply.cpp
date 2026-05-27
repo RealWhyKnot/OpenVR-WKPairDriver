@@ -162,6 +162,47 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
 
 namespace wkopenvr::adb {
 
+SavedEndpointReconnectResult ReconnectSavedEndpoint(
+    AdbController& adb,
+    bool reapplyGuardianPause)
+{
+    SavedEndpointReconnectResult out;
+    out.endpointPresent = !CalCtx.adb.savedEndpoint.empty();
+    if (!out.endpointPresent) {
+        Metrics::adbConnected.Push(false);
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "saved_endpoint_reconnect skipped reason=no_endpoint");
+        return out;
+    }
+
+    openvr_pair::common::DiagnosticLog(
+        "guardian-auto", "saved_endpoint_reconnect start reapply=%d endpoint_set=1",
+        reapplyGuardianPause ? 1 : 0);
+    out.connected = adb.Connect(CalCtx.adb.savedEndpoint);
+    Metrics::adbConnected.Push(out.connected);
+
+    if (!out.connected) {
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "saved_endpoint_reconnect failed");
+        return out;
+    }
+
+    if (reapplyGuardianPause && CalCtx.adb.guardianPauseEnabled) {
+        out.reapplyAttempted = true;
+        bool aborted = false;
+        out.reapplyConfirmed = RunPauseSequence(adb, true, &aborted);
+        out.timedOut = aborted;
+    }
+
+    openvr_pair::common::DiagnosticLog(
+        "guardian-auto",
+        "saved_endpoint_reconnect connected=1 reapply_attempted=%d reapply_confirmed=%d timed_out=%d",
+        out.reapplyAttempted ? 1 : 0,
+        out.reapplyConfirmed ? 1 : 0,
+        out.timedOut ? 1 : 0);
+    return out;
+}
+
 bool MaybeAutoApplyAtStart(AdbController& adb)
 {
     if (!CalCtx.adb.autoApplyOnStart) {
@@ -319,6 +360,19 @@ void TickGuardianHealth(AdbController& adb)
 
     const bool connected = adb.Connected();
     Metrics::adbConnected.Push(connected);
+    if (!connected && !CalCtx.adb.savedEndpoint.empty()
+        && (CalCtx.adb.setupCompleted || CalCtx.adb.guardianPauseEnabled)) {
+        const auto reconnect = ReconnectSavedEndpoint(
+            adb,
+            CalCtx.adb.guardianPauseEnabled);
+        if (!reconnect.connected && s_wasConnected && CalCtx.adb.guardianPauseEnabled) {
+            fprintf(stderr,
+                    "[guardian-auto] ADB connection lost while guardianPauseEnabled=true\n");
+            Metrics::WriteLogAnnotation("[guardian-auto] adb disconnected during session");
+        }
+        s_wasConnected = reconnect.connected;
+        return;
+    }
 
     if (!connected && s_wasConnected && CalCtx.adb.guardianPauseEnabled) {
         fprintf(stderr,

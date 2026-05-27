@@ -303,6 +303,63 @@ TEST(GuardianAutoApply, SetGuardianPauseValueOverride_returns_confirmed_state)
     EXPECT_TRUE(Metrics::guardianPaused.last());
 }
 
+TEST(GuardianAutoApply, ReconnectSavedEndpoint_connects_without_rerunning_setup)
+{
+    ResetCalCtx(CalCtx);
+    CalCtx.adb.savedEndpoint = "192.168.1.2:5555";
+
+    StubAdb adb;
+    const auto result = wkopenvr::adb::ReconnectSavedEndpoint(
+        adb,
+        /*reapplyGuardianPause=*/false);
+
+    EXPECT_TRUE(result.endpointPresent);
+    EXPECT_TRUE(result.connected);
+    EXPECT_FALSE(result.reapplyAttempted);
+    EXPECT_EQ(adb.calls.connectCalls, 1);
+    EXPECT_EQ(adb.calls.lastEndpoint, "192.168.1.2:5555");
+    EXPECT_TRUE(Metrics::adbConnected.last());
+    EXPECT_EQ(adb.calls.setGuardianCalls, 0);
+}
+
+TEST(GuardianAutoApply, ReconnectSavedEndpoint_reapplies_guardian_when_enabled)
+{
+    ResetCalCtx(CalCtx);
+    SetupValidCalCtx(CalCtx);
+
+    StubAdb adb;
+    adb.getGuardianResult = 1;
+    const auto result = wkopenvr::adb::ReconnectSavedEndpoint(
+        adb,
+        /*reapplyGuardianPause=*/true);
+
+    EXPECT_TRUE(result.connected);
+    EXPECT_TRUE(result.reapplyAttempted);
+    EXPECT_TRUE(result.reapplyConfirmed);
+    EXPECT_EQ(adb.calls.connectCalls, 2);
+    EXPECT_EQ(adb.calls.setGuardianCalls, 1);
+    EXPECT_EQ(adb.calls.getGuardianCalls, 1);
+    EXPECT_TRUE(Metrics::guardianPaused.last());
+}
+
+TEST(GuardianAutoApply, ReconnectSavedEndpoint_reports_failed_connect)
+{
+    ResetCalCtx(CalCtx);
+    CalCtx.adb.savedEndpoint = "192.168.1.2:5555";
+
+    StubAdb adb;
+    adb.connectResult = false;
+    const auto result = wkopenvr::adb::ReconnectSavedEndpoint(
+        adb,
+        /*reapplyGuardianPause=*/true);
+
+    EXPECT_TRUE(result.endpointPresent);
+    EXPECT_FALSE(result.connected);
+    EXPECT_FALSE(result.reapplyAttempted);
+    EXPECT_EQ(adb.calls.connectCalls, 1);
+    EXPECT_FALSE(Metrics::adbConnected.last());
+}
+
 // ---------------------------------------------------------------------------
 // TickGuardianHealth cadence test
 // ---------------------------------------------------------------------------

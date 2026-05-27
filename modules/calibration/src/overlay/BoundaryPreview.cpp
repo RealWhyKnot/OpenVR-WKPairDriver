@@ -138,28 +138,6 @@ void Destroy()
     openvr_pair::common::DiagnosticLog("boundary-preview", "destroyed");
 }
 
-vr::HmdMatrix34_t FloorPreviewTransform(double centerX, double floorY, double centerZ)
-{
-    vr::HmdMatrix34_t mat{};
-    // Rotate the overlay onto the floor: local X -> world X, local Y -> -world Z,
-    // local +Z normal -> world up.
-    mat.m[0][0] = 1.0f;
-    mat.m[0][1] = 0.0f;
-    mat.m[0][2] = 0.0f;
-    mat.m[0][3] = static_cast<float>(centerX);
-
-    mat.m[1][0] = 0.0f;
-    mat.m[1][1] = 0.0f;
-    mat.m[1][2] = 1.0f;
-    mat.m[1][3] = static_cast<float>(floorY + 0.025);
-
-    mat.m[2][0] = 0.0f;
-    mat.m[2][1] = -1.0f;
-    mat.m[2][2] = 0.0f;
-    mat.m[2][3] = static_cast<float>(centerZ);
-    return mat;
-}
-
 } // namespace
 
 BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
@@ -235,6 +213,36 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     return raster;
 }
 
+vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin()
+{
+    return vr::TrackingUniverseStanding;
+}
+
+vr::HmdMatrix34_t BoundaryPreviewTransform(
+    double centerX,
+    double floorY,
+    double centerZ)
+{
+    vr::HmdMatrix34_t mat{};
+    // Rotate the overlay onto the floor: local X -> world X, local Y -> -world Z,
+    // local +Z normal -> world up.
+    mat.m[0][0] = 1.0f;
+    mat.m[0][1] = 0.0f;
+    mat.m[0][2] = 0.0f;
+    mat.m[0][3] = static_cast<float>(centerX);
+
+    mat.m[1][0] = 0.0f;
+    mat.m[1][1] = 0.0f;
+    mat.m[1][2] = 1.0f;
+    mat.m[1][3] = static_cast<float>(floorY + 0.025);
+
+    mat.m[2][0] = 0.0f;
+    mat.m[2][1] = -1.0f;
+    mat.m[2][2] = 0.0f;
+    mat.m[2][3] = static_cast<float>(centerZ);
+    return mat;
+}
+
 void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<BoundaryVertex>& vertices,
@@ -272,13 +280,13 @@ void TickBoundaryPreview(
     vr::VROverlay()->SetOverlayWidthInMeters(
         s.handle,
         static_cast<float>(raster.plane.spanMeters));
-    vr::HmdMatrix34_t mat = FloorPreviewTransform(
+    vr::HmdMatrix34_t mat = BoundaryPreviewTransform(
         raster.plane.centerX,
         floorY,
         raster.plane.centerZ);
     vr::VROverlay()->SetOverlayTransformAbsolute(
         s.handle,
-        vr::TrackingUniverseRawAndUncalibrated,
+        BoundaryPreviewTrackingOrigin(),
         &mat);
     vr::VROverlay()->ShowOverlay(s.handle);
 }

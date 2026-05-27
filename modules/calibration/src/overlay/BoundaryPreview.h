@@ -2,6 +2,8 @@
 
 #include "Calibration.h"
 
+#include <openvr.h>
+
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +30,13 @@ BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
 BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     const std::vector<BoundaryVertex>& vertices,
     bool closeLoop);
+
+vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin();
+
+vr::HmdMatrix34_t BoundaryPreviewTransform(
+    double centerX,
+    double floorY,
+    double centerZ);
 
 void TickBoundaryPreview(
     bool wantVisible,

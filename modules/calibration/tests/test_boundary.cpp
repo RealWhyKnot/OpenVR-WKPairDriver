@@ -421,3 +421,16 @@ TEST(BoundaryPreviewTest, RasterMarksLivePathPixels) {
     EXPECT_GT(openAlpha, 0u);
     EXPECT_GT(closedAlpha, openAlpha);
 }
+
+TEST(BoundaryPreviewTest, UsesStandingTrackingUniverseForFloorOverlay) {
+    EXPECT_EQ(BoundaryPreviewTrackingOrigin(), vr::TrackingUniverseStanding);
+
+    const auto mat = BoundaryPreviewTransform(1.25, -0.10, -2.50);
+    EXPECT_NEAR(mat.m[0][3], 1.25f, 1e-6f);
+    EXPECT_NEAR(mat.m[1][3], -0.075f, 1e-6f);
+    EXPECT_NEAR(mat.m[2][3], -2.50f, 1e-6f);
+
+    // Local overlay X lies on world X, and local Y lies on world -Z.
+    EXPECT_NEAR(mat.m[0][0], 1.0f, 1e-6f);
+    EXPECT_NEAR(mat.m[2][1], -1.0f, 1e-6f);
+}
