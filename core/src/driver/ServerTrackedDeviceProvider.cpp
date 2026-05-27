@@ -794,28 +794,22 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			vr::DriverPose_t synthPose{};
 			const bool ok = driver_synth::Compose(
 				synthState, trackerCopy, synthNow, synthPose);
+			static std::atomic<int> s_synthPoseState{0}; // 0 unknown, 1 synth, 2 fallback
 
 			if (ok) {
-				// Log first successful synthesis per session.
-				static std::atomic<bool> s_synthActiveLogged{false};
-				if (!s_synthActiveLogged.exchange(true, std::memory_order_relaxed)) {
+				// Log each transition into tracker-driven synthesis so recovery
+				// after an occlusion is visible without per-frame noise.
+				if (s_synthPoseState.exchange(1, std::memory_order_relaxed) != 1) {
 					LOG("[driver-synth] active: deviceID=%d", hmState.deviceId);
-				}
-				{
-					std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
-					m_lastSynthHmdSnap.pose = synthPose;
-					m_lastSynthHmdSnap.capturedAt = synthNow;
-					m_lastSynthHmdSnap.capturedForDeviceId = hmState.deviceId;
-					m_lastSynthHmdSnap.valid = true;
 				}
 				pose = synthPose;
 				// The synthesized pose takes over; skip the normal
 				// calibration/quash path by returning early.
 				return true;
 			}
-			// Synthesis failed. In DriverSynth mode, a stale tracker should not
-			// silently hand control back to Quest SLAM once a good synthesized
-			// pose exists; hold the last synthesized pose instead.
+			// Synthesis failed. DriverSynth intentionally falls through to the
+			// normal HMD pose path so the Quest's self-tracking remains the
+			// fallback while continuous calibration keeps the fallback aligned.
 			{
 				auto markReasonLogged = [](std::atomic<uint8_t>& flags, uint8_t bit) {
 					uint8_t observed = flags.load(std::memory_order_relaxed);
@@ -848,29 +842,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				if (markReasonLogged(s_loggedReasons, bit)) {
 					LOG("[driver-synth] fallback: reason='%s'", reason);
 				}
-
-				vr::DriverPose_t heldPose{};
-				bool haveHeldPose = false;
-				{
-					std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
-					if (m_lastSynthHmdSnap.valid
-						&& m_lastSynthHmdSnap.capturedForDeviceId == synthState.deviceId) {
-						heldPose = m_lastSynthHmdSnap.pose;
-						haveHeldPose = true;
-					}
-				}
-				if (haveHeldPose) {
-					static std::atomic<uint8_t> s_loggedHoldReasons{0};
-					if (markReasonLogged(s_loggedHoldReasons, bit)) {
-						LOG("[driver-synth] holding last synthesized HMD pose: reason='%s'", reason);
-					}
-					heldPose.vecVelocity[0] = heldPose.vecVelocity[1] = heldPose.vecVelocity[2] = 0.0;
-					heldPose.vecAngularVelocity[0] = heldPose.vecAngularVelocity[1] = heldPose.vecAngularVelocity[2] = 0.0;
-					heldPose.vecAcceleration[0] = heldPose.vecAcceleration[1] = heldPose.vecAcceleration[2] = 0.0;
-					heldPose.vecAngularAcceleration[0] = heldPose.vecAngularAcceleration[1] = heldPose.vecAngularAcceleration[2] = 0.0;
-					heldPose.poseTimeOffset = 0.0;
-					pose = heldPose;
-					return true;
+				if (s_synthPoseState.exchange(2, std::memory_order_relaxed) != 2) {
+					LOG("[driver-synth] using Quest HMD fallback: reason='%s'", reason);
 				}
 			}
 			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_DRIVER_SYNTH_FALLBACK);
@@ -1180,7 +1153,6 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 	if (stateChanged) {
 		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
 		m_trackerSnap = driver_synth::TrackerSnapshot{};
-		m_lastSynthHmdSnap = driver_synth::TrackerSnapshot{};
 	}
 #else
 	(void)cfg;

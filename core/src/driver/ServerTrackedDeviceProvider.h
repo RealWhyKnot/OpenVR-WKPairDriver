@@ -303,10 +303,6 @@ private:
 	mutable std::mutex               m_trackerSnapMutex;
 	driver_synth::TrackerSnapshot    m_trackerSnap;
 
-	// Last good synthesized HMD pose. When DriverSynth owns the HMD and the
-	// head tracker goes stale, the driver holds this pose instead of silently
-	// falling back to Quest SLAM. Same mutex as the tracker snapshot.
-	driver_synth::TrackerSnapshot    m_lastSynthHmdSnap;
 #endif // WKOPENVR_BUILD_IS_DEV
 
 	// Finger-smoothing config packed into an atomic uint64_t. Single-writer

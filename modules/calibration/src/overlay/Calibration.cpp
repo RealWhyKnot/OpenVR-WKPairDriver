@@ -2343,58 +2343,41 @@ void CalibrationTick(double time)
 	{
 		const bool targetMatches =
 			wkopenvr::headmount::HeadMountMatchesContinuousTarget(ctx);
-		const auto synthDecision =
-			spacecal::headmount::EvaluateDriverSynthContinuousSuspend(
+		const auto synthStatus =
+			spacecal::headmount::EvaluateDriverSynthContinuousStatus(
 				ctx.headMount,
 				/*inContinuous=*/true,
 				targetMatches,
 				ctx.devicePoses,
 				vr::k_unMaxTrackedDeviceCount);
 
-		static bool s_driverSynthSolveSuspended = false;
-		static double s_lastDriverSynthSuspendLog = -1e9;
+		static bool s_lastDriverSynthReady = false;
+		static double s_lastDriverSynthStatusLog = -1e9;
 		static std::string s_lastDriverSynthReason;
 		const bool reasonChanged =
-			s_lastDriverSynthReason != synthDecision.reason;
+			s_lastDriverSynthReason != synthStatus.reason;
 		const bool shouldLog =
 			reasonChanged
-			|| synthDecision.suspend != s_driverSynthSolveSuspended
-			|| (time - s_lastDriverSynthSuspendLog) >= 5.0;
-
-		if (synthDecision.suspend) {
-			if (shouldLog) {
-				char sbuf[320];
-				snprintf(sbuf, sizeof sbuf,
-					"continuous_solve_suspended: reason=head_mount_driver_synth"
-					" target_matches=%d deviceID=%d hmd_proxy_delta_cm=%.2f",
-					(int)targetMatches,
-					(int)ctx.headMount.deviceID,
-					synthDecision.hmdProxyDeltaM * 100.0);
-				Metrics::WriteLogAnnotation(sbuf);
-				s_lastDriverSynthSuspendLog = time;
-				s_lastDriverSynthReason = synthDecision.reason;
-			}
-			s_driverSynthSolveSuspended = true;
-			ctx.wantedUpdateInterval = 0.1;
-			return;
-		}
+			|| synthStatus.ready != s_lastDriverSynthReady
+			|| (time - s_lastDriverSynthStatusLog) >= 5.0;
 
 		if (shouldLog) {
 			char sbuf[360];
 			snprintf(sbuf, sizeof sbuf,
-				"continuous_solve_not_suspended: mode=driver_synth reason=%s"
+				"continuous_solve_running: mode=driver_synth synth_ready=%d reason=%s"
 				" target_matches=%d deviceID=%d hmd_proxy_delta_cm=%.2f",
-				synthDecision.reason,
+				(int)synthStatus.ready,
+				synthStatus.reason,
 				(int)targetMatches,
 				(int)ctx.headMount.deviceID,
-				synthDecision.hmdProxyDeltaM >= 0.0
-					? synthDecision.hmdProxyDeltaM * 100.0
+				synthStatus.hmdProxyDeltaM >= 0.0
+					? synthStatus.hmdProxyDeltaM * 100.0
 					: -1.0);
 			Metrics::WriteLogAnnotation(sbuf);
-			s_lastDriverSynthSuspendLog = time;
-			s_lastDriverSynthReason = synthDecision.reason;
+			s_lastDriverSynthStatusLog = time;
+			s_lastDriverSynthReason = synthStatus.reason;
 		}
-		s_driverSynthSolveSuspended = false;
+		s_lastDriverSynthReady = synthStatus.ready;
 	}
 #endif
 

@@ -15,10 +15,8 @@
 
 namespace spacecal::headmount {
 
-constexpr double kDriverSynthMaxHeadProxyDeltaM = 1.0;
-
-struct DriverSynthSuspendDecision {
-    bool        suspend = false;
+struct DriverSynthContinuousStatus {
+    bool        ready = false;
     const char* reason = "unknown";
     double      hmdProxyDeltaM = -1.0;
 };
@@ -89,53 +87,53 @@ inline bool PoseIsRunningOk(const vr::DriverPose_t& pose)
         && pose.result == vr::ETrackingResult::TrackingResult_Running_OK;
 }
 
-inline DriverSynthSuspendDecision EvaluateDriverSynthContinuousSuspend(
+inline DriverSynthContinuousStatus EvaluateDriverSynthContinuousStatus(
     const HeadMountConfig& cfg,
     bool inContinuous,
     bool targetMatchesHeadMount,
     const vr::DriverPose_t* poseArray,
     uint32_t poseArraySize)
 {
-    DriverSynthSuspendDecision decision{};
+    DriverSynthContinuousStatus status{};
 
     if (!inContinuous) {
-        decision.reason = "not_continuous";
-        return decision;
+        status.reason = "not_continuous";
+        return status;
     }
     if (cfg.mode != HeadMountMode::DriverSynth) {
-        decision.reason = "mode_not_driver_synth";
-        return decision;
+        status.reason = "mode_not_driver_synth";
+        return status;
     }
     if (!cfg.offsetCalibrated) {
-        decision.reason = "offset_not_calibrated";
-        return decision;
+        status.reason = "offset_not_calibrated";
+        return status;
     }
     if (!targetMatchesHeadMount) {
-        decision.reason = "target_mismatch";
-        return decision;
+        status.reason = "target_mismatch";
+        return status;
     }
     if (!poseArray) {
-        decision.reason = "pose_array_null";
-        return decision;
+        status.reason = "pose_array_null";
+        return status;
     }
     if (cfg.deviceID < 0 || (uint32_t)cfg.deviceID >= poseArraySize) {
-        decision.reason = "tracker_device_invalid";
-        return decision;
+        status.reason = "tracker_device_invalid";
+        return status;
     }
     if (vr::k_unTrackedDeviceIndex_Hmd >= poseArraySize) {
-        decision.reason = "hmd_device_invalid";
-        return decision;
+        status.reason = "hmd_device_invalid";
+        return status;
     }
 
     const vr::DriverPose_t& tracker = poseArray[cfg.deviceID];
     const vr::DriverPose_t& hmd = poseArray[vr::k_unTrackedDeviceIndex_Hmd];
     if (!PoseIsRunningOk(tracker)) {
-        decision.reason = "tracker_pose_invalid";
-        return decision;
+        status.reason = "tracker_pose_invalid";
+        return status;
     }
     if (!PoseIsRunningOk(hmd)) {
-        decision.reason = "hmd_pose_invalid";
-        return decision;
+        status.reason = "hmd_pose_invalid";
+        return status;
     }
 
     const Eigen::AffineCompact3d proxyHead =
@@ -144,19 +142,15 @@ inline DriverSynthSuspendDecision EvaluateDriverSynthContinuousSuspend(
         ComputeHeadWorldPose(hmd, Eigen::AffineCompact3d::Identity());
     const double deltaM =
         (proxyHead.translation() - hmdWorld.translation()).norm();
-    decision.hmdProxyDeltaM = deltaM;
+    status.hmdProxyDeltaM = deltaM;
     if (!std::isfinite(deltaM)) {
-        decision.reason = "delta_non_finite";
-        return decision;
-    }
-    if (deltaM > kDriverSynthMaxHeadProxyDeltaM) {
-        decision.reason = "sanity_delta_too_large";
-        return decision;
+        status.reason = "delta_non_finite";
+        return status;
     }
 
-    decision.suspend = true;
-    decision.reason = "driver_synth_ready";
-    return decision;
+    status.ready = true;
+    status.reason = "driver_synth_ready";
+    return status;
 }
 
 // Attempt to resolve a head-mount tracker to an OpenVR device ID from a

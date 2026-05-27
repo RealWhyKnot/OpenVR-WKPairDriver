@@ -286,7 +286,7 @@ TEST(HeadMountSamplingTest, NonRunningOkResultIsInvalid)
     EXPECT_FALSE(hm::IsTrackerValidForSampling(cfg, poses, 4));
 }
 
-TEST(HeadMountSamplingTest, DriverSynthReadySuspendsContinuousSolver)
+TEST(HeadMountSamplingTest, DriverSynthReadyKeepsContinuousSolverRunning)
 {
     vr::DriverPose_t poses[4];
     poses[0] = MakeValidPoseAt(0.0, 1.7, 0.0);
@@ -298,19 +298,19 @@ TEST(HeadMountSamplingTest, DriverSynthReadySuspendsContinuousSolver)
     cfg.offsetCalibrated = true;
     cfg.headFromTracker = Eigen::AffineCompact3d::Identity();
 
-    const auto decision = hm::EvaluateDriverSynthContinuousSuspend(
+    const auto status = hm::EvaluateDriverSynthContinuousStatus(
         cfg,
         /*inContinuous=*/true,
         /*targetMatchesHeadMount=*/true,
         poses,
         4);
 
-    EXPECT_TRUE(decision.suspend);
-    EXPECT_STREQ(decision.reason, "driver_synth_ready");
-    EXPECT_NEAR(decision.hmdProxyDeltaM, 0.0, 1e-10);
+    EXPECT_TRUE(status.ready);
+    EXPECT_STREQ(status.reason, "driver_synth_ready");
+    EXPECT_NEAR(status.hmdProxyDeltaM, 0.0, 1e-10);
 }
 
-TEST(HeadMountSamplingTest, AutoPairedDoesNotSuspendContinuousSolver)
+TEST(HeadMountSamplingTest, AutoPairedNotDriverSynthStatus)
 {
     vr::DriverPose_t poses[4];
     poses[0] = MakeValidPoseAt(0.0, 1.7, 0.0);
@@ -321,18 +321,18 @@ TEST(HeadMountSamplingTest, AutoPairedDoesNotSuspendContinuousSolver)
     cfg.deviceID = 2;
     cfg.offsetCalibrated = true;
 
-    const auto decision = hm::EvaluateDriverSynthContinuousSuspend(
+    const auto status = hm::EvaluateDriverSynthContinuousStatus(
         cfg,
         /*inContinuous=*/true,
         /*targetMatchesHeadMount=*/true,
         poses,
         4);
 
-    EXPECT_FALSE(decision.suspend);
-    EXPECT_STREQ(decision.reason, "mode_not_driver_synth");
+    EXPECT_FALSE(status.ready);
+    EXPECT_STREQ(status.reason, "mode_not_driver_synth");
 }
 
-TEST(HeadMountSamplingTest, DriverSynthTargetMismatchDoesNotSuspend)
+TEST(HeadMountSamplingTest, DriverSynthTargetMismatchNotReady)
 {
     vr::DriverPose_t poses[4];
     poses[0] = MakeValidPoseAt(0.0, 1.7, 0.0);
@@ -343,18 +343,18 @@ TEST(HeadMountSamplingTest, DriverSynthTargetMismatchDoesNotSuspend)
     cfg.deviceID = 2;
     cfg.offsetCalibrated = true;
 
-    const auto decision = hm::EvaluateDriverSynthContinuousSuspend(
+    const auto status = hm::EvaluateDriverSynthContinuousStatus(
         cfg,
         /*inContinuous=*/true,
         /*targetMatchesHeadMount=*/false,
         poses,
         4);
 
-    EXPECT_FALSE(decision.suspend);
-    EXPECT_STREQ(decision.reason, "target_mismatch");
+    EXPECT_FALSE(status.ready);
+    EXPECT_STREQ(status.reason, "target_mismatch");
 }
 
-TEST(HeadMountSamplingTest, DriverSynthSanityDeltaDoesNotSuspend)
+TEST(HeadMountSamplingTest, DriverSynthLargeHeadDeltaStillKeepsSolverRunning)
 {
     vr::DriverPose_t poses[4];
     poses[0] = MakeValidPoseAt(0.0, 1.7, 0.0);
@@ -366,14 +366,14 @@ TEST(HeadMountSamplingTest, DriverSynthSanityDeltaDoesNotSuspend)
     cfg.offsetCalibrated = true;
     cfg.headFromTracker = Eigen::AffineCompact3d::Identity();
 
-    const auto decision = hm::EvaluateDriverSynthContinuousSuspend(
+    const auto status = hm::EvaluateDriverSynthContinuousStatus(
         cfg,
         /*inContinuous=*/true,
         /*targetMatchesHeadMount=*/true,
         poses,
         4);
 
-    EXPECT_FALSE(decision.suspend);
-    EXPECT_STREQ(decision.reason, "sanity_delta_too_large");
-    EXPECT_NEAR(decision.hmdProxyDeltaM, 2.0, 1e-10);
+    EXPECT_TRUE(status.ready);
+    EXPECT_STREQ(status.reason, "driver_synth_ready");
+    EXPECT_NEAR(status.hmdProxyDeltaM, 2.0, 1e-10);
 }
