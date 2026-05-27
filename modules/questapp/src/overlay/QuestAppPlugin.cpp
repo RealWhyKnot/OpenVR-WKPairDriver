@@ -247,7 +247,7 @@ void QuestAppPlugin::DrawLaunchTargetPicker()
             ImGui::PopID();
         }
         if (detectedPackages_.empty()) {
-            ImGui::TextDisabled("No packages listed. Check USB ADB authorization.");
+            ImGui::TextDisabled("No packages listed. Check ADB authorization or Wi-Fi ADB connection.");
         }
         ImGui::EndChild();
     }
@@ -260,8 +260,10 @@ void QuestAppPlugin::DrawLaunchTargetPicker()
     ImGui::SameLine();
     if (wkopenvr::questapp::NeedsCompanionReinstall(cfg_)) {
         ImGui::TextDisabled("Reinstall required before settings can be sent.");
+    } else if (wkopenvr::questapp::CanContactCompanion(cfg_)) {
+        ImGui::TextDisabled("Uses the paired headset companion over Wi-Fi when reachable.");
     } else {
-        ImGui::TextDisabled("Requires USB ADB for this setup step.");
+        ImGui::TextDisabled("Install the headset companion before settings can be sent.");
     }
 }
 
