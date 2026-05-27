@@ -7,6 +7,7 @@ body:
     attributes:
       value: |
         Before filing, check the README and wiki: https://github.com/RealWhyKnot/WKOpenVR/wiki
+        If WKOpenVR can open, use **Logs -> Report bug** first. It prepares a sanitized report text file from recent logs and opens this form.
 
   - type: textarea
     id: what-happened
@@ -45,8 +46,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs or console output
-      description: Paste relevant logs, build errors, stack traces, or screenshots. Redact tokens and private URLs.
+      label: Diagnostic report, logs, or console output
+      description: Attach the sanitized WKOpenVR bug report .txt file if you used Logs -> Report bug. Otherwise paste relevant logs, build errors, stack traces, or screenshots. Redact tokens and private URLs.
       render: text
     validations:
       required: false

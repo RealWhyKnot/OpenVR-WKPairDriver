@@ -141,6 +141,7 @@ void SetupWizard::Reset()
     m_step = WizardStep::Start;
     m_results.fill(StepResult{StepStatus::NotStarted, {}});
     m_discoveredEndpoint.clear();
+    m_manualWirelessPairing = false;
     fprintf(stderr, "[adb-wizard] reset to Start\n");
 }
 
@@ -166,8 +167,25 @@ StepResult SetupWizard::Commit(WizardStep step, StepResult result)
 void SetupWizard::UseWirelessFallback()
 {
     m_discoveredEndpoint.clear();
+    m_manualWirelessPairing = true;
     m_step = WizardStep::WifiPair;
-    fprintf(stderr, "[adb-wizard] USB authorization bypassed -> wireless fallback\n");
+    fprintf(stderr, "[adb-wizard] USB authorization bypassed -> manual wireless pairing fallback\n");
+}
+
+void SetupWizard::UseCurrentAdbConnection()
+{
+    m_manualWirelessPairing = false;
+    m_results[static_cast<int>(WizardStep::CheckBinary)] =
+        StepResult{StepStatus::Passed, "Skipped because ADB is already connected."};
+    m_results[static_cast<int>(WizardStep::CheckDevAccount)] =
+        StepResult{StepStatus::Passed, "Skipped because ADB already sees the Quest."};
+    m_results[static_cast<int>(WizardStep::CheckDevMode)] =
+        StepResult{StepStatus::Passed, "Skipped because USB debugging is already authorized."};
+    m_results[static_cast<int>(WizardStep::UsbPair)] =
+        StepResult{StepStatus::Passed, "Skipped because ADB is already connected."};
+    m_step = WizardStep::WifiTcpip;
+    fprintf(stderr, "[adb-wizard] current ADB connection accepted -> step %d\n",
+            static_cast<int>(m_step));
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +388,7 @@ StepResult SetupWizard::RunWifiTcpip()
     }
 
     r.status = StepStatus::Passed;
-    r.detail = "Wi-Fi ADB port set to 5555.";
+    r.detail = "Wi-Fi ADB port set to 5555. This USB-authorized path does not need a pairing code.";
     return Commit(WizardStep::WifiTcpip, r);
 }
 
@@ -503,8 +521,16 @@ StepResult SetupWizard::RunWifiDiscover()
 
     m_discoveredEndpoint = ip + ":5555";
     r.status = StepStatus::Passed;
-    r.detail = "Quest IP: " + ip + " (endpoint: " + m_discoveredEndpoint + ").";
-    return Commit(WizardStep::WifiDiscover, r);
+    r.detail = "Quest IP: " + ip + " (endpoint: " + m_discoveredEndpoint + "). Pairing code not required.";
+    StepResult committed = Commit(WizardStep::WifiDiscover, r);
+    if (committed.status == StepStatus::Passed && !m_manualWirelessPairing) {
+        m_results[static_cast<int>(WizardStep::WifiPair)] =
+            StepResult{StepStatus::Passed, "Skipped for USB-authorized tcpip wireless ADB."};
+        m_step = WizardStep::WifiVerify;
+        fprintf(stderr, "[adb-wizard] skipping manual wireless pair -> now at step %d\n",
+                static_cast<int>(m_step));
+    }
+    return committed;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +593,7 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
     std::string endpoint = endpointOverride.empty() ? m_discoveredEndpoint : endpointOverride;
     if (endpoint.empty()) {
         r.status = StepStatus::Failed;
-        r.detail = "No endpoint discovered. Enter the Quest Wireless ADB connect endpoint shown in-headset, or re-run Discover while USB is authorized.";
+        r.detail = "No endpoint discovered. Re-run Discover while USB ADB is authorized, or use the manual pairing-code fallback only if the Quest shows an Android Wireless debugging screen.";
         return Commit(WizardStep::WifiVerify, r);
     }
 
@@ -578,7 +604,7 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
     if (!m_adb.Connect(endpoint)) {
         r.status = StepStatus::Failed;
         r.detail = "Failed to connect to " + endpoint +
-                   ". Unplug the USB cable and ensure Quest is on Wi-Fi.";
+                   ". Ensure the Quest is awake and on the same Wi-Fi network.";
         return Commit(WizardStep::WifiVerify, r);
     }
 

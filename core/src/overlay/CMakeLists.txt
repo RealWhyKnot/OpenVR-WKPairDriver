@@ -65,6 +65,8 @@ add_executable(OpenVRPairOverlay WIN32
 	AdbController.h
 	AdbSetupWizard.cpp
 	AdbSetupWizard.h
+	BugReportUi.cpp
+	BugReportUi.h
 	CalibrationAnchor.cpp
 	CalibrationAnchor.h
 	DeviceFilters.cpp

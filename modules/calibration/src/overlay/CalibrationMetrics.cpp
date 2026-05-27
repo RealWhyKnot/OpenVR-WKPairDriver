@@ -1,6 +1,7 @@
 #include "CalibrationMetrics.h"
 #include "BuildStamp.h"
 #include "LogPaths.h"
+#include "MotionRecording.h"
 #include "Win32Text.h"
 #include <fstream>
 #include <openvr.h>
@@ -530,6 +531,23 @@ namespace Metrics {
 		// dozen follow-up commands.
 		logFile << "# build_stamp=" SPACECAL_BUILD_STAMP "\n";
 		logFile << "# build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+
+		if (std::string(SPACECAL_BUILD_CHANNEL) == "dev") {
+			logFile.flush();
+			const spacecal::replay::RecordingRetentionPolicy retentionPolicy{};
+			const auto prune = spacecal::replay::PruneRecordings(retentionPolicy);
+			logFile << "# dev_auto_recording=enabled"
+				<< " retention_files=" << retentionPolicy.maxFiles
+				<< " retention_bytes=" << retentionPolicy.maxTotalBytes
+				<< " total_files=" << prune.totalFiles
+				<< " total_bytes=" << prune.totalBytes
+				<< " deleted_files=" << prune.deletedFiles
+				<< " freed_bytes=" << prune.freedBytes
+				<< " kept_files=" << prune.keptFiles
+				<< " kept_bytes=" << prune.keptBytes
+				<< " failed_deletes=" << prune.failedDeletes
+				<< "\n";
+		}
 
 		// HMD identification — model + tracking system. Driver-side issues often
 		// correlate to a specific HMD or runtime, so this is the first thing

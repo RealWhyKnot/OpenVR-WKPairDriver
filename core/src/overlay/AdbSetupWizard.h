@@ -14,8 +14,8 @@ enum class WizardStep {
     CheckDevMode,       // adb devices shows authorized entry
     UsbPair,            // detect USB-paired device
     WifiTcpip,          // adb tcpip 5555
-    WifiDiscover,       // resolve quest IP via shell ip route
-    WifiPair,           // adb pair <host:pairingPort> with 6-digit code
+    WifiDiscover,       // resolve Quest IP via shell ip route
+    WifiPair,           // optional Android Wireless debugging pairing-code fallback
     WifiVerify,         // user unplugs USB; adb connect + getprop ro.product.model
     Done
 };
@@ -67,6 +67,10 @@ public:
     // headset's Wireless ADB pairing host:port, code, and connect endpoint.
     void UseWirelessFallback();
 
+    // Start at the USB-authorized wireless setup stage when the UI already
+    // knows ADB is connected.
+    void UseCurrentAdbConnection();
+
     void Reset();
     bool IsDone() const;
 
@@ -82,6 +86,7 @@ private:
     std::array<StepResult, kStepCount> m_results;
 
     std::string m_discoveredEndpoint;
+    bool m_manualWirelessPairing = false;
 
     // Helper: record result for the given step, advance m_step on pass.
     StepResult Commit(WizardStep step, StepResult result);

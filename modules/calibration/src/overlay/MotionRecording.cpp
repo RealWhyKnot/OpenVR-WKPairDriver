@@ -321,9 +321,37 @@ std::vector<LogFileEntry> ListRecordings() {
 
 	// Newest-first so the recording the user just made is at the top.
 	std::sort(out.begin(), out.end(), [](const LogFileEntry& a, const LogFileEntry& b) {
+		if (a.mtimeFileTime == b.mtimeFileTime) return a.name > b.name;
 		return a.mtimeFileTime > b.mtimeFileTime;
 	});
 	return out;
+}
+
+RecordingPruneResult PruneRecordings(const RecordingRetentionPolicy& policy) {
+	RecordingPruneResult result;
+	const std::vector<LogFileEntry> entries = ListRecordings();
+	result.totalFiles = entries.size();
+	for (const auto& entry : entries) {
+		result.totalBytes = detail::SaturatingAdd(result.totalBytes, entry.sizeBytes);
+	}
+
+	const RecordingRetentionPlan plan = PlanRecordingRetention(entries, policy);
+	for (std::size_t index : plan.deleteIndexes) {
+		if (index >= entries.size()) continue;
+		const auto& entry = entries[index];
+		if (DeleteFileW(entry.fullPath.c_str())) {
+			++result.deletedFiles;
+			result.freedBytes = detail::SaturatingAdd(result.freedBytes, entry.sizeBytes);
+		} else {
+			++result.failedDeletes;
+		}
+	}
+
+	result.keptFiles = result.totalFiles - result.deletedFiles;
+	result.keptBytes = (result.totalBytes >= result.freedBytes)
+		? (result.totalBytes - result.freedBytes)
+		: 0;
+	return result;
 }
 
 } // namespace spacecal::replay

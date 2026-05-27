@@ -1,328 +1,35 @@
 #include "Calibration.h"
-#include "Configuration.h"
 #include "CalibrationMetrics.h"
+#include "Configuration.h"
+#include "ControllerInput.h"
 #include "Boundary.h"
 #include "BoundaryCapture.h"
 #include "GuardianAutoApply.h"
-#include "HeadMountOffsetModal.h"
-#include "HeadMountPreview.h"
-#include "HeadFromTrackerSolve.h"
-#include "HeadMountTargetBinding.h"
-#include "IPCClient.h"
-#include "Protocol.h"
 #include "SpaceCalibratorUmbrellaRuntime.h"
+#include "UserInterfaceHeadMount.h"
 #include "UiHelpers.h"
 
 #include <AdbSetupWizard.h>
 
 #include <openvr.h>
+#include <algorithm>
 #include <string>
+#include <vector>
+#include <cstddef>
 #include <cstdio>
-#include <cstring>
-#include <exception>
 #include <imgui/imgui.h>
 #include "imgui_extensions.h"
 
-extern SCIPCClient Driver;
 extern CalibrationContext CalCtx;
 
 void SaveProfile(CalibrationContext& ctx);
 
-// Forward declaration for the device-label helper defined in UserInterface.cpp.
-// The Headset-tab UI labels the continuous target (a StandbyDevice), not a
-// live VRDevice, so this matches the call site at the Step 1 status block.
-std::string LabelString(const StandbyDevice& device);
-
-// ---------------------------------------------------------------------------
-// Section A: Head-mounted tracker
-// ---------------------------------------------------------------------------
-//
-// User journey for this whole tab:
-//   1. (Head-mount section)   Stabilize SLAM drift with the continuous target.
-//   2. (Boundary section)     Draw your own play-space safety polygon.
-//   3. (Quest Guardian section) Hide Quest's overlapping guardian.
-//
-// Each section is self-contained but the disabled-state copy nudges the user
-// from one step to the next without long instructional paragraphs.
+// User journey for this tab:
+//   1. Stabilize SLAM drift with the continuous target.
+//   2. Draw your own play-space safety polygon.
+//   3. Hide Quest's overlapping guardian.
 
 namespace {
-
-// IPC: push the active head-mount config to the driver.
-void SendHeadMountConfig() {
-    const auto& hm = CalCtx.headMount;
-    protocol::Request req(protocol::RequestSetHeadMountConfig);
-    auto& p = req.setHeadMountConfig;
-    p.mode             = static_cast<uint32_t>(hm.mode);
-    p.deviceId         = hm.deviceID;
-    p.hideTracker      = hm.hideTracker;
-    p.offsetCalibrated = hm.offsetCalibrated;
-
-    size_t len = hm.trackerSerial.size();
-    if (len >= sizeof p.trackerSerial) len = sizeof p.trackerSerial - 1;
-    memcpy(p.trackerSerial, hm.trackerSerial.data(), len);
-    p.trackerSerial[len] = '\0';
-
-    len = hm.trackerTrackingSystem.size();
-    if (len >= sizeof p.trackerTrackingSystem) len = sizeof p.trackerTrackingSystem - 1;
-    memcpy(p.trackerTrackingSystem, hm.trackerTrackingSystem.data(), len);
-    p.trackerTrackingSystem[len] = '\0';
-
-    Eigen::Quaterniond q(hm.headFromTracker.linear());
-    q.normalize();
-    const Eigen::Vector3d t = hm.headFromTracker.translation();
-    p.headFromTrackerTrans[0] = t.x();
-    p.headFromTrackerTrans[1] = t.y();
-    p.headFromTrackerTrans[2] = t.z();
-    p.headFromTrackerRot[0]   = q.x();
-    p.headFromTrackerRot[1]   = q.y();
-    p.headFromTrackerRot[2]   = q.z();
-    p.headFromTrackerRot[3]   = q.w();
-
-    try {
-        Driver.SendBlocking(req);
-    } catch (const std::exception& e) {
-        char buf[240];
-        std::snprintf(buf, sizeof buf,
-            "[head-mount] config push failed: %s", e.what());
-        Metrics::WriteLogAnnotation(buf);
-    }
-}
-
-// Fine-tune sliders toggle. File-scope so the user's open/closed choice
-// survives tab switches within a single session.
-bool s_offsetSlidersOpen = false;
-
-void DrawHeadMountSection(const ImVec2& panelSize) {
-    const auto& pal = openvr_pair::overlay::ui::GetPalette();
-    auto& hm = CalCtx.headMount;
-    const bool bindingChanged = wkopenvr::headmount::BindHeadMountToContinuousTarget(CalCtx);
-    if (bindingChanged) {
-        SaveProfile(CalCtx);
-        SendHeadMountConfig();
-    }
-    const bool hasContinuousTarget = wkopenvr::headmount::HasContinuousTargetIdentity(CalCtx);
-
-    {
-    openvr_pair::overlay::ui::PanelScope panel("Step 1: Head-mounted tracker", panelSize);
-
-    // Short one-line framing. Detail is in the tooltip.
-    ImGui::TextWrapped(
-        "Uses the active continuous target as the lighthouse tracker attached to your headset.");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Start continuous calibration with the headset-mounted lighthouse tracker selected as the target.\n"
-            "This tab binds to that target automatically, so you do not have to pick the same tracker twice.");
-    }
-
-    ImGui::Spacing();
-
-    // --- Continuous target ----------------------------------------------
-    ImGui::TextUnformatted("1. Continuous target");
-    if (hasContinuousTarget) {
-        const std::string label = LabelString(CalCtx.targetStandby);
-        ImGui::TextWrapped("%s", label.c_str());
-        if (CalCtx.targetID < 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(waiting for device)");
-        }
-    } else {
-        ImGui::TextDisabled("Start continuous calibration with the headset-mounted tracker as the target.");
-    }
-
-    const bool hasTracker = hasContinuousTarget && !hm.trackerSerial.empty();
-    const bool offsetOk   = hm.offsetCalibrated;
-
-    // --- Offset calibration step -----------------------------------------
-    ImGui::Spacing();
-    ImGui::TextUnformatted("2. Calibrate the tracker-to-headset offset");
-    {
-        openvr_pair::overlay::ui::DisabledSection ds(!hasTracker,
-            "Start continuous calibration with the headset-mounted tracker as the target first.");
-        const char* btnLabel = offsetOk
-            ? "Re-calibrate offset"
-            : "Calibrate offset";
-        if (ImGui::Button(btnLabel)) {
-            wkopenvr::headmount::OpenOffsetModal();
-        }
-        ds.AttachReasonTooltip();
-    }
-    if (ImGui::IsItemHovered() && hasTracker) {
-        ImGui::SetTooltip(
-            "Solves the rigid offset from the tracker to the headset.\n"
-            "Move your head slowly through pitch, yaw, and roll for ~10 seconds.");
-    }
-    ImGui::SameLine();
-    {
-        openvr_pair::overlay::ui::DisabledSection ds(!hasTracker || !offsetOk,
-            !hasTracker ? "Start continuous calibration with the headset-mounted tracker as the target first."
-                        : "Calibrate offset first.");
-        if (ImGui::Button(s_offsetSlidersOpen ? "Hide fine-tune" : "Fine-tune offset")) {
-            s_offsetSlidersOpen = !s_offsetSlidersOpen;
-        }
-        ds.AttachReasonTooltip();
-    }
-    if (ImGui::IsItemHovered() && offsetOk) {
-        ImGui::SetTooltip(
-            "Nudge the solved offset by hand. Useful if the auto-solve\n"
-            "got close but the in-headset preview marker doesn't sit\n"
-            "exactly at your eye position.");
-    }
-
-    if (s_offsetSlidersOpen && offsetOk) {
-        ImGui::Spacing();
-        wkopenvr::headmount::DrawOffsetInlinePanel();
-    }
-
-    // --- Mode picker -----------------------------------------------------
-    ImGui::Spacing();
-    ImGui::TextUnformatted("3. Choose what the tracker does for continuous calibration");
-    {
-        openvr_pair::overlay::ui::DisabledSection ds(!hasTracker,
-            "Start continuous calibration with the headset-mounted tracker as the target first.");
-
-        struct ModeOpt {
-            HeadMountMode value;
-            const char*   label;
-            const char*   tip;
-            bool          requiresOffset;
-        };
-        const ModeOpt opts[] = {
-            { HeadMountMode::Off,         "Off",
-              "No head-mount features. Body trackers drift with SLAM as before.",
-              false },
-            { HeadMountMode::AutoPaired,  "Stabilize continuous calibration",
-              "The continuous target becomes a constant paired observation from the headset-mounted tracker.\n"
-              "Drift correction stays smooth across long sessions. Requires the offset to be calibrated.",
-              true },
-            { HeadMountMode::Corroborate, "Block SLAM re-localization jumps",
-              "When Quest re-localizes (passthrough, room scan), the headset pose jumps.\n"
-              "With this on, the head-tracker provides an independent witness so those\n"
-              "jumps don't trigger recovery or feed bad samples into the solver.\n"
-              "Requires the offset to be calibrated.",
-              true },
-#if WKOPENVR_BUILD_IS_DEV
-            { HeadMountMode::DriverSynth, "EXPERIMENTAL: synthesize headset pose from tracker",
-              "Replaces the rendered headset pose with one derived from the head-tracker.\n"
-              "Known compositor and comfort risks. Dev builds only.",
-              true },
-#endif
-        };
-
-        for (const auto& opt : opts) {
-            const bool needsOffset = opt.requiresOffset && !offsetOk;
-            openvr_pair::overlay::ui::DisabledSection inner(needsOffset,
-                "Calibrate the offset (step 2) before using this mode.");
-            const bool selected = (hm.mode == opt.value);
-            // ImGui RadioButton id pinned per-option so SameLine layout
-            // doesn't merge ids.
-            ImGui::PushID(static_cast<int>(opt.value));
-            if (ImGui::RadioButton(opt.label, selected)) {
-                if (hm.mode != opt.value) {
-                    hm.mode = opt.value;
-                    SaveProfile(CalCtx);
-                    SendHeadMountConfig();
-                }
-            }
-            ImGui::PopID();
-            inner.AttachReasonTooltip();
-            if (ImGui::IsItemHovered() && !needsOffset) {
-                ImGui::SetTooltip("%s", opt.tip);
-            }
-        }
-        ds.AttachReasonTooltip();
-    }
-
-    // --- Hide in OpenVR --------------------------------------------------
-    ImGui::Spacing();
-    {
-        openvr_pair::overlay::ui::DisabledSection ds(!hasTracker,
-            "Start continuous calibration with the headset-mounted tracker as the target first.");
-        if (ImGui::Checkbox("Hide this tracker from games", &hm.hideTracker)) {
-            CalCtx.quashTargetInContinuous = hm.hideTracker;
-            SaveProfile(CalCtx);
-            SendHeadMountConfig();
-        }
-        ds.AttachReasonTooltip();
-    }
-    if (ImGui::IsItemHovered() && hasTracker) {
-        ImGui::SetTooltip(
-            "Suppress the head-tracker's pose in OpenVR so it doesn't appear as a\n"
-            "floating tracker in-headset. The continuous calibration math still uses its pose internally.");
-    }
-
-    // --- Status line -----------------------------------------------------
-    ImGui::Spacing();
-    {
-        // Diagnostic: dump the head-mount resolution snapshot once per change
-        // so the next session log reveals which precondition fails when the
-        // status flips red. targetID + state are included so a "still broken"
-        // report immediately points at the right gap (AssignTargets rescan
-        // dead vs binding dead vs driver pose pipeline).
-        {
-            static int32_t s_lastDeviceID = -2;
-            static std::string s_lastSerial, s_lastModel, s_lastSystem;
-            static int s_lastBits = -1;
-            const int32_t curDev = hm.deviceID;
-            const bool inRange = curDev >= 0
-                && (uint32_t)curDev < vr::k_unMaxTrackedDeviceCount;
-            const bool poseValid = inRange && CalCtx.devicePoses[curDev].poseIsValid;
-            const int curBits = (inRange ? 1 : 0) | (poseValid ? 2 : 0);
-            if (curDev != s_lastDeviceID
-                || hm.trackerSerial != s_lastSerial
-                || hm.trackerModel != s_lastModel
-                || hm.trackerTrackingSystem != s_lastSystem
-                || curBits != s_lastBits)
-            {
-                s_lastDeviceID = curDev;
-                s_lastSerial = hm.trackerSerial;
-                s_lastModel = hm.trackerModel;
-                s_lastSystem = hm.trackerTrackingSystem;
-                s_lastBits = curBits;
-                char lbuf[320];
-                std::snprintf(lbuf, sizeof lbuf,
-                    "[head-mount-status] deviceID=%d inRange=%d poseIsValid=%d"
-                    " serial='%s' model='%s' system='%s' targetID=%d state=%d",
-                    (int)curDev, (int)inRange, (int)poseValid,
-                    hm.trackerSerial.c_str(), hm.trackerModel.c_str(),
-                    hm.trackerTrackingSystem.c_str(),
-                    (int)CalCtx.targetID, (int)CalCtx.state);
-                Metrics::WriteLogAnnotation(lbuf);
-            }
-        }
-
-        const bool trackerValid =
-            hm.deviceID >= 0
-            && (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount
-            && CalCtx.devicePoses[hm.deviceID].poseIsValid;
-
-        if (!hasTracker) {
-            ImGui::TextDisabled("No tracker selected.");
-        } else if (!trackerValid) {
-            openvr_pair::overlay::ui::DrawStatusDot(pal.dotError);
-            ImGui::TextColored(pal.statusError, "Tracker not reporting a valid pose.");
-        } else if (!offsetOk) {
-            openvr_pair::overlay::ui::DrawStatusDot(pal.dotPending);
-            ImGui::TextColored(pal.statusWarn, "Offset uncalibrated.");
-        } else if (hm.mode == HeadMountMode::Off) {
-            openvr_pair::overlay::ui::DrawStatusDot(pal.dotPending);
-            ImGui::TextColored(pal.statusWarn, "Ready. Pick a mode above to activate.");
-        } else {
-            const double residualMm = (Metrics::headMountResidualMm.size() > 0)
-                ? Metrics::headMountResidualMm.last() : 0.0;
-            char buf[128];
-            if (residualMm > 0.0) {
-                std::snprintf(buf, sizeof buf,
-                    "Active. Offset residual %.2f mm.", residualMm);
-            } else {
-                std::snprintf(buf, sizeof buf, "Active.");
-            }
-            openvr_pair::overlay::ui::DrawStatusDot(pal.dotOk);
-            ImGui::TextColored(pal.statusOk, "%s", buf);
-        }
-    }
-
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Section B: Safety boundary
@@ -616,7 +323,7 @@ void RemoveAdbSetupFromQuest() {
 void DrawSetupWizardModal() {
     if (!s_showWizard) return;
 
-    ImGui::SetNextWindowSize(ImVec2(860.0f, 640.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(980.0f, 740.0f), ImGuiCond_Appearing);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
@@ -626,10 +333,18 @@ void DrawSetupWizardModal() {
         auto* wiz = WizardPtr();
         const auto& pal = openvr_pair::overlay::ui::GetPalette();
         const float actionHeight = ImGui::GetTextLineHeightWithSpacing() * 1.45f;
-        const ImVec2 actionButtonSize(300.0f, actionHeight);
+        const ImVec2 actionButtonSize(360.0f, actionHeight);
         auto ActionButton = [&](const char* label) {
             return ImGui::Button(label, actionButtonSize);
         };
+        auto FullWidthInputText = [](const char* visibleLabel, const char* id, char* buffer, size_t bufferSize) {
+            ImGui::TextWrapped("%s", visibleLabel);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            return ImGui::InputText(id, buffer, bufferSize);
+        };
+
+        ImGui::BeginChild("adb_setup_scroll_region", ImVec2(0.0f, 0.0f), false,
+            ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
         openvr_pair::overlay::ui::DrawBanner(
             "ADB warning",
@@ -650,29 +365,36 @@ void DrawSetupWizardModal() {
             { wkopenvr::adb::WizardStep::WifiTcpip,      "Enable Wi-Fi ADB",
               "Switch the Quest into Wi-Fi ADB mode (adb tcpip 5555)." },
             { wkopenvr::adb::WizardStep::WifiDiscover,   "Discover Quest IP",
-              "Read the Quest's Wi-Fi IP via the USB connection." },
-            { wkopenvr::adb::WizardStep::WifiPair,       "Wi-Fi pair",
-              "On the Quest, open Settings > System > Developer > Wireless ADB. Enter the pairing host:port, pairing code, and connect endpoint shown in-headset." },
+              "Read the Quest's Wi-Fi IP via the USB connection. This normal Quest path does not need a pairing code." },
+            { wkopenvr::adb::WizardStep::WifiVerify,     "Verify Wi-Fi",
+              "Connect over Wi-Fi and probe the Guardian property." },
+        };
+        static const StepInfo kManualWirelessSteps[] = {
+            { wkopenvr::adb::WizardStep::WifiPair,       "Manual wireless pair",
+              "Only use this if the Quest shows an Android Wireless debugging pairing-code screen. Many Quest builds do not expose it; the USB-authorized path above is the expected flow." },
             { wkopenvr::adb::WizardStep::WifiVerify,     "Verify Wi-Fi",
               "Connect over Wi-Fi and probe the Guardian property." },
         };
 
         // Find current step's index for the progress line.
         const wkopenvr::adb::WizardStep cur = wiz->currentStep();
+        const bool manualWirelessFlow =
+            cur == wkopenvr::adb::WizardStep::WifiPair ||
+            (cur == wkopenvr::adb::WizardStep::WifiVerify && wiz->DiscoveredEndpoint().empty());
+        const StepInfo* steps = manualWirelessFlow ? kManualWirelessSteps : kSteps;
+        const int stepCount = manualWirelessFlow
+            ? (int)(sizeof kManualWirelessSteps / sizeof kManualWirelessSteps[0])
+            : (int)(sizeof kSteps / sizeof kSteps[0]);
         int curIdx = 0;
-        for (int i = 0; i < (int)(sizeof kSteps / sizeof kSteps[0]); ++i) {
-            if (kSteps[i].step == cur) { curIdx = i; break; }
+        for (int i = 0; i < stepCount; ++i) {
+            if (steps[i].step == cur) { curIdx = i; break; }
         }
 
         if (!wiz->IsDone()) {
-            ImGui::Text("Step %d of %d", curIdx + 1, (int)(sizeof kSteps / sizeof kSteps[0]));
-            ImGui::SameLine();
-            ImGui::TextDisabled("--");
-            ImGui::SameLine();
-            ImGui::TextUnformatted(kSteps[curIdx].label);
+            ImGui::TextWrapped("Step %d of %d - %s", curIdx + 1, stepCount, steps[curIdx].label);
             ImGui::Separator();
             ImGui::Spacing();
-            ImGui::TextWrapped("%s", kSteps[curIdx].help);
+            ImGui::TextWrapped("%s", steps[curIdx].help);
             ImGui::Spacing();
 
             if (cur == wkopenvr::adb::WizardStep::WifiTcpip ||
@@ -690,6 +412,13 @@ void DrawSetupWizardModal() {
             case wkopenvr::adb::WizardStep::Start:
             case wkopenvr::adb::WizardStep::CheckBinary:
                 if (ActionButton("Check##binary")) wiz->RunCheckBinary();
+                if (Metrics::adbConnected.last()) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("ADB is already connected.");
+                    if (ActionButton("Use current ADB connection##use_current_adb")) {
+                        wiz->UseCurrentAdbConnection();
+                    }
+                }
                 break;
             case wkopenvr::adb::WizardStep::CheckDevAccount:
                 if (ActionButton("Check##devacct")) wiz->RunCheckDevAccount();
@@ -707,18 +436,22 @@ void DrawSetupWizardModal() {
                 if (ActionButton("Discover##disc")) wiz->RunWifiDiscover();
                 break;
             case wkopenvr::adb::WizardStep::WifiPair:
-                ImGui::SetNextItemWidth(420.0f);
-                ImGui::InputText("Pairing host:port##wiz_hp", s_wifiHostPort, sizeof(s_wifiHostPort));
-                ImGui::SetNextItemWidth(180.0f);
-                ImGui::InputText("Pairing code##wiz_code",   s_wifiCode,     sizeof(s_wifiCode));
+                FullWidthInputText("Pairing host:port", "##wiz_hp",
+                    s_wifiHostPort, sizeof(s_wifiHostPort));
+                ImGui::TextWrapped("Pairing code");
+                ImGui::SetNextItemWidth(220.0f);
+                ImGui::InputText("##wiz_code", s_wifiCode, sizeof(s_wifiCode));
                 if (wiz->DiscoveredEndpoint().empty()) {
-                    ImGui::SetNextItemWidth(420.0f);
-                    ImGui::InputText("Connect endpoint##wiz_ep", s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
+                    FullWidthInputText("Connect endpoint", "##wiz_ep",
+                        s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("The endpoint from the Wireless ADB screen, usually IP:port. This is not always the same port as the pairing host:port.");
                     }
                 } else {
-                    ImGui::TextDisabled("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                    ImGui::PopStyleColor();
                 }
                 if (ActionButton("Pair##pair")) {
                     wiz->RunWifiPair(s_wifiHostPort, s_wifiCode);
@@ -726,10 +459,13 @@ void DrawSetupWizardModal() {
                 break;
             case wkopenvr::adb::WizardStep::WifiVerify:
                 if (wiz->DiscoveredEndpoint().empty()) {
-                    ImGui::SetNextItemWidth(420.0f);
-                    ImGui::InputText("Connect endpoint##wiz_verify_ep", s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
+                    FullWidthInputText("Connect endpoint", "##wiz_verify_ep",
+                        s_wifiConnectEndpoint, sizeof(s_wifiConnectEndpoint));
                 } else {
-                    ImGui::TextDisabled("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Connect endpoint: %s", wiz->DiscoveredEndpoint().c_str());
+                    ImGui::PopStyleColor();
                 }
                 if (ActionButton("Verify##verify")) {
                     const std::string manualEndpoint =
@@ -765,12 +501,14 @@ void DrawSetupWizardModal() {
                 res.status == wkopenvr::adb::StepStatus::Failed) {
                 ImGui::Spacing();
                 ImGui::TextDisabled("No USB prompt?");
-                ImGui::TextWrapped("Retry restarts the ADB server and checks the headset state. Wireless ADB skips the USB authorization path if your headset shows Wireless ADB pairing details.");
+                ImGui::TextWrapped("Retry restarts the ADB server and checks the headset state. The manual wireless fallback only applies if the headset shows Android Wireless debugging pairing details.");
                 if (ImGui::Button("Try to show USB prompt##retry_usb", actionButtonSize)) {
                     wiz->RunRetryUsbPrompt();
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Use Wireless ADB instead##wireless_fallback", actionButtonSize)) {
+                if (ImGui::GetContentRegionAvail().x >= actionButtonSize.x + ImGui::GetStyle().ItemSpacing.x) {
+                    ImGui::SameLine();
+                }
+                if (ImGui::Button("Manual pairing-code fallback##wireless_fallback", actionButtonSize)) {
                     wiz->UseWirelessFallback();
                 }
             }
@@ -786,7 +524,9 @@ void DrawSetupWizardModal() {
                 s_awaitPolarityConfirm = false;
                 s_showWizard = false;
             }
-            ImGui::SameLine();
+            if (ImGui::GetContentRegionAvail().x >= actionButtonSize.x + ImGui::GetStyle().ItemSpacing.x) {
+                ImGui::SameLine();
+            }
             if (ImGui::Button("No, flip the value", actionButtonSize)) {
                 wkopenvr::adb::SetGuardianPauseValueOverride(CCal_GetAdb(),
                     CalCtx.adb.guardianPauseValue == 1 ? 0 : 1);
@@ -845,6 +585,7 @@ void DrawSetupWizardModal() {
             }
         }
 
+        ImGui::EndChild();
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar(3);
@@ -1030,6 +771,95 @@ void DrawGuardianSection(ImVec2 panelSize) {
     }
 }
 
+struct BoundaryInputStats {
+    int trackedControllers = 0;
+    int matchingControllers = 0;
+    int skippedTrackingSystem = 0;
+    int controllerStateFailed = 0;
+    int stateOk = 0;
+    int triggerHeld = 0;
+    int poseOk = 0;
+    int poseInvalid = 0;
+    int axisPropertyErrors = 0;
+    int triggerAxisCount = 0;
+    int lastTriggerAxis = -1;
+    float lastTriggerValue = 0.0f;
+};
+
+std::string TrackingSystemName(vr::IVRSystem* vrs, vr::TrackedDeviceIndex_t deviceId) {
+    char buffer[vr::k_unMaxPropertyStringSize] = {};
+    vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+    vrs->GetStringTrackedDeviceProperty(
+        deviceId,
+        vr::Prop_TrackingSystemName_String,
+        buffer,
+        vr::k_unMaxPropertyStringSize,
+        &err);
+    if (err != vr::TrackedProp_Success) {
+        return {};
+    }
+    return std::string(buffer);
+}
+
+bool MatchesBoundaryTrackingSystem(
+    vr::IVRSystem* vrs,
+    vr::TrackedDeviceIndex_t deviceId,
+    BoundaryInputStats& stats)
+{
+    if (CalCtx.targetTrackingSystem.empty()) {
+        return true;
+    }
+    const std::string system = TrackingSystemName(vrs, deviceId);
+    if (system == CalCtx.targetTrackingSystem) {
+        return true;
+    }
+    ++stats.skippedTrackingSystem;
+    return false;
+}
+
+Eigen::Affine3d DriverPoseToWorldAffine(const vr::DriverPose_t& dp) {
+    Eigen::Quaterniond wfd(
+        dp.qWorldFromDriverRotation.w,
+        dp.qWorldFromDriverRotation.x,
+        dp.qWorldFromDriverRotation.y,
+        dp.qWorldFromDriverRotation.z);
+    Eigen::Vector3d wfd_t(
+        dp.vecWorldFromDriverTranslation[0],
+        dp.vecWorldFromDriverTranslation[1],
+        dp.vecWorldFromDriverTranslation[2]);
+    Eigen::Quaterniond rot(dp.qRotation.w, dp.qRotation.x, dp.qRotation.y, dp.qRotation.z);
+    if (wfd.norm() > 1e-12) wfd.normalize();
+    if (rot.norm() > 1e-12) rot.normalize();
+
+    const Eigen::Vector3d pos(dp.vecPosition[0], dp.vecPosition[1], dp.vecPosition[2]);
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translate(wfd_t + wfd * pos);
+    pose.rotate(wfd * rot);
+    return pose;
+}
+
+void WriteBoundaryInputSummary(const BoundaryInputStats& stats, uint64_t sessionId, size_t rawCount) {
+    char lbuf[384];
+    snprintf(lbuf, sizeof lbuf,
+        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d skipped_system=%d state_ok=%d state_failed=%d trigger=%d pose_ok=%d pose_invalid=%d trigger_axes=%d axis_prop_errors=%d last_axis=%d last_value=%.3f",
+        static_cast<unsigned long long>(sessionId),
+        rawCount,
+        CalCtx.targetTrackingSystem.c_str(),
+        stats.trackedControllers,
+        stats.matchingControllers,
+        stats.skippedTrackingSystem,
+        stats.stateOk,
+        stats.controllerStateFailed,
+        stats.triggerHeld,
+        stats.poseOk,
+        stats.poseInvalid,
+        stats.triggerAxisCount,
+        stats.axisPropertyErrors,
+        stats.lastTriggerAxis,
+        stats.lastTriggerValue);
+    Metrics::WriteLogAnnotation(lbuf);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1042,48 +872,75 @@ void CCal_TickBoundaryCapture() {
         return;
 
     auto* vrs = vr::VRSystem();
-    if (!vrs) return;
+    const uint64_t sessionId = s_capture.sessionId();
+    static uint64_t s_lastSessionId = 0;
+    static uint32_t s_waitTicks = 0;
+    static uint64_t s_noVrLoggedSession = 0;
+    if (sessionId != s_lastSessionId) {
+        s_lastSessionId = sessionId;
+        s_waitTicks = 0;
+    }
 
-    for (int i = 0; i < (int)CalCtx.MAX_CONTROLLERS; ++i) {
-        const int ctrlId = CalCtx.controllerIDs[i];
-        if (ctrlId < 0) {
+    if (!vrs) {
+        if (s_noVrLoggedSession != sessionId) {
+            s_noVrLoggedSession = sessionId;
+            Metrics::WriteLogAnnotation("[boundary-capture] waiting: no VRSystem available");
+        }
+        return;
+    }
+
+    BoundaryInputStats stats;
+    for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
+        if (vrs->GetTrackedDeviceClass(deviceId) != vr::TrackedDeviceClass_Controller) {
             continue;
         }
+        ++stats.trackedControllers;
+
+        if (!MatchesBoundaryTrackingSystem(vrs, deviceId, stats)) {
+            continue;
+        }
+        ++stats.matchingControllers;
 
         vr::VRControllerState_t st = {};
-        if (!vrs->GetControllerState(ctrlId, &st, sizeof(st))) {
+        if (!vrs->GetControllerState(deviceId, &st, sizeof(st))) {
+            ++stats.controllerStateFailed;
             continue;
         }
-        const bool triggerHeld =
-            (st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger)) != 0 ||
-            st.rAxis[vr::k_eControllerAxis_Trigger].x > 0.75f ||
-            st.rAxis[vr::k_eControllerAxis_TrackPad].x > 0.75f;
-        if (!triggerHeld) {
+        ++stats.stateOk;
+
+        wkopenvr::controller_input::TriggerReading trigger;
+        if (!wkopenvr::controller_input::IsTriggerHeld(vrs, deviceId, st, 0.75f, &trigger)) {
+            stats.axisPropertyErrors += trigger.propertyErrors;
+            stats.triggerAxisCount += trigger.triggerAxisCount;
+            if (trigger.analogAxis >= 0) {
+                stats.lastTriggerAxis = trigger.analogAxis;
+                stats.lastTriggerValue = trigger.analogValue;
+            }
             continue;
+        }
+        ++stats.triggerHeld;
+        stats.axisPropertyErrors += trigger.propertyErrors;
+        stats.triggerAxisCount += trigger.triggerAxisCount;
+        if (trigger.analogAxis >= 0) {
+            stats.lastTriggerAxis = trigger.analogAxis;
+            stats.lastTriggerValue = trigger.analogValue;
         }
 
-        const auto& dp = CalCtx.devicePoses[ctrlId];
+        const auto& dp = CalCtx.devicePoses[deviceId];
         if (!dp.poseIsValid || dp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
+            ++stats.poseInvalid;
             continue;
         }
+        ++stats.poseOk;
 
-        Eigen::Quaterniond wfd(
-            dp.qWorldFromDriverRotation.w,
-            dp.qWorldFromDriverRotation.x,
-            dp.qWorldFromDriverRotation.y,
-            dp.qWorldFromDriverRotation.z);
-        Eigen::Vector3d wfd_t(
-            dp.vecWorldFromDriverTranslation[0],
-            dp.vecWorldFromDriverTranslation[1],
-            dp.vecWorldFromDriverTranslation[2]);
-        Eigen::Quaterniond rot(dp.qRotation.w, dp.qRotation.x, dp.qRotation.y, dp.qRotation.z);
-        Eigen::Vector3d pos(dp.vecPosition[0], dp.vecPosition[1], dp.vecPosition[2]);
-        Eigen::Affine3d pose = Eigen::Affine3d::Identity();
-        pose.translate(wfd_t + wfd * pos);
-        pose.rotate(wfd * rot);
-
+        const Eigen::Affine3d pose = DriverPoseToWorldAffine(dp);
         s_capture.Tick(pose, true, CalCtx.boundary.floorY);
         return;
+    }
+
+    ++s_waitTicks;
+    if (s_waitTicks == 1 || (s_waitTicks % 120) == 0) {
+        WriteBoundaryInputSummary(stats, sessionId, s_capture.rawVertexCount());
     }
 }
 
@@ -1104,7 +961,7 @@ void CCal_DrawBoundaryTab() {
         "Continuous-mode headset tracker, lighthouse boundary, and Quest Guardian pause.");
     ImGui::Spacing();
 
-    DrawHeadMountSection(panelSize);
+    CCal_DrawHeadMountSection(panelSize);
     ImGui::Spacing();
     DrawBoundarySection(panelSize);
     ImGui::Spacing();

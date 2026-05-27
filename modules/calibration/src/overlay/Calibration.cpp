@@ -28,6 +28,7 @@
 #include "ReanchorChiSquareDetector.h" // spacecal::reanchor_chi::* -- sub-30 cm re-anchor
                              // sub-detector. Detection-only; freezes recs A/C on candidate.
 #include "BoundaryRePush.h"   // TickBoundaryRePush -- safety boundary chaperone re-push.
+#include "ControllerInput.h"
 #include "HeadMountOffsetModal.h" // wkopenvr::headmount::FeedSolverTick -- offset modal solver feed.
 #include "HeadMountTargetBinding.h"
 
@@ -2415,21 +2416,24 @@ void CalibrationTick(double time)
 
 	if (CalCtx.state == CalibrationState::Continuous && CalCtx.requireTriggerPressToApply && CalCtx.hasAppliedCalibrationResult) {
 		bool triggerPressed = true;
-		vr::VRControllerState_t state;
+		bool sawController = false;
+		auto* vrs = vr::VRSystem();
 		for (int i = 0; i < CalCtx.MAX_CONTROLLERS; i++) {
 			if (CalCtx.controllerIDs[i] >= 0) {
-				vr::VRSystem()->GetControllerState(CalCtx.controllerIDs[i], &state, sizeof(state));
-				triggerPressed &= state.rAxis[vr::k_eControllerAxis_TrackPad /* matches trigger on Index controllers?? */].x > 0.75f
-					|| state.rAxis[vr::k_eControllerAxis_Trigger].x > 0.75f;
-				//printf("Controller %d tracpad: %f\n", i, state.rAxis[vr::k_eControllerAxis_TrackPad].x);
-				//printf("Controller %d trigger: %f\n", i, state.rAxis[vr::k_eControllerAxis_Trigger].x);
+				sawController = true;
+				vr::VRControllerState_t state = {};
+				const int controllerId = CalCtx.controllerIDs[i];
+				if (!vrs || !vrs->GetControllerState(controllerId, &state, sizeof(state)) ||
+					!wkopenvr::controller_input::IsTriggerHeld(vrs, controllerId, state)) {
+					triggerPressed = false;
+				}
 				if (!triggerPressed) {
 					break;
 				}
 			}
 		}
 
-		if (!triggerPressed) {
+		if (sawController && !triggerPressed) {
 			CalCtx.Log("Waiting for trigger press...\n");
 			CalCtx.wasWaitingForTriggers = true;
 			return;

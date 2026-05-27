@@ -40,34 +40,103 @@ double SegmentDistanceSq(const BoundaryVertex& p,
     return rx * rx + ry * ry + rz * rz;
 }
 
-bool TryProjectAimToFloor(const Eigen::Affine3d& controllerPose,
-                          double floorY,
-                          BoundaryVertex& out)
+enum class FloorProjectionStatus {
+    Ok,
+    NonFinite,
+    NotDownward,
+    DistanceOutOfRange,
+};
+
+struct FloorProjectionAttempt {
+    FloorProjectionStatus status = FloorProjectionStatus::NonFinite;
+    BoundaryVertex hit = {};
+    const char* rayName = "-Z";
+    double originY = 0.0;
+    double aimY = 0.0;
+    double distanceMeters = 0.0;
+};
+
+const char* ProjectionStatusName(FloorProjectionStatus status) {
+    switch (status) {
+    case FloorProjectionStatus::Ok: return "ok";
+    case FloorProjectionStatus::NonFinite: return "non_finite";
+    case FloorProjectionStatus::NotDownward: return "not_downward";
+    case FloorProjectionStatus::DistanceOutOfRange: return "distance_out_of_range";
+    }
+    return "unknown";
+}
+
+FloorProjectionAttempt ProjectSingleRayToFloor(
+    const Eigen::Affine3d& controllerPose,
+    const Eigen::Vector3d& localRay,
+    const char* rayName,
+    double floorY)
 {
+    FloorProjectionAttempt attempt;
+    attempt.rayName = rayName;
+
     const Eigen::Vector3d origin = controllerPose.translation();
     const Eigen::Vector3d aim =
-        (controllerPose.rotation() * Eigen::Vector3d(0.0, 0.0, -1.0)).normalized();
+        (controllerPose.rotation() * localRay).normalized();
+    attempt.originY = origin.y();
+    attempt.aimY = aim.y();
 
-    // Require a real downward aim. A nearly horizontal controller would throw
-    // the floor hit far across the room and make the painted boundary jump.
-    if (!origin.allFinite() || !aim.allFinite() || aim.y() > -0.20) {
-        return false;
+    if (!origin.allFinite() || !aim.allFinite()) {
+        attempt.status = FloorProjectionStatus::NonFinite;
+        return attempt;
+    }
+
+    if (aim.y() > -0.20) {
+        attempt.status = FloorProjectionStatus::NotDownward;
+        return attempt;
     }
 
     const double distanceMeters = (floorY - origin.y()) / aim.y();
+    attempt.distanceMeters = distanceMeters;
     if (!std::isfinite(distanceMeters) ||
         distanceMeters < 0.05 ||
         distanceMeters > 5.0) {
-        return false;
+        attempt.status = FloorProjectionStatus::DistanceOutOfRange;
+        return attempt;
     }
 
     const Eigen::Vector3d hit = origin + aim * distanceMeters;
     if (!hit.allFinite()) {
-        return false;
+        attempt.status = FloorProjectionStatus::NonFinite;
+        return attempt;
     }
 
-    out = { hit.x(), floorY, hit.z() };
-    return true;
+    attempt.status = FloorProjectionStatus::Ok;
+    attempt.hit = { hit.x(), floorY, hit.z() };
+    return attempt;
+}
+
+FloorProjectionAttempt ProjectAimToFloor(
+    const Eigen::Affine3d& controllerPose,
+    double floorY)
+{
+    // OpenVR controller poses are not guaranteed to expose the model pointer
+    // ray on the same local Z sign across controller drivers. Keep -Z first
+    // for the historical path, but accept +Z as a narrow fallback.
+    const FloorProjectionAttempt primary = ProjectSingleRayToFloor(
+        controllerPose,
+        Eigen::Vector3d(0.0, 0.0, -1.0),
+        "-Z",
+        floorY);
+    if (primary.status == FloorProjectionStatus::Ok) {
+        return primary;
+    }
+
+    const FloorProjectionAttempt oppositeZ = ProjectSingleRayToFloor(
+        controllerPose,
+        Eigen::Vector3d(0.0, 0.0, 1.0),
+        "+Z",
+        floorY);
+    if (oppositeZ.status == FloorProjectionStatus::Ok) {
+        return oppositeZ;
+    }
+
+    return primary;
 }
 
 std::vector<BoundaryVertex> RemoveNearDuplicates(
@@ -152,6 +221,8 @@ std::vector<BoundaryVertex> CleanPaintedLoop(
 void CaptureSession::Start() {
     m_raw.clear();
     m_simplified.clear();
+    m_projectionRejectLogCount = 0;
+    ++m_sessionId;
     m_state = CaptureState::Active;
     Metrics::WriteLogAnnotation("[boundary-capture] started");
 }
@@ -180,31 +251,46 @@ void CaptureSession::Finish() {
     }
 }
 
-void CaptureSession::Tick(const Eigen::Affine3d& controllerPose,
+bool CaptureSession::Tick(const Eigen::Affine3d& controllerPose,
                           bool triggerHeld,
                           double floorY) {
-    if (m_state != CaptureState::Active) return;
-    if (!triggerHeld) return;
+    if (m_state != CaptureState::Active) return false;
+    if (!triggerHeld) return false;
 
-    BoundaryVertex candidate;
-    if (!TryProjectAimToFloor(controllerPose, floorY, candidate)) {
-        return;
+    const FloorProjectionAttempt projection = ProjectAimToFloor(controllerPose, floorY);
+    if (projection.status != FloorProjectionStatus::Ok) {
+        ++m_projectionRejectLogCount;
+        if (m_projectionRejectLogCount == 1 || (m_projectionRejectLogCount % 120) == 0) {
+            char lbuf[224];
+            snprintf(lbuf, sizeof lbuf,
+                "[boundary-capture] floor projection rejected: reason=%s ray=%s origin_y=%.3f aim_y=%.3f distance=%.3f rejects=%zu",
+                ProjectionStatusName(projection.status),
+                projection.rayName,
+                projection.originY,
+                projection.aimY,
+                projection.distanceMeters,
+                m_projectionRejectLogCount);
+            Metrics::WriteLogAnnotation(lbuf);
+        }
+        return false;
     }
 
+    const BoundaryVertex& candidate = projection.hit;
     if (!m_raw.empty()) {
         const BoundaryVertex& last = m_raw.back();
         const double dist = std::sqrt(DistanceSq(candidate, last));
-        if (dist < kVertexDebounceMeters) return;
+        if (dist < kVertexDebounceMeters) return false;
     }
 
     if (m_raw.empty()) {
         char lbuf[128];
         snprintf(lbuf, sizeof lbuf,
-            "[boundary-capture] first vertex: pos=(%.3f,%.3f,%.3f)",
-            candidate.x, candidate.y, candidate.z);
+            "[boundary-capture] first vertex: pos=(%.3f,%.3f,%.3f) ray=%s",
+            candidate.x, candidate.y, candidate.z, projection.rayName);
         Metrics::WriteLogAnnotation(lbuf);
     }
     m_raw.push_back(candidate);
+    return true;
 }
 
 const std::vector<BoundaryVertex>& CaptureSession::vertices() const {

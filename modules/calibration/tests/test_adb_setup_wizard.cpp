@@ -297,6 +297,20 @@ TEST(AdbSetupWizardTest, UseWirelessFallback_jumps_to_wifi_pair)
     EXPECT_TRUE(wiz.DiscoveredEndpoint().empty());
 }
 
+TEST(AdbSetupWizardTest, UseCurrentAdbConnection_jumps_to_wifi_tcpip)
+{
+    StubAdb adb;
+    SetupWizard wiz(adb);
+
+    wiz.UseCurrentAdbConnection();
+
+    EXPECT_EQ(wiz.currentStep(), WizardStep::WifiTcpip);
+    EXPECT_EQ(wiz.stepResult(WizardStep::CheckBinary).status, StepStatus::Passed);
+    EXPECT_EQ(wiz.stepResult(WizardStep::CheckDevAccount).status, StepStatus::Passed);
+    EXPECT_EQ(wiz.stepResult(WizardStep::CheckDevMode).status, StepStatus::Passed);
+    EXPECT_EQ(wiz.stepResult(WizardStep::UsbPair).status, StepStatus::Passed);
+}
+
 // ---------------------------------------------------------------------------
 // WifiDiscover_parses_ip_route
 // ---------------------------------------------------------------------------
@@ -314,6 +328,8 @@ TEST(AdbSetupWizardTest, WifiDiscover_parses_ip_route)
 
     EXPECT_EQ(r.status, StepStatus::Passed) << "detail: " << r.detail;
     EXPECT_EQ(wiz.DiscoveredEndpoint(), "192.168.1.42:5555");
+    EXPECT_EQ(wiz.currentStep(), WizardStep::WifiVerify);
+    EXPECT_EQ(wiz.stepResult(WizardStep::WifiPair).status, StepStatus::Passed);
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +366,7 @@ TEST(AdbSetupWizardTest, WifiDiscover_falls_back_to_ifconfig)
 
     EXPECT_EQ(r.status, StepStatus::Passed) << "detail: " << r.detail;
     EXPECT_EQ(wiz.DiscoveredEndpoint(), "192.168.2.99:5555");
+    EXPECT_EQ(wiz.currentStep(), WizardStep::WifiVerify);
 }
 
 // ---------------------------------------------------------------------------
@@ -600,12 +617,10 @@ TEST(AdbSetupWizardTest, IsDone_only_after_WifiVerify_passes)
             case 4: r.out = "restarting in TCP mode port: 5555\n"; break;
             // WifiDiscover: ip route
             case 5: r.out = "192.168.1.0/24 dev wlan0 src 192.168.1.10\n"; break;
-            // WifiPair
-            case 6: r.out = "Successfully paired to 192.168.1.10:37689\n"; break;
             // WifiVerify: connect
-            case 7: r.out = "connected to 192.168.1.10:5555\n"; break;
+            case 6: r.out = "connected to 192.168.1.10:5555\n"; break;
             // WifiVerify: getprop
-            case 8: r.out = "Quest 2\n"; break;
+            case 7: r.out = "Quest 2\n"; break;
             default: r.out = ""; break;
             }
             return r;
@@ -623,7 +638,6 @@ TEST(AdbSetupWizardTest, IsDone_only_after_WifiVerify_passes)
     wiz.RunUsbPair();
     wiz.RunWifiTcpip();
     wiz.RunWifiDiscover();
-    wiz.RunWifiPair("192.168.1.10:37689", "123456");
     wiz.RunWifiVerify();
 
     EXPECT_TRUE(wiz.IsDone());

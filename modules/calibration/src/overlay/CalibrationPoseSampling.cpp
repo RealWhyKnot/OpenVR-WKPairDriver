@@ -2,6 +2,7 @@
 
 #include "CalibrationInternal.h"
 #include "CalibrationMetrics.h"
+#include "ControllerInput.h"
 #include "HeadMountPoseSampling.h"
 #include "LatencyEstimator.h"
 #include "RotationMatrix3.h"
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <set>
 #include <string>
@@ -656,15 +658,24 @@ CalibrationCalc calibration;
 			CalCtx.headMount.deviceID = -1;
 		}
 
-		for (int i = 0; i < CalCtx.MAX_CONTROLLERS; i++) {
-			if (i < state.devices.size()
-				&& state.devices[i].trackingSystem == CalCtx.targetTrackingSystem
-				&& state.devices[i].deviceClass == vr::TrackedDeviceClass_Controller
-				&& (state.devices[i].controllerRole == vr::TrackedControllerRole_LeftHand || state.devices[i].controllerRole == vr::TrackedControllerRole_RightHand))
-			{
-				CalCtx.controllerIDs[i] = state.devices[i].id;
-			} else {
-				CalCtx.controllerIDs[i] = -1;
+		{
+			const size_t controllerCount =
+				wkopenvr::controller_input::FillControllerIdsForTrackingSystem(
+					state.devices,
+					CalCtx.targetTrackingSystem,
+					CalCtx.controllerIDs,
+					CalCtx.MAX_CONTROLLERS);
+			static size_t s_lastControllerCount = SIZE_MAX;
+			static std::string s_lastControllerTarget;
+			if (controllerCount != s_lastControllerCount ||
+				CalCtx.targetTrackingSystem != s_lastControllerTarget) {
+				s_lastControllerCount = controllerCount;
+				s_lastControllerTarget = CalCtx.targetTrackingSystem;
+				char lbuf[192];
+				snprintf(lbuf, sizeof lbuf,
+					"[controllers] assigned target-system controllers=%zu target='%s'",
+					controllerCount, CalCtx.targetTrackingSystem.c_str());
+				Metrics::WriteLogAnnotation(lbuf);
 			}
 		}
 

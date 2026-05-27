@@ -17,6 +17,8 @@ if(NOT EXISTS "${WKOPENVR_BUILDCHANNEL_HEADER}")
 endif()
 
 add_library(openvr_pair_common STATIC
+	BugReport.cpp
+	BugReport.h
 	BuildChannel.h
 	DebugLogging.cpp
 	DebugLogging.h

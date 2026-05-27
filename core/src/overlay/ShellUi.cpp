@@ -1,5 +1,6 @@
 #include "ShellUi.h"
 
+#include "BugReportUi.h"
 #include "DebugLogging.h"
 #include "FeaturePlugin.h"
 #include "ShellContext.h"
@@ -60,6 +61,10 @@ void DrawLogsTab(ShellContext &context, std::vector<std::unique_ptr<FeaturePlugi
 	}
 	ImGui::SameLine();
 	ImGui::TextDisabled(forced ? "(dev build: always on)" : (debugLogging ? "(on)" : "(off)"));
+
+	ImGui::Spacing();
+	ui::DrawSectionHeading("Bug reports");
+	DrawBugReportButton(context);
 
 	const bool effectiveDebugLogging = common::IsDebugLoggingEnabled();
 	for (auto &plugin : plugins) {

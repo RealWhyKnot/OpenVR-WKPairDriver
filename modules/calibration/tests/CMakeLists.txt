@@ -27,6 +27,7 @@ set(SPACECAL_SRC "${CMAKE_SOURCE_DIR}/modules/calibration/src")
 
 add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_boundary.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_controller_input.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_adb_controller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_adb_setup_wizard.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_guardian_auto_apply.cpp
@@ -62,6 +63,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_from_tracker_solve.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_panel_logic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_prediction_smoothing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_motion_recording_retention.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp
     ${CMAKE_SOURCE_DIR}/core/src/overlay/AdbController.cpp
     ${CMAKE_SOURCE_DIR}/core/src/overlay/AdbSetupWizard.cpp
@@ -69,8 +71,10 @@ add_executable(spacecal_tests
     ${SPACECAL_SRC}/overlay/Boundary.cpp
     ${SPACECAL_SRC}/overlay/BoundaryCapture.cpp
     ${SPACECAL_SRC}/overlay/BoundaryRePush.cpp
+    ${SPACECAL_SRC}/overlay/ControllerInput.cpp
     ${SPACECAL_SRC}/overlay/GuardianAutoApply.cpp
     ${SPACECAL_SRC}/overlay/CalibrationCalc.cpp
+    ${SPACECAL_SRC}/overlay/MotionRecording.cpp
     ${SPACECAL_SRC}/overlay/TranslationSolveDirect.cpp
     ${SPACECAL_SRC}/overlay/HeadFromTrackerSolve.cpp
     ${SPACECAL_SRC}/overlay/Configuration.cpp

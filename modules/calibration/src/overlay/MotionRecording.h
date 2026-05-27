@@ -16,6 +16,9 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -111,6 +114,73 @@ struct LogFileEntry {
 	uint64_t mtimeFileTime = 0;   // FILETIME as uint64; for sorting
 };
 
+constexpr std::size_t kDevAutoRecordingMaxFiles = 5;
+constexpr uint64_t kDevAutoRecordingMaxBytes = 512ull * 1024ull * 1024ull;
+
+struct RecordingRetentionPolicy {
+	std::size_t maxFiles = kDevAutoRecordingMaxFiles;
+	uint64_t maxTotalBytes = kDevAutoRecordingMaxBytes;
+};
+
+struct RecordingRetentionPlan {
+	std::vector<std::size_t> deleteIndexes;
+	std::size_t keptFiles = 0;
+	uint64_t keptBytes = 0;
+	uint64_t deletedBytes = 0;
+};
+
+namespace detail {
+	inline uint64_t SaturatingAdd(uint64_t a, uint64_t b) {
+		const uint64_t max = std::numeric_limits<uint64_t>::max();
+		return (b > max - a) ? max : (a + b);
+	}
+}
+
+inline RecordingRetentionPlan PlanRecordingRetention(
+	const std::vector<LogFileEntry>& newestFirst,
+	const RecordingRetentionPolicy& policy) {
+	RecordingRetentionPlan plan;
+
+	for (std::size_t i = 0; i < newestFirst.size(); ++i) {
+		const auto& entry = newestFirst[i];
+
+		bool keep = false;
+		if (policy.maxFiles > 0 && plan.keptFiles < policy.maxFiles && policy.maxTotalBytes > 0) {
+			bool fitsByteBudget = false;
+			if (plan.keptBytes <= policy.maxTotalBytes) {
+				const uint64_t remainingBytes = policy.maxTotalBytes - plan.keptBytes;
+				fitsByteBudget = entry.sizeBytes <= remainingBytes;
+			}
+			// Keep the newest recording even if a single capture exceeds the byte cap.
+			if (!fitsByteBudget && plan.keptFiles == 0) {
+				fitsByteBudget = true;
+			}
+			keep = fitsByteBudget;
+		}
+
+		if (keep) {
+			++plan.keptFiles;
+			plan.keptBytes = detail::SaturatingAdd(plan.keptBytes, entry.sizeBytes);
+		} else {
+			plan.deleteIndexes.push_back(i);
+			plan.deletedBytes = detail::SaturatingAdd(plan.deletedBytes, entry.sizeBytes);
+		}
+	}
+
+	return plan;
+}
+
+struct RecordingPruneResult {
+	std::size_t totalFiles = 0;
+	uint64_t totalBytes = 0;
+	std::size_t deletedFiles = 0;
+	uint64_t freedBytes = 0;
+	std::size_t failedDeletes = 0;
+	std::size_t keptFiles = 0;
+	uint64_t keptBytes = 0;
+};
+
 std::vector<LogFileEntry> ListRecordings();
+RecordingPruneResult PruneRecordings(const RecordingRetentionPolicy& policy = RecordingRetentionPolicy{});
 
 } // namespace spacecal::replay

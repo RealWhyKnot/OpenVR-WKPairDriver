@@ -231,8 +231,27 @@ TEST(CaptureSessionTest, UsesControllerAimRayFloorHit) {
     session.Start();
 
     Eigen::Affine3d pose = MakeFloorPointerPose(0.25, -0.5, 1.25);
-    session.Tick(pose, true, 0.25);
+    EXPECT_TRUE(session.Tick(pose, true, 0.25));
 
+    ASSERT_EQ(session.rawVertexCount(), 1u);
+    const auto& verts = session.vertices();
+    ASSERT_EQ(verts.size(), 1u);
+    EXPECT_NEAR(verts[0].x, 0.25, 1e-9);
+    EXPECT_NEAR(verts[0].y, 0.25, 1e-9);
+    EXPECT_NEAR(verts[0].z, -0.5, 1e-9);
+}
+
+TEST(CaptureSessionTest, AcceptsOppositeZPointerRayFallback) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translation() = Eigen::Vector3d(0.25, 1.25, -0.5);
+    const Eigen::Quaterniond q = Eigen::Quaterniond::FromTwoVectors(
+        Eigen::Vector3d::UnitZ(), -Eigen::Vector3d::UnitY());
+    pose.linear() = q.toRotationMatrix();
+
+    EXPECT_TRUE(session.Tick(pose, true, 0.25));
     ASSERT_EQ(session.rawVertexCount(), 1u);
     const auto& verts = session.vertices();
     ASSERT_EQ(verts.size(), 1u);
@@ -247,7 +266,7 @@ TEST(CaptureSessionTest, IgnoresHorizontalAimRay) {
 
     Eigen::Affine3d pose = Eigen::Affine3d::Identity();
     pose.translation() = Eigen::Vector3d(0.0, 1.0, 0.0);
-    session.Tick(pose, true);
+    EXPECT_FALSE(session.Tick(pose, true));
 
     EXPECT_EQ(session.rawVertexCount(), 0u);
 }

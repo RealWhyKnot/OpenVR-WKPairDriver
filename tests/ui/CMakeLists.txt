@@ -15,15 +15,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(ui_core_tests
+	test_bug_report.cpp
 	test_ui_core.cpp)
 
 target_include_directories(ui_core_tests PRIVATE
+	${CMAKE_SOURCE_DIR}/core/src/common
 	${CMAKE_SOURCE_DIR}/core/src/overlay
 	${CMAKE_SOURCE_DIR}/lib
 	${CMAKE_SOURCE_DIR}/lib/imgui)
 
 target_link_libraries(ui_core_tests PRIVATE
 	GTest::gtest_main
+	openvr_pair_common
 	openvr_pair_overlay_ui)
 
 target_compile_definitions(ui_core_tests PRIVATE

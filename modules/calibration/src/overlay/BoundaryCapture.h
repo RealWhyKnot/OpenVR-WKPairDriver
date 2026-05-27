@@ -4,6 +4,7 @@
 
 #include <Eigen/Geometry>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace wkopenvr::boundary {
@@ -24,15 +25,18 @@ public:
     // pose. The controller's pointer ray is intersected with the floor plane;
     // a new vertex is appended when triggerHeld AND that floor point has moved
     // at least kVertexDebounceMeters from the last recorded position.
-    void Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
+    bool Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
 
     CaptureState state() const { return m_state; }
+    uint64_t sessionId() const { return m_sessionId; }
     // Simplified vertices after Finish(); raw vertices while Active.
     const std::vector<BoundaryVertex>& vertices() const;
     size_t rawVertexCount() const { return m_raw.size(); }
 
 private:
     CaptureState m_state = CaptureState::Idle;
+    uint64_t m_sessionId = 0;
+    size_t m_projectionRejectLogCount = 0;
     std::vector<BoundaryVertex> m_raw;
     std::vector<BoundaryVertex> m_simplified;
 
