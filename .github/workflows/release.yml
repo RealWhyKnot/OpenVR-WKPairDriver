@@ -70,6 +70,10 @@ jobs:
         run: |
           ./.github/scripts/Test-WorkflowSyntax.ps1
 
+      - name: Test release notes generator
+        shell: pwsh
+        run: ./.github/scripts/Test-GenerateReleaseNotes.ps1
+
       - name: Promote Unreleased -> tagged section
         shell: pwsh
         env:

@@ -4,11 +4,13 @@ Releases are tag-driven and fully automated. Pushing a `v*` tag triggers
 [release.yml](workflows/release.yml), which builds the umbrella binary
 and driver DLL, packages the artifacts, publishes a GitHub release, and
 verifies the published body matches the input. The release body is
-generated from `git log` between the previous tag and the current tag
-plus the templated evergreen sections in [release-template/](release-template/)
--- there is no hand-written narrative path. If a release needs content
-that the auto-generator can't produce, the only supported path is the
-[extras file](#extras-file).
+generated from `git log` between the previous release base and the current
+tag plus the templated evergreen sections in [release-template/](release-template/)
+-- there is no hand-written narrative path. Stable release tags use the
+previous stable tag as the base, so beta release notes since the last stable
+are included when the stable release is published. Beta and dev tags use the
+nearest previous tag. If a release needs content that the auto-generator
+can't produce, the only supported path is the [extras file](#extras-file).
 
 Each release attaches the umbrella zip, the umbrella `*-Setup.exe`, and
 one `*-Setup.exe` per active feature module. End users typically install
@@ -62,8 +64,11 @@ The release body is the verbatim output of
 [--- Additional notes (extras file, if present) ---]
 ```
 
-CHANGELOG.md keeps accumulating in-repo for browsing; only the public
-release body shrinks to just-this-version content.
+Stable release bodies deliberately skip beta tags when picking the compare
+base. For example, if `v2026.5.5.0-beta` ships after `v2026.5.1.0`, then
+`v2026.5.7.0` compares from `v2026.5.1.0` so the beta changes appear in the
+stable release notes too. CHANGELOG.md keeps accumulating in-repo for
+browsing.
 
 ## Conventional-commit policy
 
