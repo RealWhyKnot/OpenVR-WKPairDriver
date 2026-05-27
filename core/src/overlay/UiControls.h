@@ -6,7 +6,9 @@
 
 #include <functional>
 #include <initializer_list>
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace openvr_pair::overlay::ui {
 
@@ -67,7 +69,14 @@ void DrawStatusDot(ImU32 color);
 void RightAlignText(const char *text, ImVec4 color, bool colored = true);
 
 bool CopyToClipboardButton(const char *id, const char *text);
+bool CopyWideTextToClipboard(std::wstring_view text);
 void DrawFilePath(const char *path);
+
+std::string FormatByteCount(uint64_t bytes);
+std::string FormatByteCountOrUnknown(int64_t bytes);
+std::string FormatFileAgeSeconds(uint64_t ageSeconds);
+std::string FormatFileAgeFromFileTime(uint64_t mtimeFileTime, uint64_t nowFileTime);
+std::string FormatFileAgeFromFileTime(uint64_t mtimeFileTime);
 
 void DrawBanner(const char *title, const char *detail, ImVec4 background, ImVec4 titleColor, ImVec4 detailColor);
 void DrawErrorBanner(const char *title, const char *detail);

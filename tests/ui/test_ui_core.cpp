@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "UiCore.h"
+#include "UiControls.h"
 
 #include <imgui.h>
 
@@ -110,4 +111,26 @@ TEST_F(UiCoreTest, BannersDisabledStateAndActionsRender)
 			openvr_pair::overlay::ui::ActionButton{ "Blocked", nullptr, true, "Blocked action.", ImVec2(120.0f, 0.0f), [] {} },
 		});
 	});
+}
+
+TEST(UiSharedFormatting, ByteCountsAndFileAgesUseCompactLabels)
+{
+	using openvr_pair::overlay::ui::FormatByteCount;
+	using openvr_pair::overlay::ui::FormatByteCountOrUnknown;
+	using openvr_pair::overlay::ui::FormatFileAgeFromFileTime;
+	using openvr_pair::overlay::ui::FormatFileAgeSeconds;
+
+	EXPECT_EQ("999 B", FormatByteCount(999));
+	EXPECT_EQ("1 KB", FormatByteCount(1024));
+	EXPECT_EQ("1.5 MB", FormatByteCount(1536 * 1024));
+	EXPECT_EQ("unknown", FormatByteCountOrUnknown(-1));
+
+	EXPECT_EQ("42s ago", FormatFileAgeSeconds(42));
+	EXPECT_EQ("5m ago", FormatFileAgeSeconds(5 * 60));
+	EXPECT_EQ("2h ago", FormatFileAgeSeconds(2 * 3600));
+	EXPECT_EQ("3d ago", FormatFileAgeSeconds(3 * 86400));
+
+	const uint64_t now = 1000000000ull;
+	EXPECT_EQ("10s ago", FormatFileAgeFromFileTime(now - 100000000ull, now));
+	EXPECT_EQ("in the future", FormatFileAgeFromFileTime(now + 1, now));
 }

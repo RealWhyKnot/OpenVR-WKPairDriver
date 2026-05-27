@@ -50,6 +50,11 @@ target_include_directories(openvr_pair_overlay_ui PUBLIC
 target_link_libraries(openvr_pair_overlay_ui PUBLIC
 	pair_imgui)
 
+if(WIN32)
+	target_link_libraries(openvr_pair_overlay_ui PUBLIC
+		user32)
+endif()
+
 target_compile_definitions(openvr_pair_overlay_ui PRIVATE
 	NOMINMAX
 	UNICODE

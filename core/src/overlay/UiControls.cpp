@@ -1,6 +1,13 @@
 #include "UiControls.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 namespace openvr_pair::overlay::ui {
 
@@ -155,6 +162,30 @@ bool CopyToClipboardButton(const char *id, const char *text)
 	return clicked;
 }
 
+bool CopyWideTextToClipboard(std::wstring_view text)
+{
+	if (!OpenClipboard(nullptr)) return false;
+	EmptyClipboard();
+	const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+	if (!h) {
+		CloseClipboard();
+		return false;
+	}
+	if (auto *buf = static_cast<wchar_t *>(GlobalLock(h))) {
+		memcpy(buf, text.data(), text.size() * sizeof(wchar_t));
+		buf[text.size()] = L'\0';
+		GlobalUnlock(h);
+		SetClipboardData(CF_UNICODETEXT, h);
+	} else {
+		GlobalFree(h);
+		CloseClipboard();
+		return false;
+	}
+	CloseClipboard();
+	return true;
+}
+
 void DrawFilePath(const char *path)
 {
 	if (!path || !path[0]) return;
@@ -180,6 +211,55 @@ void DrawFilePath(const char *path)
 	}
 	ImGui::TextUnformatted(path);
 	TooltipOnHover(path);
+}
+
+std::string FormatByteCount(uint64_t bytes)
+{
+	char buf[64];
+	if (bytes >= (1ull << 20)) {
+		snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(bytes) / static_cast<double>(1ull << 20));
+	} else if (bytes >= (1ull << 10)) {
+		snprintf(buf, sizeof buf, "%.0f KB", static_cast<double>(bytes) / static_cast<double>(1ull << 10));
+	} else {
+		snprintf(buf, sizeof buf, "%llu B", static_cast<unsigned long long>(bytes));
+	}
+	return buf;
+}
+
+std::string FormatByteCountOrUnknown(int64_t bytes)
+{
+	if (bytes < 0) return "unknown";
+	return FormatByteCount(static_cast<uint64_t>(bytes));
+}
+
+std::string FormatFileAgeSeconds(uint64_t ageSeconds)
+{
+	char buf[64];
+	if (ageSeconds < 60) {
+		snprintf(buf, sizeof buf, "%llus ago", static_cast<unsigned long long>(ageSeconds));
+	} else if (ageSeconds < 3600) {
+		snprintf(buf, sizeof buf, "%llum ago", static_cast<unsigned long long>(ageSeconds / 60));
+	} else if (ageSeconds < 86400) {
+		snprintf(buf, sizeof buf, "%lluh ago", static_cast<unsigned long long>(ageSeconds / 3600));
+	} else {
+		snprintf(buf, sizeof buf, "%llud ago", static_cast<unsigned long long>(ageSeconds / 86400));
+	}
+	return buf;
+}
+
+std::string FormatFileAgeFromFileTime(uint64_t mtimeFileTime, uint64_t nowFileTime)
+{
+	if (mtimeFileTime > nowFileTime) return "in the future";
+	const uint64_t deltaTicks = nowFileTime - mtimeFileTime;
+	return FormatFileAgeSeconds(deltaTicks / 10000000ull);
+}
+
+std::string FormatFileAgeFromFileTime(uint64_t mtimeFileTime)
+{
+	FILETIME nowFt{};
+	GetSystemTimeAsFileTime(&nowFt);
+	const uint64_t now = (static_cast<uint64_t>(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime;
+	return FormatFileAgeFromFileTime(mtimeFileTime, now);
 }
 
 void DrawBanner(const char *title, const char *detail, ImVec4 background, ImVec4 titleColor, ImVec4 detailColor)
