@@ -94,11 +94,18 @@ TEST(MotionRecordingReplayTest, ReplayLocalRecordingsWhenRequested)
 	options.continuous = true;
 
 	std::size_t replayed = 0;
+	std::size_t skippedEmpty = 0;
 	for (const auto& file : files) {
 		SCOPED_TRACE(file.name);
 		const std::string path = openvr_pair::common::WideToUtf8(file.fullPath);
 		const auto recording = replay::LoadRecording(path);
 		ASSERT_TRUE(recording.error.empty()) << recording.error;
+		if (recording.rows.empty()) {
+			++skippedEmpty;
+			std::cout << "[replay] " << file.name
+				<< " skipped=no_replayable_rows\n";
+			continue;
+		}
 
 		const auto result = replay::RunReplay(recording, options);
 		EXPECT_TRUE(result.succeeded) << result.error;
@@ -112,5 +119,6 @@ TEST(MotionRecordingReplayTest, ReplayLocalRecordingsWhenRequested)
 		++replayed;
 	}
 
-	EXPECT_GT(replayed, 0u);
+	EXPECT_GT(replayed, 0u) << "No retained recordings contained replayable rows; skipped "
+		<< skippedEmpty << " empty recordings.";
 }

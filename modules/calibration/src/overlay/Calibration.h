@@ -724,6 +724,15 @@ struct CalibrationContext
 		ResetConfig();
 	}
 
+	void ClearPendingLargeFullSolve()
+	{
+		pendingLargeFullSolve = false;
+		pendingLargeFullSolveSamples = 0;
+		pendingLargeFullSolveTranslation = Eigen::Vector3d::Zero();
+		pendingLargeFullSolveRotation = Eigen::Matrix3d::Identity();
+		pendingLargeFullSolveUncertaintyCm = 0.0;
+	}
+
 	void ResetConfig() {
 		alignmentSpeedParams.thr_rot_tiny = 0.49f * (EIGEN_PI / 180.0f);
 		alignmentSpeedParams.thr_rot_small = 0.5f * (EIGEN_PI / 180.0f);
@@ -870,11 +879,7 @@ struct CalibrationContext
 		continuousStartSnapshot = {};
 		lastAcceptedContinuousSnapshot = {};
 		continuousPreAcceptJumpRejects = 0;
-		pendingLargeFullSolve = false;
-		pendingLargeFullSolveSamples = 0;
-		pendingLargeFullSolveTranslation = Eigen::Vector3d::Zero();
-		pendingLargeFullSolveRotation = Eigen::Matrix3d::Identity();
-		pendingLargeFullSolveUncertaintyCm = 0.0;
+		ClearPendingLargeFullSolve();
 	}
 
 	void ClearRuntimeCalibrationForRecovery()
@@ -887,11 +892,7 @@ struct CalibrationContext
 		calibratedRotation = Eigen::Vector3d::Zero();
 		lastAcceptedContinuousSnapshot = {};
 		continuousPreAcceptJumpRejects = 0;
-		pendingLargeFullSolve = false;
-		pendingLargeFullSolveSamples = 0;
-		pendingLargeFullSolveTranslation = Eigen::Vector3d::Zero();
-		pendingLargeFullSolveRotation = Eigen::Matrix3d::Identity();
-		pendingLargeFullSolveUncertaintyCm = 0.0;
+		ClearPendingLargeFullSolve();
 	}
 
 	CalibrationProfileSnapshot CaptureProfileSnapshot() const

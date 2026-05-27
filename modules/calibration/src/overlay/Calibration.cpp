@@ -729,11 +729,7 @@ void StartContinuousCalibration(const char* reason) {
 	CalCtx.continuousStartSnapshot = CalCtx.CaptureProfileSnapshot();
 	CalCtx.lastAcceptedContinuousSnapshot = {};
 	CalCtx.continuousPreAcceptJumpRejects = 0;
-	CalCtx.pendingLargeFullSolve = false;
-	CalCtx.pendingLargeFullSolveSamples = 0;
-	CalCtx.pendingLargeFullSolveTranslation = Eigen::Vector3d::Zero();
-	CalCtx.pendingLargeFullSolveRotation = Eigen::Matrix3d::Identity();
-	CalCtx.pendingLargeFullSolveUncertaintyCm = 0.0;
+	CalCtx.ClearPendingLargeFullSolve();
 	AssignTargets();
 	if (CalCtx.headMount.mode != HeadMountMode::Off || !CalCtx.headMount.trackerSerial.empty()) {
 		if (wkopenvr::headmount::BindHeadMountToContinuousTarget(CalCtx)) {
@@ -3060,9 +3056,7 @@ void CalibrationTick(double time)
 			}
 		}
 		else if (!guard.accepted) {
-			ctx.pendingLargeFullSolve = false;
-			ctx.pendingLargeFullSolveSamples = 0;
-			ctx.pendingLargeFullSolveUncertaintyCm = 0.0;
+			ctx.ClearPendingLargeFullSolve();
 		}
 
 		if (!guard.accepted && !acceptedByStability) {
@@ -3161,9 +3155,7 @@ void CalibrationTick(double time)
 				(int)ctx.validProfile);
 			Metrics::WriteLogAnnotation(acceptBuf);
 			ctx.continuousPreAcceptJumpRejects = 0;
-			ctx.pendingLargeFullSolve = false;
-			ctx.pendingLargeFullSolveSamples = 0;
-			ctx.pendingLargeFullSolveUncertaintyCm = 0.0;
+			ctx.ClearPendingLargeFullSolve();
 
 			CalCtx.Log("Finished calibration, profile saved\n");
 
@@ -3175,24 +3167,30 @@ void CalibrationTick(double time)
 			// re-localization auto-recovery in TickHmdRelocalizationDetector
 			// (HMD-jump signal, not magnitude) is unchanged and still active.
 		}
-	} else if (!inContinuousState || (solveAttempted && !calibration.isValid())) {
-		CalCtx.Log("Calibration failed.\n");
-	} else if (solveAttempted && calibration.isValid() && !solveProducedCandidate) {
-		static double s_lastNoCandidateAnnotation = -1e9;
-		if (time - s_lastNoCandidateAnnotation >= 5.0) {
-			s_lastNoCandidateAnnotation = time;
-			const char* rejectReason = Metrics::lastRejectReason.empty()
-				? "none"
-				: Metrics::lastRejectReason.c_str();
-			char skipBuf[360];
-			std::snprintf(skipBuf, sizeof skipBuf,
-				"calibration_candidate_skipped: state=%d(%s) reason=no_new_solver_candidate"
-				" source=%s calc_reject_reason=%s sample_count=%zu required=%zu prior_valid=1",
-				(int)ctx.state, CalibrationStateName(ctx.state),
-				calibration.LastComputeUsedRelPose() ? "relpose" : "full",
-				rejectReason,
-				calibration.SampleCount(), CalCtx.SampleCount());
-			Metrics::WriteLogAnnotation(skipBuf);
+	} else {
+		if (inContinuousState) {
+			ctx.ClearPendingLargeFullSolve();
+		}
+		if (!inContinuousState || (solveAttempted && !calibration.isValid())) {
+			CalCtx.Log("Calibration failed.\n");
+		}
+		else if (solveAttempted && calibration.isValid() && !solveProducedCandidate) {
+			static double s_lastNoCandidateAnnotation = -1e9;
+			if (time - s_lastNoCandidateAnnotation >= 5.0) {
+				s_lastNoCandidateAnnotation = time;
+				const char* rejectReason = Metrics::lastRejectReason.empty()
+					? "none"
+					: Metrics::lastRejectReason.c_str();
+				char skipBuf[360];
+				std::snprintf(skipBuf, sizeof skipBuf,
+					"calibration_candidate_skipped: state=%d(%s) reason=no_new_solver_candidate"
+					" source=%s calc_reject_reason=%s sample_count=%zu required=%zu prior_valid=1",
+					(int)ctx.state, CalibrationStateName(ctx.state),
+					calibration.LastComputeUsedRelPose() ? "relpose" : "full",
+					rejectReason,
+					calibration.SampleCount(), CalCtx.SampleCount());
+				Metrics::WriteLogAnnotation(skipBuf);
+			}
 		}
 	}
 

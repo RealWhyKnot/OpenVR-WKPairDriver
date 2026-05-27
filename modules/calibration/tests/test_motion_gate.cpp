@@ -94,6 +94,10 @@ TEST(AutoRecoverySnapTest, FirstMeaningfulContinuousCandidateSnaps) {
         true, false, true,
         /*jumpCm=*/25.0,
         /*solveUncertaintyCm=*/30.0));
+    EXPECT_TRUE(ShouldSnapFirstContinuousCandidate(
+        true, false, true,
+        /*jumpCm=*/40.0,
+        /*solveUncertaintyCm=*/45.0));
 }
 
 TEST(AutoRecoverySnapTest, FirstContinuousCandidateDoesNotSnapForSmallOrUnsafeDeltas) {
@@ -127,6 +131,12 @@ TEST(AutoRecoverySnapTest, FirstContinuousCandidateDoesNotSnapForSmallOrUnsafeDe
         /*hasGuardBaseline=*/true,
         /*jumpCm=*/25.01,
         /*solveUncertaintyCm=*/25.0));
+    EXPECT_FALSE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/true,
+        /*hasAcceptedSnapshot=*/false,
+        /*hasGuardBaseline=*/true,
+        /*jumpCm=*/40.01,
+        /*solveUncertaintyCm=*/40.0));
 }
 
 static_assert(!ShouldBlendCycle(true, false, true),
