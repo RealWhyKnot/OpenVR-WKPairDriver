@@ -4,6 +4,7 @@
 #include "FeaturePlugin.h"
 #include "ManifestRegistration.h"
 #include "Migration.h"
+#include "ProcessPerfLog.h"
 #include "ShellContext.h"
 #include "ShellUi.h"
 #include "Theme.h"
@@ -322,8 +323,20 @@ int main(int argc, char **argv)
 	bool haveVrState = false;
 	bool prevDashboardVisible = false;
 	bool prevVrConnected = false;
+	openvr_pair::common::ProcessPerfSampler perfSampler;
 
 	while (!glfwWindowShouldClose(window) && !vrOverlay->QuitRequested()) {
+		if (openvr_pair::common::IsDebugLoggingEnabled()) {
+			openvr_pair::common::ProcessPerfSample perfSample{};
+			if (perfSampler.MaybeSample(perfSample)) {
+				const std::string line =
+					openvr_pair::common::FormatProcessPerfSample("overlay", perfSample);
+				openvr_pair::common::DiagnosticLog("perf", "%s", line.c_str());
+			}
+		} else {
+			perfSampler.Reset();
+		}
+
 		context.TickToggles();
 
 		for (auto &plugin : plugins) {

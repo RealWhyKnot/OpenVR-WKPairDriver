@@ -16,6 +16,15 @@ struct SavedEndpointReconnectResult {
     bool reapplyAttempted = false;
     bool reapplyConfirmed = false;
     bool timedOut = false;
+    bool refusedConnection = false;
+    bool backoffActive = false;
+    int retryAfterSeconds = 0;
+    int consecutiveFailures = 0;
+};
+
+enum class SavedEndpointReconnectPolicy {
+    Force,
+    RespectBackoff,
 };
 
 // Run the gated auto-apply sequence on startup. Returns true if Guardian is
@@ -56,6 +65,7 @@ void TickGuardianHealth(AdbController& adb);
 // paused, this also re-runs the pause sequence after connecting.
 SavedEndpointReconnectResult ReconnectSavedEndpoint(
     AdbController& adb,
-    bool reapplyGuardianPause);
+    bool reapplyGuardianPause,
+    SavedEndpointReconnectPolicy policy = SavedEndpointReconnectPolicy::Force);
 
 } // namespace wkopenvr::adb

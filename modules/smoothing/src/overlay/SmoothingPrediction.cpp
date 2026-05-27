@@ -4,6 +4,7 @@
 #include "SmoothingPlugin.h"
 
 #include "CalibrationAnchor.h"
+#include "DevSimulationState.h"
 #include "DeviceFilters.h"
 #include "Protocol.h"
 #include "UiHelpers.h"
@@ -22,6 +23,8 @@
 #include <string>
 
 namespace {
+
+namespace devsim = openvr_pair::overlay::devsim;
 
 struct ExternalSmoothingTool
 {
@@ -161,40 +164,19 @@ void SmoothingPlugin::DrawPredictionTab()
 	ImGui::SeparatorText("Per-tracker smoothness");
 	ImGui::Spacing();
 
-	auto *vrSystem = vr::VRSystem();
-	if (!vrSystem) {
-		ImGui::TextDisabled("(VR system not available)");
-		return;
-	}
-
 	bool anyShown = false;
 	bool dirty = false;
-	char buffer[vr::k_unMaxPropertyStringSize];
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
-		const auto deviceClass = vrSystem->GetTrackedDeviceClass(id);
-		if (deviceClass == vr::TrackedDeviceClass_Invalid) continue;
 
-		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, sizeof buffer, &err);
-		if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
-		std::string serial = buffer;
-
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String, buffer, sizeof buffer, &err);
-		std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
-
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
-		std::string rawSystem = (err == vr::TrackedProp_Success) ? buffer : "";
-		std::string sys = !rawSystem.empty() ? PrettyTrackingSystem(rawSystem.c_str()) : "";
-
+	auto drawPredictionDevice = [&](uint32_t id,
+		vr::TrackedDeviceClass deviceClass,
+		const std::string &serial,
+		const std::string &model,
+		const std::string &rawSystem,
+		const std::string &sys,
+		bool canSendToDriver) {
 		if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(
 				deviceClass, serial, model, rawSystem)) {
-			auto stale = cfg_.trackerSmoothness.find(serial);
-			if (stale != cfg_.trackerSmoothness.end()) {
-				cfg_.trackerSmoothness.erase(stale);
-				SendDevicePrediction(id, 0);
-				dirty = true;
-			}
-			continue;
+			return;
 		}
 
 		const bool isHmd = (deviceClass == vr::TrackedDeviceClass_HMD);
@@ -226,7 +208,7 @@ void SmoothingPlugin::DrawPredictionTab()
 		if (ImGui::SliderInt("smoothness##slider", &smoothness, 0, 100, "%d%%")) {
 			if (smoothness <= 0) cfg_.trackerSmoothness.erase(serial);
 			else cfg_.trackerSmoothness[serial] = smoothness;
-			SendDevicePrediction(id, smoothness);
+			if (canSendToDriver) SendDevicePrediction(id, smoothness);
 			dirty = true;
 		}
 		ImGui::EndDisabled();
@@ -237,6 +219,9 @@ void SmoothingPlugin::DrawPredictionTab()
 				ImGui::SetTooltip(
 					"Locked to 0. This device is being used by continuous calibration;\n"
 					"smoothing it would add lag to the calibration solve.");
+			} else if (!canSendToDriver) {
+				ImGui::SetTooltip(
+					"Desktop simulation only. The value is saved locally but no driver write is sent.");
 			} else {
 				ImGui::SetTooltip(
 					"0 = raw motion (no suppression).\n"
@@ -247,7 +232,76 @@ void SmoothingPlugin::DrawPredictionTab()
 		ImGui::Spacing();
 		ImGui::PopID();
 		anyShown = true;
+	};
+
+	auto *vrSystem = vr::VRSystem();
+	if (!vrSystem && !devsim::IsEnabled()) {
+		ImGui::TextDisabled("(VR system not available)");
+		return;
 	}
+
+	char buffer[vr::k_unMaxPropertyStringSize];
+	if (vrSystem) {
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			const auto deviceClass = vrSystem->GetTrackedDeviceClass(id);
+			if (deviceClass == vr::TrackedDeviceClass_Invalid) continue;
+
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, sizeof buffer, &err);
+			if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
+			std::string serial = buffer;
+
+			vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String, buffer, sizeof buffer, &err);
+			std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
+
+			vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
+			std::string rawSystem = (err == vr::TrackedProp_Success) ? buffer : "";
+			std::string sys = !rawSystem.empty() ? PrettyTrackingSystem(rawSystem.c_str()) : "";
+
+			if (!openvr_pair::overlay::ShouldShowInSmoothingPredictionList(
+					deviceClass, serial, model, rawSystem)) {
+				auto stale = cfg_.trackerSmoothness.find(serial);
+				if (stale != cfg_.trackerSmoothness.end()) {
+					cfg_.trackerSmoothness.erase(stale);
+					SendDevicePrediction(id, 0);
+					dirty = true;
+				}
+				continue;
+			}
+
+			drawPredictionDevice(id, deviceClass, serial, model, rawSystem, sys, true);
+		}
+	}
+
+	if (devsim::IsEnabled()) {
+		drawPredictionDevice(devsim::kHmdId, vr::TrackedDeviceClass_HMD,
+			devsim::SerialForDeviceId(devsim::kHmdId),
+			devsim::ModelForDeviceId(devsim::kHmdId),
+			devsim::ReferenceTrackingSystem(),
+			PrettyTrackingSystem(devsim::ReferenceTrackingSystem()),
+			false);
+		drawPredictionDevice(devsim::kTrackerId, vr::TrackedDeviceClass_GenericTracker,
+			devsim::SerialForDeviceId(devsim::kTrackerId),
+			devsim::ModelForDeviceId(devsim::kTrackerId),
+			devsim::TargetTrackingSystem(),
+			PrettyTrackingSystem(devsim::TargetTrackingSystem()),
+			false);
+		if (devsim::IncludeIndexControllers()) {
+			drawPredictionDevice(devsim::kLeftControllerId, vr::TrackedDeviceClass_Controller,
+				devsim::SerialForDeviceId(devsim::kLeftControllerId),
+				devsim::ModelForDeviceId(devsim::kLeftControllerId),
+				devsim::TargetTrackingSystem(),
+				PrettyTrackingSystem(devsim::TargetTrackingSystem()),
+				false);
+			drawPredictionDevice(devsim::kRightControllerId, vr::TrackedDeviceClass_Controller,
+				devsim::SerialForDeviceId(devsim::kRightControllerId),
+				devsim::ModelForDeviceId(devsim::kRightControllerId),
+				devsim::TargetTrackingSystem(),
+				PrettyTrackingSystem(devsim::TargetTrackingSystem()),
+				false);
+		}
+	}
+
 	if (!anyShown) ImGui::TextDisabled("(No tracked devices found.)");
 
 	if (dirty) SaveConfig(cfg_);

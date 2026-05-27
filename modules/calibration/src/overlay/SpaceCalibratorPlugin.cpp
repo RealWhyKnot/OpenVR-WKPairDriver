@@ -21,6 +21,10 @@ void CCal_DrawLogsPanel();
 void SpaceCalibratorPlugin::OnStart(openvr_pair::overlay::ShellContext &)
 {
 	Metrics::enableLogs = openvr_pair::common::IsDebugLoggingEnabled();
+	lastDebugLoggingEnabled_ = Metrics::enableLogs;
+	if (Metrics::enableLogs) {
+		Metrics::EnsureLogFileReady("spacecal_plugin_start");
+	}
 
 	// Match the standalone SpaceCalibrator binary's typography so the
 	// calibration UI looks the way long-time users expect. The umbrella
@@ -44,6 +48,7 @@ void SpaceCalibratorPlugin::OnStart(openvr_pair::overlay::ShellContext &)
 void SpaceCalibratorPlugin::OnShutdown(openvr_pair::overlay::ShellContext &)
 {
 	CCal_UmbrellaShutdown();
+	Metrics::CloseLogFile();
 }
 
 void SpaceCalibratorPlugin::Tick(openvr_pair::overlay::ShellContext &)
@@ -65,7 +70,14 @@ void SpaceCalibratorPlugin::DrawLogsSection(openvr_pair::overlay::ShellContext &
 
 void SpaceCalibratorPlugin::OnDebugLoggingChanged(bool enabled)
 {
+	if (enabled == lastDebugLoggingEnabled_) return;
+	lastDebugLoggingEnabled_ = enabled;
 	Metrics::enableLogs = enabled;
+	if (enabled) {
+		Metrics::EnsureLogFileReady("debug_logging_enabled");
+	} else {
+		Metrics::CloseLogFile();
+	}
 }
 
 namespace openvr_pair::overlay {

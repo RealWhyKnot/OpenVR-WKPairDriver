@@ -1,7 +1,9 @@
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
 #include "DebugLogging.h"
+#include "DevFakeDevices.h"
 #include "MotionRecording.h"
+#include "Win32Text.h"
 
 #include <string>
 #include <vector>
@@ -57,10 +59,15 @@ std::string FormatBytesShort(uint64_t n) {
 	return buf;
 }
 
+std::string FormatLogSize(long long n) {
+	if (n < 0) return "unknown";
+	return FormatBytesShort(static_cast<uint64_t>(n));
+}
+
 // Resolve the logs directory. ListRecordings discovers it internally for
-// scanning; we want the parent path for the Explorer button. If the list is
-// empty, derive from the first entry's full path; if THAT's empty too, fall
-// back to the standard %LocalAppDataLow%\WKOpenVR\Logs path.
+// scanning; we want the parent path for the Explorer button. If the list has
+// entries, derive from the first entry's full path; otherwise fall back to
+// the standard %LocalAppDataLow%\WKOpenVR\Logs path.
 std::wstring GetLogsDirectory() {
 	auto& s = LogsState();
 	if (!s.files.empty()) {
@@ -121,9 +128,9 @@ void CCal_DrawLogsPanel() {
 	auto& state = LogsState();
 
 	ImGui::TextWrapped(
-		"Debug logs are CSV files written one row per calibration tick. They're the "
-		"first thing to attach to a bug report -- the team can replay the captured "
-		"poses against the live math to reproduce what you saw.");
+		"SpaceCal writes a replayable CSV while debug logging is enabled. The file opens "
+		"as soon as logging turns on, flushes each write to disk, and records raw poses "
+		"so the calibration math can be replayed later.");
 	ImGui::Spacing();
 
 	// Recording status + toggle. The log file IS the recording -- there's no
@@ -137,6 +144,9 @@ void CCal_DrawLogsPanel() {
 	// are handled by Metrics::enableLogs's initializer.
 	const bool isDevBuild = openvr_pair::common::IsDebugLoggingForcedOn();
 	Metrics::enableLogs = openvr_pair::common::IsDebugLoggingEnabled();
+	if (Metrics::enableLogs) {
+		Metrics::EnsureLogFileReady(nullptr);
+	}
 	if (isDevBuild) {
 		Metrics::enableLogs = true;
 		ImGui::BeginDisabled();
@@ -145,6 +155,11 @@ void CCal_DrawLogsPanel() {
 	if (ImGui::Checkbox("Enable debug logging", &enableLogs)) {
 		openvr_pair::common::SetDebugLoggingEnabled(enableLogs);
 		Metrics::enableLogs = openvr_pair::common::IsDebugLoggingEnabled();
+		if (Metrics::enableLogs) {
+			Metrics::EnsureLogFileReady("logs_toggle_on");
+		} else {
+			Metrics::CloseLogFile();
+		}
 	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Write a per-tick CSV of calibration state to %%LocalAppDataLow%%\\WKOpenVR\\Logs\\\n"
@@ -164,11 +179,100 @@ void CCal_DrawLogsPanel() {
 		ImGui::TextDisabled(" (off)");
 	}
 
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::TextDisabled("SpaceCal replay CSV");
+	const Metrics::LogHealth health = Metrics::GetLogHealth();
+	if (!Metrics::enableLogs) {
+		ImGui::TextWrapped(
+			"Debug logging is off. No SpaceCal CSV, diagnostics log, replay rows, or "
+			"calibration annotations are written until it is enabled.");
+	} else if (health.open) {
+		ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Recording to disk");
+		ImGui::TextWrapped("%s", openvr_pair::common::WideToUtf8(health.path).c_str());
+		ImGui::Text("Size: %s   Rows: %llu   Annotations: %llu   Open attempts: %llu",
+			FormatLogSize(health.sizeBytes).c_str(),
+			(unsigned long long)health.rowsWritten,
+			(unsigned long long)health.annotationsWritten,
+			(unsigned long long)health.openAttempts);
+		ImGui::Text("Replay: %s",
+			health.devAutoRecording
+				? "dev auto-recording on; newest captures retained"
+				: "enabled while debug logging is on");
+	} else {
+		ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+			"SpaceCal CSV is not open");
+		if (health.lastErrorCode) {
+			ImGui::TextWrapped("Status: %s  Error: %lu",
+				health.status.empty() ? "unknown" : health.status.c_str(),
+				health.lastErrorCode);
+		} else {
+			ImGui::TextWrapped("Status: %s",
+				health.status.empty() ? "unknown" : health.status.c_str());
+		}
+	}
+
+	ImGui::BeginDisabled(!health.open);
+	if (ImGui::SmallButton("Flush now##spacecal_log")) {
+		if (Metrics::FlushLogFile()) {
+			state.copyHint = "SpaceCal log flushed to disk";
+		} else {
+			state.copyHint = "SpaceCal log flush failed";
+		}
+		state.copyHintExpireTime = ImGui::GetTime() + 2.5;
+	}
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Copy current path##spacecal_log")) {
+		if (CopyToClipboardW(health.path)) {
+			state.copyHint = "Current log path copied";
+		} else {
+			state.copyHint = "Failed to copy path (clipboard busy?)";
+		}
+		state.copyHintExpireTime = ImGui::GetTime() + 2.5;
+	}
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Write health snapshot##spacecal_log")) {
+		Metrics::WriteLogHealthSnapshot("logs_tab_button");
+		state.copyHint = "Log health snapshot written";
+		state.copyHintExpireTime = ImGui::GetTime() + 2.5;
+	}
+	ImGui::EndDisabled();
+
+	if (isDevBuild) {
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::TextDisabled("Dev simulation");
+
+		bool fakeDevices = spacecal::devfake::IsEnabled();
+		if (ImGui::Checkbox("Simulated tracker and HMD", &fakeDevices)) {
+			spacecal::devfake::SetEnabled(fakeDevices);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Adds a simulated Quest HMD and Vive tracker so calibration UI can run from the desktop.");
+		}
+
+		bool fakeControllers = spacecal::devfake::IncludeIndexControllers();
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!fakeDevices);
+		if (ImGui::Checkbox("Simulated Index controllers", &fakeControllers)) {
+			spacecal::devfake::SetIncludeIndexControllers(fakeControllers);
+		}
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Adds left and right Index-style controllers to the fake lighthouse space.");
+		}
+
+		if (fakeDevices) {
+			ImGui::TextWrapped(
+				"Simulated devices are local to the overlay and do not push transforms to the SteamVR driver.");
+		}
+	}
+
 	// Drift-subsystem state dump. Captures rec A rest detector, rec C
 	// recovery delta buffer, rec F chi-square detector state to the log
 	// in a single batch of [drift][state-dump] annotations. Useful to
 	// attach to a bug report alongside the rolling annotations.
-	ImGui::SameLine();
+	ImGui::Spacing();
 	if (ImGui::Button("Dump drift state")) {
 		DumpDriftSubsystemState();
 	}

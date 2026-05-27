@@ -24,6 +24,8 @@ vr::DriverPose_t MakePose(double x, double y, double z,
     p.vecPosition[2] = z;
     p.qRotation.w = 1.0;
     p.qWorldFromDriverRotation.w = 1.0;
+    p.qDriverFromHeadRotation.w = 1.0;
+    p.deviceIsConnected = true;
     return p;
 }
 
@@ -249,4 +251,98 @@ TEST(DriverSynth, Tracker_snap_for_different_deviceId_rejected)
 
     vr::DriverPose_t out{};
     EXPECT_FALSE(Compose(state, trackerSnap, now, out));
+}
+
+TEST(DriverSynthBlend, BriefStaleTrackerHoldsLastSynthPose)
+{
+    using ms = std::chrono::milliseconds;
+    const auto t0 = clk::now();
+    SourceBlendState blend{};
+    vr::DriverPose_t out{};
+
+    const vr::DriverPose_t fallback = MakePose(10.0, 1.7, 0.0);
+    const vr::DriverPose_t synth = MakePose(0.0, 1.7, 0.0);
+
+    auto r = StepSourceBlend(blend, fallback, &synth, true, t0, out);
+    EXPECT_EQ(r.phase, SourceBlendPhase::SynthStable);
+    EXPECT_NEAR(out.vecPosition[0], 0.0, 1e-9);
+
+    r = StepSourceBlend(blend, fallback, nullptr, false, t0 + ms(50), out);
+    EXPECT_EQ(r.phase, SourceBlendPhase::GraceHold);
+    EXPECT_NEAR(out.vecPosition[0], 0.0, 1e-9);
+}
+
+TEST(DriverSynthBlend, PersistentTrackerLossBlendsTowardFallback)
+{
+    using ms = std::chrono::milliseconds;
+    const auto t0 = clk::now();
+    SourceBlendState blend{};
+    vr::DriverPose_t out{};
+
+    const vr::DriverPose_t fallback = MakePose(10.0, 1.7, 0.0);
+    const vr::DriverPose_t synth = MakePose(0.0, 1.7, 0.0);
+
+    StepSourceBlend(blend, fallback, &synth, true, t0, out);
+    StepSourceBlend(blend, fallback, nullptr, false, t0 + ms(1), out);
+    StepSourceBlend(blend, fallback, nullptr, false,
+                    t0 + ms(kGraceHoldMs + 1), out);
+    auto r = StepSourceBlend(blend, fallback, nullptr, false,
+                             t0 + ms(kGraceHoldMs + 1 + kBlendToFallbackMs / 2),
+                             out);
+
+    EXPECT_EQ(r.phase, SourceBlendPhase::BlendingToFallback);
+    EXPECT_GT(out.vecPosition[0], 0.0);
+    EXPECT_LT(out.vecPosition[0], 10.0);
+}
+
+TEST(DriverSynthBlend, RecoveredTrackerWaitsThenBlendsBackToSynth)
+{
+    using ms = std::chrono::milliseconds;
+    const auto t0 = clk::now();
+    SourceBlendState blend{};
+    vr::DriverPose_t out{};
+
+    const vr::DriverPose_t fallback = MakePose(10.0, 1.7, 0.0);
+    const vr::DriverPose_t synthA = MakePose(0.0, 1.7, 0.0);
+    const vr::DriverPose_t synthB = MakePose(2.0, 1.7, 0.0);
+
+    StepSourceBlend(blend, fallback, &synthA, true, t0, out);
+    StepSourceBlend(blend, fallback, nullptr, false, t0 + ms(1), out);
+    StepSourceBlend(blend, fallback, nullptr, false,
+                    t0 + ms(kGraceHoldMs + 1), out);
+    StepSourceBlend(blend, fallback, nullptr, false,
+                    t0 + ms(kGraceHoldMs + 1 + kBlendToFallbackMs + 1), out);
+    EXPECT_EQ(blend.phase, SourceBlendPhase::FallbackStable);
+    EXPECT_NEAR(out.vecPosition[0], 10.0, 1e-9);
+
+    const auto recovered = t0 + ms(kGraceHoldMs + kBlendToFallbackMs + 20);
+    auto r = StepSourceBlend(blend, fallback, &synthB, true, recovered, out);
+    EXPECT_EQ(r.phase, SourceBlendPhase::WaitingForStableSynth);
+    EXPECT_NEAR(out.vecPosition[0], 10.0, 1e-9);
+
+    StepSourceBlend(blend, fallback, &synthB, true,
+                    recovered + ms(kStableBeforeSynthMs + 1), out);
+    r = StepSourceBlend(blend, fallback, &synthB, true,
+                        recovered + ms(kStableBeforeSynthMs + 1 + kBlendToSynthMs / 2),
+                        out);
+    EXPECT_EQ(r.phase, SourceBlendPhase::BlendingToSynth);
+    EXPECT_GT(out.vecPosition[0], 2.0);
+    EXPECT_LT(out.vecPosition[0], 10.0);
+}
+
+TEST(DriverSynthBlend, BlendPoseNormalizesRotations)
+{
+    auto a = MakePose(0.0, 1.7, 0.0);
+    auto b = MakePose(1.0, 1.7, 0.0);
+    b.qRotation = {0.0, 0.0, 1.0, 0.0};
+
+    vr::DriverPose_t out{};
+    BlendPose(a, b, 0.5, out);
+
+    const double n =
+        out.qRotation.w * out.qRotation.w
+        + out.qRotation.x * out.qRotation.x
+        + out.qRotation.y * out.qRotation.y
+        + out.qRotation.z * out.qRotation.z;
+    EXPECT_NEAR(n, 1.0, 1e-6);
 }

@@ -24,6 +24,7 @@ private:
 	SmoothingConfig cfg_ = LoadConfig();
 	SmoothingIPCClient ipc_;
 	std::string connectError_;
+	std::chrono::steady_clock::time_point nextConnectAttempt_{};
 
 	// Cached state for the external-smoothing-tool banner shown in the
 	// Prediction sub-tab. Updated by Tick() at most every 5 seconds; the UI

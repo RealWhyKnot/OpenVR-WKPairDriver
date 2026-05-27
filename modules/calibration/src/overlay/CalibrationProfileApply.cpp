@@ -3,6 +3,7 @@
 #include "CalibrationInternal.h"
 #include "CalibrationMetrics.h"
 #include "CalibrationPoseSampling.h"
+#include "DevFakeDevices.h"
 #include "MotionGate.h"
 #include "VRState.h"
 
@@ -227,6 +228,17 @@ namespace {
 
 void ScanAndApplyProfile(CalibrationContext &ctx)
 {
+	if (!vr::VRSystem() || spacecal::devfake::IsEnabled()) {
+		ctx.enabled = ctx.validProfile;
+		static bool s_loggedSkippedApply = false;
+		if (spacecal::devfake::IsEnabled() && !s_loggedSkippedApply) {
+			s_loggedSkippedApply = true;
+			Metrics::WriteLogAnnotation(
+				"[dev-fake-devices] profile apply skipped for simulated devices");
+		}
+		return;
+	}
+
 	std::unique_ptr<char[]> buffer_array(new char [vr::k_unMaxPropertyStringSize]);
 	char* buffer = buffer_array.get();
 	ctx.enabled = ctx.validProfile;

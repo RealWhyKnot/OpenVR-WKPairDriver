@@ -19,10 +19,6 @@ namespace {
 void DrawTransientStatus(ShellContext &context)
 {
 	if (context.status.empty()) return;
-	const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
-	const float windowHeight = ImGui::GetWindowHeight();
-	const float padding = ImGui::GetStyle().WindowPadding.y;
-	ImGui::SetCursorPosY(windowHeight - lineHeight * 3.0f - padding);
 	ImGui::Separator();
 	ui::DrawTextWrapped(context.status.c_str());
 }
@@ -213,7 +209,13 @@ void DrawShellWindow(ShellContext &context, std::vector<std::unique_ptr<FeatureP
 
 	ImGui::Begin("WKOpenVR", nullptr, flags);
 
-	{
+	const bool hasStatus = !context.status.empty();
+	const float statusReserve = hasStatus
+		? ImGui::GetTextLineHeightWithSpacing() * 3.0f + ImGui::GetStyle().ItemSpacing.y
+		: 0.0f;
+
+	if (ImGui::BeginChild("##shell_content", ImVec2(0.0f, hasStatus ? -statusReserve : 0.0f),
+			false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
 		ui::TabBarScope tabs("tabs");
 		if (tabs) {
 			for (auto &plugin : plugins) {
@@ -231,6 +233,7 @@ void DrawShellWindow(ShellContext &context, std::vector<std::unique_ptr<FeatureP
 			});
 		}
 	}
+	ImGui::EndChild();
 
 	DrawTransientStatus(context);
 	ImGui::End();

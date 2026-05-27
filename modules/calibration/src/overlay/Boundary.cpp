@@ -126,6 +126,32 @@ std::vector<BoundaryVertex> TransformToStandingUniverse(
     return out;
 }
 
+Eigen::AffineCompact3d ProfileTransformFromCalibration(
+    Eigen::Vector3d eulerDeg,
+    Eigen::Vector3d transCm)
+{
+    const Eigen::Vector3d euler = eulerDeg * EIGEN_PI / 180.0;
+    const Eigen::Quaterniond rot =
+        Eigen::AngleAxisd(euler(0), Eigen::Vector3d::UnitZ()) *
+        Eigen::AngleAxisd(euler(1), Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(euler(2), Eigen::Vector3d::UnitX());
+
+    Eigen::AffineCompact3d transform = Eigen::AffineCompact3d::Identity();
+    transform.linear() = rot.toRotationMatrix();
+    transform.translation() = transCm * 0.01;
+    return transform;
+}
+
+Eigen::Affine3d TransformPoseToStandingUniverse(
+    const Eigen::Affine3d& rawPose,
+    const Eigen::AffineCompact3d& targetToStanding)
+{
+    Eigen::Affine3d transform = Eigen::Affine3d::Identity();
+    transform.linear() = targetToStanding.linear();
+    transform.translation() = targetToStanding.translation();
+    return transform * rawPose;
+}
+
 // ---------------------------------------------------------------------------
 // Chaperone push
 // ---------------------------------------------------------------------------

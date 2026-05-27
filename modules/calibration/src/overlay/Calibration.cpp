@@ -10,6 +10,7 @@
 #include "CalibrationMetrics.h"
 #include "BuildChannel.h"
 #include "Configuration.h"
+#include "DevFakeDevices.h"
 #include "IPCClient.h"
 #include "CalibrationCalc.h"
 #include "ContinuousCalibrationGuard.h"
@@ -828,12 +829,22 @@ void EndContinuousCalibration() {
 
 void CalibrationTick(double time)
 {
-	if (!vr::VRSystem())
+	const bool fakeDevices = spacecal::devfake::IsEnabled();
+	if (!vr::VRSystem() && !fakeDevices) {
+		static double s_lastNoVrSystemLog = -1e9;
+		if (time - s_lastNoVrSystemLog >= 5.0) {
+			s_lastNoVrSystemLog = time;
+			Metrics::WriteLogAnnotation("[tick-skip] reason=no_vrsystem fake_devices=0");
+		}
 		return;
+	}
 
 	auto &ctx = CalCtx;
 	if ((time - ctx.timeLastTick) < 0.05)
 		return;
+	if (fakeDevices) {
+		spacecal::devfake::TickPoses(ctx, time);
+	}
 
 	// Resolve LockMode -> lockRelativePosition every tick before any code
 	// downstream reads the bool. The detector itself is updated in
@@ -873,8 +884,10 @@ void CalibrationTick(double time)
 	// reporting yet (e.g. a fresh HMD that hasn't woken up); we treat
 	// Unknown as "not present" so no spurious edges fire during startup.
 	{
-		const vr::EDeviceActivityLevel activity =
-			vr::VRSystem()->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+		auto* vrSystem = vr::VRSystem();
+		const vr::EDeviceActivityLevel activity = vrSystem
+			? vrSystem->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd)
+			: vr::k_EDeviceActivityLevel_UserInteraction;
 		const bool nowPresent =
 			(activity == vr::k_EDeviceActivityLevel_UserInteraction)
 			|| (activity == vr::k_EDeviceActivityLevel_UserInteraction_Timeout);
@@ -1902,14 +1915,16 @@ void CalibrationTick(double time)
 	// cadence and surfaces the banner inside its Prediction sub-tab.
 
 	ctx.timeLastTick = time;
-	shmem.ReadNewPoses([&](const protocol::DriverPoseShmem::AugmentedPose& augmented_pose) {
-		if (augmented_pose.deviceId >= 0 && augmented_pose.deviceId < (int)vr::k_unMaxTrackedDeviceCount) {
-			ctx.devicePoses[augmented_pose.deviceId] = augmented_pose.pose;
-			// Track per-device shmem QPC timestamps so CollectSample can compute the
-			// inter-system time delta when applying targetLatencyOffsetMs.
-			ctx.devicePoseSampleTimes[augmented_pose.deviceId] = augmented_pose.sample_time;
-		}
-	});
+	if (!fakeDevices) {
+		shmem.ReadNewPoses([&](const protocol::DriverPoseShmem::AugmentedPose& augmented_pose) {
+			if (augmented_pose.deviceId >= 0 && augmented_pose.deviceId < (int)vr::k_unMaxTrackedDeviceCount) {
+				ctx.devicePoses[augmented_pose.deviceId] = augmented_pose.pose;
+				// Track per-device shmem QPC timestamps so CollectSample can compute the
+				// inter-system time delta when applying targetLatencyOffsetMs.
+				ctx.devicePoseSampleTimes[augmented_pose.deviceId] = augmented_pose.sample_time;
+			}
+		});
+	}
 
 	// Sample driver-side telemetry counters and push the per-tick deltas (in Hz)
 	// into the metrics time series. Initialize the prior snapshot lazily on the
@@ -2178,8 +2193,15 @@ void CalibrationTick(double time)
 
 		char referenceSerial[256], targetSerial[256];
 		referenceSerial[0] = targetSerial[0] = 0;
-		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.referenceID, vr::Prop_SerialNumber_String, referenceSerial, 256);
-		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.targetID, vr::Prop_SerialNumber_String, targetSerial, 256);
+		if (auto* vrSystem = vr::VRSystem()) {
+			vrSystem->GetStringTrackedDeviceProperty(ctx.referenceID, vr::Prop_SerialNumber_String, referenceSerial, 256);
+			vrSystem->GetStringTrackedDeviceProperty(ctx.targetID, vr::Prop_SerialNumber_String, targetSerial, 256);
+		} else if (fakeDevices) {
+			snprintf(referenceSerial, sizeof referenceSerial, "%s",
+				spacecal::devfake::SerialForDeviceId(ctx.referenceID));
+			snprintf(targetSerial, sizeof targetSerial, "%s",
+				spacecal::devfake::SerialForDeviceId(ctx.targetID));
+		}
 
 		char buf[256];
 		snprintf(buf, sizeof buf, "Reference device ID: %d, serial: %s\n", ctx.referenceID, referenceSerial);
@@ -2386,16 +2408,42 @@ void CalibrationTick(double time)
 			|| (time - s_lastDriverSynthStatusLog) >= 5.0;
 
 		if (shouldLog) {
-			char sbuf[360];
+			double calibratedProxyDeltaM = -1.0;
+			if (synthStatus.ready && ctx.validProfile) {
+				const vr::DriverPose_t& trackerPose =
+					ctx.devicePoses[ctx.headMount.deviceID];
+				const vr::DriverPose_t& hmdPose =
+					ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+				const Eigen::AffineCompact3d proxyHeadRaw =
+					spacecal::headmount::ComputeHeadWorldPose(
+						trackerPose,
+						ctx.headMount.headFromTracker);
+				const Eigen::AffineCompact3d calibratedProxyHead =
+					ProfileTransform(ctx.calibratedRotation, ctx.calibratedTranslation)
+					* proxyHeadRaw;
+				const Pose hmdRaw = ConvertPose(hmdPose);
+				calibratedProxyDeltaM =
+					(hmdRaw.trans - calibratedProxyHead.translation()).norm();
+				if (!std::isfinite(calibratedProxyDeltaM)) {
+					calibratedProxyDeltaM = -1.0;
+				}
+			}
+
+			char sbuf[480];
 			snprintf(sbuf, sizeof sbuf,
 				"continuous_solve_running: mode=driver_synth synth_ready=%d reason=%s"
-				" target_matches=%d deviceID=%d hmd_proxy_delta_cm=%.2f",
+				" target_matches=%d deviceID=%d profile_valid=%d"
+				" hmd_proxy_raw_delta_cm=%.2f hmd_proxy_calibrated_delta_cm=%.2f",
 				(int)synthStatus.ready,
 				synthStatus.reason,
 				(int)targetMatches,
 				(int)ctx.headMount.deviceID,
+				(int)ctx.validProfile,
 				synthStatus.hmdProxyDeltaM >= 0.0
 					? synthStatus.hmdProxyDeltaM * 100.0
+					: -1.0,
+				calibratedProxyDeltaM >= 0.0
+					? calibratedProxyDeltaM * 100.0
 					: -1.0);
 			Metrics::WriteLogAnnotation(sbuf);
 			s_lastDriverSynthStatusLog = time;
@@ -2484,7 +2532,10 @@ void CalibrationTick(double time)
 		// frozen rotation samples for the duration of the solve.
 	}
 
-	if (CalCtx.state == CalibrationState::Continuous && CalCtx.requireTriggerPressToApply && CalCtx.hasAppliedCalibrationResult) {
+	if (CalCtx.state == CalibrationState::Continuous
+		&& CalCtx.requireTriggerPressToApply
+		&& CalCtx.hasAppliedCalibrationResult
+		&& !fakeDevices) {
 		bool triggerPressed = true;
 		bool sawController = false;
 		auto* vrs = vr::VRSystem();

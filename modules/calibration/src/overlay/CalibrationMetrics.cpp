@@ -1,13 +1,20 @@
 #include "CalibrationMetrics.h"
 #include "BuildStamp.h"
 #include "DiagnosticsLog.h"
+#include "FileLog.h"
 #include "LogPaths.h"
 #include "MotionRecording.h"
+#include "Win32Paths.h"
 #include "Win32Text.h"
-#include <fstream>
+#include <cerrno>
+#include <cstdio>
+#include <fcntl.h>
 #include <openvr.h>
+#include <ostream>
+#include <sstream>
 #include <string>
 #include <vector>
+#include <io.h>
 #include <tlhelp32.h>   // Toolhelp32 snapshot — used for parent-process lookup
                         // in the launch-context banner block below.
 #include <psapi.h>      // QueryFullProcessImageNameW for parent exe path.
@@ -130,9 +137,18 @@ namespace Metrics {
 	bool enableLogs = (std::string(SPACECAL_BUILD_CHANNEL) == "dev");
 #endif
 
-	static std::ofstream logFile;
+	static FILE* logFile = nullptr;
+	static std::wstring logFilePath;
 	static bool logFileIsOpen = false;
 	static bool failedToOpenLogFile = false;
+	static ULONGLONG failedToOpenLogFileAtMs = 0;
+	static bool logWriteFailed = false;
+	static bool logFlushFailed = false;
+	static uint64_t logRowsWritten = 0;
+	static uint64_t logAnnotationsWritten = 0;
+	static uint64_t logOpenAttempts = 0;
+	static unsigned long lastLogErrorCode = 0;
+	static std::string lastLogStatus = "not opened";
 
 	// v2 wire-format addition: per-tick raw reference and target poses plus the tick
 	// phase. Filled by SetTickRawPoses() each tick and consumed by the field writers
@@ -175,8 +191,14 @@ namespace Metrics {
 
 	struct CsvField {
 		const char* name;
-		void (*writer)(std::ofstream& s);
+		void (*writer)(std::ostream& s);
 	};
+
+	static void SetLogStatus(const std::string& status, unsigned long errorCode = 0)
+	{
+		lastLogStatus = status;
+		lastLogErrorCode = errorCode;
+	}
 
 #define TS_FIELD(n) \
 	{ #n, [](auto &s) { s << n.last(); } }
@@ -291,7 +313,7 @@ namespace Metrics {
 		return w ? openvr_pair::common::WideToUtf8(w) : std::string();
 	}
 
-	static void WriteLaunchContextBanner(std::ofstream& out)
+	static void WriteLaunchContextBanner(std::ostream& out)
 	{
 		// --- Process identity ----------------------------------------------------
 		const DWORD pid = GetCurrentProcessId();
@@ -505,20 +527,185 @@ namespace Metrics {
 		out << vrEnvDump;
 	}
 
-	// %userprofile%\LocalLow\SpaceCalibrator\Logs
-	static bool OpenLogFile() {
-		std::wstring path = openvr_pair::common::TimestampedLogPath(L"spacecal_log");
-		if (path.empty()) return false;
+	static std::wstring InsertUniqueSuffix(const std::wstring& fileName, DWORD pid, int attempt)
+	{
+		if (attempt == 0) return fileName;
 
-		logFile.open(path);
-		if (logFile.fail()) {
+		const size_t dot = fileName.rfind(L".txt");
+		std::wstring out = dot == std::wstring::npos ? fileName : fileName.substr(0, dot);
+		wchar_t suffix[64] = {};
+		swprintf_s(suffix, L".%lu-%02d", static_cast<unsigned long>(pid), attempt);
+		out += suffix;
+		if (dot != std::wstring::npos) {
+			out += fileName.substr(dot);
+		}
+		return out;
+	}
+
+	static FILE* OpenUniqueLogFile(std::wstring& outPath)
+	{
+		std::wstring directory = openvr_pair::common::WkOpenVrLogsPath(true);
+		if (directory.empty()) {
+			SetLogStatus("log directory unavailable");
+			return nullptr;
+		}
+
+		openvr_pair::common::DeleteOldLogFiles(directory, L"spacecal_log");
+
+		SYSTEMTIME now{};
+		GetSystemTime(&now);
+		const std::wstring baseName = openvr_pair::common::TimestampedLogFileName(L"spacecal_log", now);
+		if (baseName.empty()) return nullptr;
+
+		if (!directory.empty() && directory.back() != L'\\' && directory.back() != L'/') {
+			directory.push_back(L'\\');
+		}
+
+		const DWORD pid = GetCurrentProcessId();
+		for (int attempt = 0; attempt < 100; ++attempt) {
+			std::wstring candidate = directory + InsertUniqueSuffix(baseName, pid, attempt);
+			HANDLE handle = CreateFileW(
+				candidate.c_str(),
+				GENERIC_WRITE,
+				FILE_SHARE_READ,
+				nullptr,
+				CREATE_NEW,
+				FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+				nullptr);
+			if (handle == INVALID_HANDLE_VALUE) {
+				const DWORD err = GetLastError();
+				if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) {
+					continue;
+				}
+				SetLogStatus("CreateFileW failed", err);
+				openvr_pair::common::DiagnosticLog(
+					"spacecal", "log_create_failed path='%ls' err=%lu", candidate.c_str(), err);
+				return nullptr;
+			}
+
+			const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_WRONLY | _O_BINARY);
+			if (fd < 0) {
+				const int openErr = errno;
+				CloseHandle(handle);
+				SetLogStatus("file descriptor conversion failed", static_cast<unsigned long>(openErr));
+				openvr_pair::common::DiagnosticLog(
+					"spacecal", "log_fd_failed path='%ls' errno=%d", candidate.c_str(), openErr);
+				return nullptr;
+			}
+
+			FILE* file = _fdopen(fd, "wb");
+			if (!file) {
+				const int fdopenErr = errno;
+				_close(fd);
+				SetLogStatus("fdopen failed", static_cast<unsigned long>(fdopenErr));
+				openvr_pair::common::DiagnosticLog(
+					"spacecal", "log_fdopen_failed path='%ls' errno=%d", candidate.c_str(), fdopenErr);
+				return nullptr;
+			}
+
+			outPath = candidate;
+			return file;
+		}
+
+		openvr_pair::common::DiagnosticLog(
+			"spacecal", "log_create_failed reason=name_collision_exhausted");
+		SetLogStatus("name collision exhausted");
+		return nullptr;
+	}
+
+	static bool FlushOpenLogFile()
+	{
+		if (!logFile) return false;
+		if (openvr_pair::common::FlushLogFileToDisk(logFile)) {
+			logFlushFailed = false;
+			return true;
+		}
+		if (!logFlushFailed) {
+			SetLogStatus("flush failed");
 			openvr_pair::common::DiagnosticLog(
-				"spacecal", "log_open_failed path='%ls'", path.c_str());
+				"spacecal", "log_flush_failed path='%ls'", logFilePath.c_str());
+			logFlushFailed = true;
+		}
+		return false;
+	}
+
+	static bool WriteRawLogText(const std::string& text)
+	{
+		if (!logFile) return false;
+		if (!text.empty()) {
+			const size_t written = fwrite(text.data(), 1, text.size(), logFile);
+			if (written != text.size()) {
+				if (!logWriteFailed) {
+					SetLogStatus("write failed", static_cast<unsigned long>(errno));
+					openvr_pair::common::DiagnosticLog(
+						"spacecal",
+						"log_write_failed path='%ls' wrote=%llu expected=%llu errno=%d",
+						logFilePath.c_str(),
+						static_cast<unsigned long long>(written),
+						static_cast<unsigned long long>(text.size()),
+						errno);
+					logWriteFailed = true;
+				}
+				return false;
+			}
+			logWriteFailed = false;
+		}
+		return FlushOpenLogFile();
+	}
+
+	static long long CurrentLogSizeBytes()
+	{
+		if (!logFile) return -1;
+		const int fd = _fileno(logFile);
+		if (fd < 0) return -1;
+		const intptr_t osHandle = _get_osfhandle(fd);
+		if (osHandle == -1) return -1;
+		LARGE_INTEGER size{};
+		if (!GetFileSizeEx(reinterpret_cast<HANDLE>(osHandle), &size)) return -1;
+		return size.QuadPart;
+	}
+
+	static void DiscardOpenLogFile()
+	{
+		if (logFile) {
+			FlushOpenLogFile();
+			fclose(logFile);
+		}
+		logFile = nullptr;
+		logFilePath.clear();
+		logFileIsOpen = false;
+		logWriteFailed = false;
+		logFlushFailed = false;
+	}
+
+	// %userprofile%\LocalLow\WKOpenVR\Logs
+	static bool OpenLogFile() {
+		++logOpenAttempts;
+		SetLogStatus("opening");
+		std::wstring path;
+		FILE* file = OpenUniqueLogFile(path);
+		if (!file) {
+			if (lastLogStatus.empty() || lastLogStatus == "opening") {
+				SetLogStatus("open failed");
+			}
+			openvr_pair::common::DiagnosticLog("spacecal", "log_open_failed");
 			return false;
 		}
+
+		logFile = file;
+		logFilePath = path;
+		openvr_pair::common::SetLowLatencyLogMode(logFile);
+		logWriteFailed = false;
+		logFlushFailed = false;
+		logRowsWritten = 0;
+		logAnnotationsWritten = 0;
+
 		openvr_pair::common::DiagnosticLog(
 			"spacecal", "log_opened path='%ls' enable_logs=%d",
-			path.c_str(), enableLogs ? 1 : 0);
+			logFilePath.c_str(), enableLogs ? 1 : 0);
+
+		std::ostringstream header;
+		header.precision(17);
 
 		// Wire-format version annotation. v2 added per-tick raw reference + target
 		// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
@@ -528,22 +715,29 @@ namespace Metrics {
 		// (samplesInBuffer, watchdogResetCount, reject_reason, translationDiversity,
 		// rotationDiversity, translationAxisRangesCm.{x,y,z}) are still v2 because
 		// the replay harness looks columns up by name, not position.
-		logFile << "# spacecal_log_v2\n";
-		logFile.flush();
+		header << "# spacecal_log_v2\n";
 
 		// === Self-describing header ============================================
 		// Triage from a debug log starts with "what build was this, on what
 		// hardware, with what profile". Embed that up-front so a single log file
 		// is sufficient for a bug report — no need to ask the reporter to run a
 		// dozen follow-up commands.
-		logFile << "# build_stamp=" SPACECAL_BUILD_STAMP "\n";
-		logFile << "# build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+		header << "# build_stamp=" SPACECAL_BUILD_STAMP "\n";
+		header << "# build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+		header << "# debug_logging_effective=1\n";
+		header << "# replay_recording=enabled format=spacecal_log_v2 flush=per_write\n";
+
+		if (!WriteRawLogText(header.str())) {
+			DiscardOpenLogFile();
+			return false;
+		}
+		header.str(std::string());
+		header.clear();
 
 		if (std::string(SPACECAL_BUILD_CHANNEL) == "dev") {
-			logFile.flush();
 			const spacecal::replay::RecordingRetentionPolicy retentionPolicy{};
 			const auto prune = spacecal::replay::PruneRecordings(retentionPolicy);
-			logFile << "# dev_auto_recording=enabled"
+			header << "# dev_auto_recording=enabled"
 				<< " retention_files=" << retentionPolicy.maxFiles
 				<< " retention_bytes=" << retentionPolicy.maxTotalBytes
 				<< " total_files=" << prune.totalFiles
@@ -554,6 +748,8 @@ namespace Metrics {
 				<< " kept_bytes=" << prune.keptBytes
 				<< " failed_deletes=" << prune.failedDeletes
 				<< "\n";
+		} else {
+			header << "# dev_auto_recording=disabled build_channel=" SPACECAL_BUILD_CHANNEL "\n";
 		}
 
 		// HMD identification — model + tracking system. Driver-side issues often
@@ -567,7 +763,7 @@ namespace Metrics {
 				vr::Prop_TrackingSystemName_String,
 				buf, sizeof buf, &pe);
 			if (pe == vr::TrackedProp_Success && buf[0]) {
-				logFile << "# hmd_tracking_system=" << buf << "\n";
+				header << "# hmd_tracking_system=" << buf << "\n";
 			}
 			buf[0] = 0;
 			vrSystem->GetStringTrackedDeviceProperty(
@@ -575,7 +771,7 @@ namespace Metrics {
 				vr::Prop_ModelNumber_String,
 				buf, sizeof buf, &pe);
 			if (pe == vr::TrackedProp_Success && buf[0]) {
-				logFile << "# hmd_model=" << buf << "\n";
+				header << "# hmd_model=" << buf << "\n";
 			}
 			buf[0] = 0;
 			vrSystem->GetStringTrackedDeviceProperty(
@@ -583,7 +779,7 @@ namespace Metrics {
 				vr::Prop_SerialNumber_String,
 				buf, sizeof buf, &pe);
 			if (pe == vr::TrackedProp_Success && buf[0]) {
-				logFile << "# hmd_serial=" << buf << "\n";
+				header << "# hmd_serial=" << buf << "\n";
 			}
 
 			// SteamVR runtime version, when reachable. Useful for filtering issues
@@ -592,10 +788,10 @@ namespace Metrics {
 			unsigned int rtLen = 0;
 			vr::VR_GetRuntimePath(rtPath, MAX_PATH, &rtLen);
 			if (rtLen > 0) {
-				logFile << "# steamvr_runtime_path=" << rtPath << "\n";
+				header << "# steamvr_runtime_path=" << rtPath << "\n";
 			}
 		} else {
-			logFile << "# vr_system=unavailable_at_log_open\n";
+			header << "# vr_system=unavailable_at_log_open\n";
 		}
 
 		// CPU + memory floor for context. SHGetKnownFolderPath needed Win10+
@@ -607,14 +803,14 @@ namespace Metrics {
 			if (ntdll) {
 				auto fn = (RtlGetVersionPtr)GetProcAddress(ntdll, "RtlGetVersion");
 				if (fn && fn(&osv) == 0) {
-					logFile << "# windows=" << osv.dwMajorVersion << "."
+					header << "# windows=" << osv.dwMajorVersion << "."
 					        << osv.dwMinorVersion << "." << osv.dwBuildNumber << "\n";
 				}
 			}
 
 			SYSTEM_INFO si{};
 			GetSystemInfo(&si);
-			logFile << "# logical_processors=" << si.dwNumberOfProcessors << "\n";
+			header << "# logical_processors=" << si.dwNumberOfProcessors << "\n";
 		}
 
 		// === Launch context ====================================================
@@ -633,20 +829,27 @@ namespace Metrics {
 		// All values are best-effort — Win32 calls that fail are logged with
 		// the error code rather than skipped, so a missing field doesn't hide
 		// the failure mode itself.
-		WriteLaunchContextBanner(logFile);
+		WriteLaunchContextBanner(header);
 
 		// Banner divider so a human grepping the file can see where header ends
 		// and the column row begins. Replay harness ignores any line starting with #.
-		logFile << "# === columns ===\n";
+		header << "# === columns ===\n";
 
 		for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
-			if (i > 0) logFile << ",";
-			logFile << fields[i].name;
+			if (i > 0) header << ",";
+			header << fields[i].name;
 		}
-		logFile << "\n";
+		header << "\n";
 
 		logFileIsOpen = true;
-		logFile.flush();
+		if (!WriteRawLogText(header.str())) {
+			DiscardOpenLogFile();
+			return false;
+		}
+		openvr_pair::common::DiagnosticLog(
+			"spacecal", "log_ready path='%ls' size_bytes=%lld",
+			logFilePath.c_str(), CurrentLogSizeBytes());
+		SetLogStatus("open");
 
 		return true;
 	}
@@ -654,39 +857,151 @@ namespace Metrics {
 	static bool CheckLogOpen() {
 		if (!enableLogs) {
 			if (logFileIsOpen) {
-				logFile.close();
+				CloseLogFile();
 			}
 			logFileIsOpen = false;
 			failedToOpenLogFile = false;
+			failedToOpenLogFileAtMs = 0;
+			SetLogStatus("debug logging disabled");
 
 			return false;
 		}
 
-		if (failedToOpenLogFile) return false;
+		if (failedToOpenLogFile) {
+			const ULONGLONG nowMs = GetTickCount64();
+			if (failedToOpenLogFileAtMs != 0
+				&& nowMs - failedToOpenLogFileAtMs < 5000) {
+				return false;
+			}
+			openvr_pair::common::DiagnosticLog(
+				"spacecal", "log_open_retry after_previous_failure");
+			failedToOpenLogFile = false;
+		}
 		if (!logFileIsOpen && !OpenLogFile()) {
 			failedToOpenLogFile = true;
+			failedToOpenLogFileAtMs = GetTickCount64();
 			return false;
 		}
+		failedToOpenLogFileAtMs = 0;
 		return true;
+	}
+
+	static void WriteLogHealthSnapshotRaw(const char* reason)
+	{
+		if (!logFile) return;
+		std::ostringstream row;
+		row.precision(17);
+		row << "# [" << timestamp() << "] log_health"
+			<< " reason=" << ((reason && reason[0]) ? reason : "unspecified")
+			<< " debug_enabled=" << (enableLogs ? 1 : 0)
+			<< " open=" << (logFileIsOpen ? 1 : 0)
+			<< " failed_to_open=" << (failedToOpenLogFile ? 1 : 0)
+			<< " write_failed=" << (logWriteFailed ? 1 : 0)
+			<< " flush_failed=" << (logFlushFailed ? 1 : 0)
+			<< " rows=" << logRowsWritten
+			<< " annotations=" << logAnnotationsWritten
+			<< " size_bytes=" << CurrentLogSizeBytes()
+			<< " open_attempts=" << logOpenAttempts
+			<< " last_error=" << lastLogErrorCode
+			<< " status=" << lastLogStatus
+			<< "\n";
+		if (WriteRawLogText(row.str())) {
+			++logAnnotationsWritten;
+		}
 	}
 
 	void WriteLogAnnotation(const char *s) {
 		if (!CheckLogOpen()) return;
 
-		logFile << "# [" << timestamp() << "] " << s << "\n";
-		logFile.flush();
+		std::ostringstream row;
+		row.precision(17);
+		row << "# [" << timestamp() << "] " << s << "\n";
+		if (WriteRawLogText(row.str())) {
+			++logAnnotationsWritten;
+		}
 	}
 
 	void WriteLogEntry() {
 		if (!CheckLogOpen()) return;
 
 		if (logFileIsOpen) {
+			std::ostringstream row;
+			row.precision(17);
 			for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
-				if (i > 0) logFile << ",";
-				fields[i].writer(logFile);
+				if (i > 0) row << ",";
+				fields[i].writer(row);
 			}
-			logFile << "\n";
+			row << "\n";
+			if (WriteRawLogText(row.str())) {
+				++logRowsWritten;
+			}
 		}
-		logFile.flush();
+	}
+
+	bool EnsureLogFileReady(const char* reason) {
+		const bool wasOpen = logFileIsOpen;
+		if (!CheckLogOpen()) return false;
+		if (!wasOpen || (reason && reason[0])) {
+			WriteLogHealthSnapshotRaw(reason && reason[0] ? reason : "ensure_ready");
+		}
+		return true;
+	}
+
+	bool FlushLogFile()
+	{
+		if (!logFileIsOpen || !logFile) return false;
+		return FlushOpenLogFile();
+	}
+
+	LogHealth GetLogHealth()
+	{
+		LogHealth health;
+		health.debugEnabled = enableLogs;
+		health.open = logFileIsOpen && logFile != nullptr;
+		health.failedToOpen = failedToOpenLogFile;
+		health.writeFailed = logWriteFailed;
+		health.flushFailed = logFlushFailed;
+		health.devAutoRecording = std::string(SPACECAL_BUILD_CHANNEL) == "dev" && enableLogs;
+		health.path = logFilePath;
+		health.sizeBytes = CurrentLogSizeBytes();
+		health.rowsWritten = logRowsWritten;
+		health.annotationsWritten = logAnnotationsWritten;
+		health.openAttempts = logOpenAttempts;
+		health.lastErrorCode = lastLogErrorCode;
+		health.status = lastLogStatus;
+		return health;
+	}
+
+	void WriteLogHealthSnapshot(const char* reason)
+	{
+		if (!CheckLogOpen()) return;
+		WriteLogHealthSnapshotRaw(reason);
+	}
+
+	void CloseLogFile() {
+		if (!logFile) {
+			logFileIsOpen = false;
+			failedToOpenLogFile = false;
+			failedToOpenLogFileAtMs = 0;
+			SetLogStatus(enableLogs ? "not opened" : "debug logging disabled");
+			return;
+		}
+
+		std::ostringstream row;
+		row.precision(17);
+		row << "# [" << timestamp() << "] log_close\n";
+		WriteRawLogText(row.str());
+		FlushOpenLogFile();
+		fclose(logFile);
+		openvr_pair::common::DiagnosticLog(
+			"spacecal", "log_closed path='%ls'", logFilePath.c_str());
+		logFile = nullptr;
+		logFilePath.clear();
+		logFileIsOpen = false;
+		failedToOpenLogFile = false;
+		failedToOpenLogFileAtMs = 0;
+		logWriteFailed = false;
+		logFlushFailed = false;
+		SetLogStatus("closed");
 	}
 }

@@ -889,6 +889,32 @@ TEST(CalibrationCalcTest, RotationDiversityBoundaryCases) {
     EXPECT_NEAR(calc2.RotationDiversity(), 0.5, 1e-9);
 }
 
+TEST(CalibrationCalcTest, RotationDiversityUsesBestPairNotFirstSample) {
+    CalibrationCalc calc;
+    Pose ref; ref.rot = Eigen::Matrix3d::Identity(); ref.trans = Eigen::Vector3d::Zero();
+
+    Eigen::Quaterniond q0 = Eigen::Quaterniond::Identity();
+    Eigen::Quaterniond q45 =
+        Eigen::AngleAxisd(EIGEN_PI / 4, Eigen::Vector3d::UnitY())
+        * Eigen::Quaterniond::Identity();
+    Eigen::Quaterniond q90 =
+        Eigen::AngleAxisd(EIGEN_PI / 2, Eigen::Vector3d::UnitY())
+        * Eigen::Quaterniond::Identity();
+
+    // The first sample sits in the middle. A first-sample-only implementation
+    // sees only 45 deg either way and reports 50 %. The buffer actually
+    // contains a 0 -> 90 deg pair, so readiness should be saturated.
+    Pose tgt45; tgt45.rot = q45.toRotationMatrix(); tgt45.trans = Eigen::Vector3d::Zero();
+    Pose tgt0; tgt0.rot = q0.toRotationMatrix(); tgt0.trans = Eigen::Vector3d::Zero();
+    Pose tgt90; tgt90.rot = q90.toRotationMatrix(); tgt90.trans = Eigen::Vector3d::Zero();
+
+    calc.PushSample(Sample(ref, tgt45, 0.0));
+    calc.PushSample(Sample(ref, tgt0, 0.01));
+    calc.PushSample(Sample(ref, tgt90, 0.02));
+
+    EXPECT_NEAR(calc.RotationDiversity(), 1.0, 1e-9);
+}
+
 // ---------------------------------------------------------------------------
 // ComputeOneshot too-few-samples explicit gate. With the buffer at exactly 5
 // samples (< the 6-sample minimum DetectOutliers needs), ComputeOneshot must

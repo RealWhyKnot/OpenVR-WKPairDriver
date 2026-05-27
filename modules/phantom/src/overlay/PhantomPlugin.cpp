@@ -57,9 +57,16 @@ void PhantomPlugin::Tick(openvr_pair::overlay::ShellContext&)
 bool PhantomPlugin::ConnectIfNeeded()
 {
     if (ipc_.IsConnected()) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (nextConnectAttempt_.time_since_epoch().count() != 0 && now < nextConnectAttempt_) {
+        return false;
+    }
+    nextConnectAttempt_ = now + std::chrono::seconds(1);
+
     try {
         ipc_.Connect();
         connectError_.clear();
+        nextConnectAttempt_ = {};
         return true;
     } catch (const std::exception& e) {
         connectError_ = e.what();

@@ -178,6 +178,22 @@ namespace Metrics {
 
 	extern bool enableLogs;
 
+	struct LogHealth {
+		bool debugEnabled = false;
+		bool open = false;
+		bool failedToOpen = false;
+		bool writeFailed = false;
+		bool flushFailed = false;
+		bool devAutoRecording = false;
+		std::wstring path;
+		long long sizeBytes = -1;
+		uint64_t rowsWritten = 0;
+		uint64_t annotationsWritten = 0;
+		uint64_t openAttempts = 0;
+		unsigned long lastErrorCode = 0;
+		std::string status;
+	};
+
 	// Phase of the per-tick CalibrationTick state machine at the moment WriteLogEntry()
 	// is called. Stored in the v2 CSV "tick_phase" column to let the replay harness
 	// reproduce the same control-flow path that produced each row. Mirrors the
@@ -204,4 +220,9 @@ namespace Metrics {
 
 	void WriteLogAnnotation(const char* s);
 	void WriteLogEntry();
+	bool EnsureLogFileReady(const char* reason = nullptr);
+	bool FlushLogFile();
+	LogHealth GetLogHealth();
+	void WriteLogHealthSnapshot(const char* reason);
+	void CloseLogFile();
 }

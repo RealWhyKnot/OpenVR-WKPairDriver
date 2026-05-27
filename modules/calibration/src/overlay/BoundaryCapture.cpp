@@ -132,6 +132,9 @@ FloorProjectionAttempt ProjectAimToFloor(
         { Eigen::Vector3d( 1.0,  0.0,  0.0), "+X" },
     };
 
+    FloorProjectionAttempt bestOk;
+    bestOk.aimY = 1.0;
+    bool haveOk = false;
     FloorProjectionAttempt bestFailed;
     bestFailed.aimY = 1.0;
     bool haveFailed = false;
@@ -139,12 +142,19 @@ FloorProjectionAttempt ProjectAimToFloor(
         const FloorProjectionAttempt attempt =
             ProjectSingleRayToFloor(controllerPose, r.ray, r.name, floorY);
         if (attempt.status == FloorProjectionStatus::Ok) {
-            return attempt;
+            if (!haveOk || attempt.aimY < bestOk.aimY) {
+                bestOk = attempt;
+                haveOk = true;
+            }
+            continue;
         }
         if (!haveFailed || attempt.aimY < bestFailed.aimY) {
             bestFailed = attempt;
             haveFailed = true;
         }
+    }
+    if (haveOk) {
+        return bestOk;
     }
 
     const Eigen::Vector3d origin = controllerPose.translation();

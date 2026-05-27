@@ -99,4 +99,23 @@ namespace Metrics {
     void WriteLogEntry() {
         // No-op.
     }
+
+    bool EnsureLogFileReady(const char* /*reason*/) {
+        return enableLogs;
+    }
+
+    bool FlushLogFile() {
+        return enableLogs;
+    }
+
+    LogHealth GetLogHealth() {
+        LogHealth health;
+        health.debugEnabled = enableLogs;
+        health.status = enableLogs ? "test logging enabled" : "debug logging disabled";
+        return health;
+    }
+
+    void WriteLogHealthSnapshot(const char* /*reason*/) {
+        // No-op.
+    }
 }

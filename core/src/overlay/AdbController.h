@@ -38,6 +38,10 @@ public:
     // "connected to" (idempotent -- already-connected reports the same string).
     // Virtual so test subclasses can inject results without spawning subprocesses.
     virtual bool Connect(const std::string& endpoint);
+    virtual bool Connect(const std::string& endpoint, std::chrono::milliseconds timeout);
+
+    bool LastConnectTimedOut() const;
+    bool LastConnectWasRefused() const;
 
     // `adb get-state`. Returns true if exit==0 and stdout contains "device".
     virtual bool Connected();
@@ -67,6 +71,8 @@ protected:
 
 private:
     std::string m_targetSerial;
+    bool m_lastConnectTimedOut = false;
+    bool m_lastConnectWasRefused = false;
 
     // Quote an argument if it contains spaces or is empty, so CreateProcessW
     // sees it as a single token.

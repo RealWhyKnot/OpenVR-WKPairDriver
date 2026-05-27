@@ -2,7 +2,9 @@
 
 #include "Calibration.h"
 #include "CalibrationAnchor.h"
+#include "CalibrationMetrics.h"
 #include "Configuration.h"
+#include "DevFakeDevices.h"
 #include "GuardianAutoApply.h"
 #include "UserInterface.h"
 
@@ -11,6 +13,7 @@
 #include <openvr.h>
 
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <string>
 #include <vector>
@@ -39,18 +42,14 @@ bool TryConnect()
 {
 	if (g_vrReady) return true;
 
-	auto initError = vr::VRInitError_None;
-	vr::VR_Init(&initError, vr::VRApplication_Background);
-	if (initError != vr::VRInitError_None) {
-		g_lastVRError = std::string("Waiting for SteamVR: ") +
-			vr::VR_GetVRInitErrorAsEnglishDescription(initError);
+	if (!vr::VRSystem()) {
+		g_lastVRError = "Waiting for SteamVR";
 		return false;
 	}
 
 	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version) ||
 		!vr::VR_IsInterfaceVersionValid(vr::IVRSettings_Version)) {
 		g_lastVRError = "OpenVR interface version mismatch";
-		vr::VR_Shutdown();
 		return false;
 	}
 
@@ -58,12 +57,12 @@ bool TryConnect()
 		InitCalibrator();
 	} catch (const std::exception &e) {
 		g_lastVRError = e.what();
-		vr::VR_Shutdown();
 		return false;
 	}
 
 	g_lastVRError.clear();
 	g_vrReady = true;
+	Metrics::WriteLogAnnotation("[umbrella] vr_ready");
 	return true;
 }
 
@@ -118,14 +117,16 @@ void CCal_UmbrellaTick()
 	const auto now = std::chrono::steady_clock::now();
 	if (!g_vrReady && now - g_lastRetry >= g_retryPeriod) {
 		g_lastRetry = now;
-		TryConnect();
+		if (!spacecal::devfake::IsEnabled()) {
+			TryConnect();
+		}
 	}
 
 	// Low-rate ADB health poll. TickGuardianHealth enforces its own 7 s cadence
 	// internally so calling it every tick is cheap when ADB is idle.
 	wkopenvr::adb::TickGuardianHealth(g_adb);
 
-	if (g_vrReady) {
+	if (g_vrReady || spacecal::devfake::IsEnabled()) {
 		CalibrationTick(SecondsSinceStart());
 
 		std::vector<openvr_pair::overlay::CalibrationDeviceLock> locks;
@@ -148,15 +149,22 @@ void CCal_UmbrellaTick()
 		}
 		openvr_pair::overlay::SetCalibrationDeviceLocks(locks);
 	} else {
+		static auto s_lastWaitingLog = std::chrono::steady_clock::time_point{};
+		if (s_lastWaitingLog.time_since_epoch().count() == 0 ||
+			now - s_lastWaitingLog >= std::chrono::seconds(5)) {
+			s_lastWaitingLog = now;
+			char buf[192];
+			snprintf(buf, sizeof buf,
+				"[umbrella] calibration_tick_skipped reason=vr_not_ready detail='%s'",
+				g_lastVRError.empty() ? "unknown" : g_lastVRError.c_str());
+			Metrics::WriteLogAnnotation(buf);
+		}
 		openvr_pair::overlay::SetCalibrationDeviceLocks({});
 	}
 }
 
 void CCal_UmbrellaShutdown()
 {
-	if (g_vrReady) {
-		vr::VR_Shutdown();
-	}
 	g_vrReady = false;
 }
 
@@ -175,7 +183,7 @@ void RequestExit()
 
 bool IsVRReady()
 {
-	return g_vrReady;
+	return g_vrReady || spacecal::devfake::IsEnabled();
 }
 
 const std::string &LastVRConnectError()

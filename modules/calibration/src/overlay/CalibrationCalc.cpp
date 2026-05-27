@@ -1018,15 +1018,18 @@ double CalibrationCalc::RotationDiversity() const {
 	// constrains the calibration's rotation component well.
 	if (m_samples.size() < 2) return 0.0;
 	constexpr double kDesiredMaxAngle = EIGEN_PI / 2.0; // 90 deg
-	Eigen::Quaterniond first;
-	bool haveFirst = false;
+	std::vector<Eigen::Quaterniond> rotations;
+	rotations.reserve(m_samples.size());
 	double maxAngle = 0.0;
 	for (const auto& s : m_samples) {
 		if (!s.valid || !s.pairedMotionValid) continue;
-		const Eigen::Quaterniond q(s.target.rot);
-		if (!haveFirst) { first = q; haveFirst = true; continue; }
-		const double a = first.angularDistance(q);
-		if (a > maxAngle) maxAngle = a;
+		rotations.emplace_back(s.target.rot);
+	}
+	for (size_t i = 0; i < rotations.size(); ++i) {
+		for (size_t j = i + 1; j < rotations.size(); ++j) {
+			const double a = rotations[i].angularDistance(rotations[j]);
+			if (a > maxAngle) maxAngle = a;
+		}
 	}
 	const double score = maxAngle / kDesiredMaxAngle;
 	return std::min(std::max(score, 0.0), 1.0);
@@ -1411,12 +1414,56 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		lockRelativePosition,
 		m_relativePosCalibrated);
 
+	auto logRelPoseReject = [&](const char* stage,
+		bool calibrated,
+		bool validated,
+		double errorM,
+		double priorErrorM,
+		const Eigen::Vector3d& relPosOffset)
+	{
+		static auto s_lastRelPoseRejectLog = std::chrono::steady_clock::time_point{};
+		const auto nowTp = std::chrono::steady_clock::now();
+		if (nowTp - s_lastRelPoseRejectLog < std::chrono::seconds(2)) {
+			return;
+		}
+		s_lastRelPoseRejectLog = nowTp;
+
+		const char* reason = !relPoseTrust.accepted
+			? relPoseTrust.reason
+			: (!calibrated
+				? "calibrate_failed"
+				: (!validated
+					? "validate_failed"
+					: "threshold_rejected"));
+		char rbuf[420];
+		snprintf(rbuf, sizeof rbuf,
+			"relpose_candidate_rejected: stage=%s reason=%s relPosCal=%d lockRel=%d"
+			" calibrated=%d validated=%d relPoseError_mm=%.3f priorError_mm=%.3f"
+			" rms_gate_mm=%.3f relPoseMaxError_mm=%.3f relPosOffset_cm=(%.2f,%.2f,%.2f)",
+			stage,
+			reason,
+			(int)m_relativePosCalibrated,
+			(int)lockRelativePosition,
+			(int)calibrated,
+			(int)validated,
+			std::isfinite(errorM) ? errorM * 1000.0 : -1.0,
+			std::isfinite(priorErrorM) ? priorErrorM * 1000.0 : -1.0,
+			m_lastRejectRmsThreshold * 1000.0,
+			relPoseMaxError * 1000.0,
+			relPosOffset.x() * 100.0,
+			relPosOffset.y() * 100.0,
+			relPosOffset.z() * 100.0);
+		Metrics::WriteLogAnnotation(rbuf);
+	};
+
 	if (relPoseTrust.accepted) {
 		Eigen::AffineCompact3d byRelPose;
 		double relPoseError = INFINITY;
 		Eigen::Vector3d relPosOffset;
-		if (CalibrateByRelPose(byRelPose) &&
-			ValidateCalibration(byRelPose, &relPoseError, &relPosOffset)) {
+		const bool calibrated = CalibrateByRelPose(byRelPose);
+		const bool validated = calibrated
+			&& ValidateCalibration(byRelPose, &relPoseError, &relPosOffset);
+		if (calibrated && validated) {
 
 			Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
 			Metrics::error_byRelPose.Push(relPoseError * 1000);
@@ -1426,6 +1473,13 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			m_estimatedTransformation = byRelPose;
 			return true;
 		}
+		logRelPoseReject(
+			"trusted_direct",
+			calibrated,
+			validated,
+			relPoseError,
+			INFINITY,
+			relPosOffset);
 	}
 
 	// Push debugging counters every tick so the CSV row is self-describing
@@ -1454,9 +1508,14 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	bool usingRelPose = false;
 	double relPoseError = INFINITY;
 
-	if (enableStaticRecalibration && relPoseTrust.accepted && CalibrateByRelPose(byRelPose)) {
+	bool staticRelPoseCalibrated = false;
+	bool staticRelPoseValidated = false;
+	Eigen::Vector3d staticRelPosOffset = Eigen::Vector3d::Zero();
+	if (enableStaticRecalibration && relPoseTrust.accepted && (staticRelPoseCalibrated = CalibrateByRelPose(byRelPose))) {
 		Eigen::Vector3d relPosOffset;
-		if (ValidateCalibration(byRelPose, &relPoseError, &relPosOffset)) {
+		staticRelPoseValidated = ValidateCalibration(byRelPose, &relPoseError, &relPosOffset);
+		staticRelPosOffset = relPosOffset;
+		if (staticRelPoseValidated) {
 			Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
 			Metrics::error_byRelPose.Push(relPoseError * 1000);
 
@@ -1517,6 +1576,15 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 					CalCtx.recoveryHmdDeltaAtStart = 0.0;
 				}
 			}
+		}
+		if (!newCalibrationValid) {
+			logRelPoseReject(
+				"static_recalibration",
+				staticRelPoseCalibrated,
+				staticRelPoseValidated,
+				relPoseError,
+				priorCalibrationError,
+				staticRelPosOffset);
 		}
 	}
 

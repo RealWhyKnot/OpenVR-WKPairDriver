@@ -75,11 +75,12 @@ void IpcClientBase::Connect(const char *pipeName, IpcClientConnectOptions option
 	Close();
 	options_ = std::move(options);
 	pipeName_ = pipeName ? pipeName : "";
-	const BOOL waitOk = WaitNamedPipeA(pipeName_.c_str(), 1000);
+	const BOOL waitOk = WaitNamedPipeA(pipeName_.c_str(), options_.waitTimeoutMs);
 	const DWORD waitError = waitOk ? ERROR_SUCCESS : GetLastError();
 	openvr_pair::common::DiagnosticLog(
-		"ipc-client", "connect_start pipe='%s' wait_ok=%d wait_error=%lu",
-		pipeName_.c_str(), waitOk ? 1 : 0, waitError);
+		"ipc-client", "connect_start pipe='%s' wait_ok=%d wait_error=%lu wait_timeout_ms=%lu",
+		pipeName_.c_str(), waitOk ? 1 : 0, waitError,
+		static_cast<unsigned long>(options_.waitTimeoutMs));
 	pipe_ = CreateFileA(pipeName_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	DWORD openError = (pipe_ == INVALID_HANDLE_VALUE) ? GetLastError() : ERROR_SUCCESS;
 	OnPipeOpenAttempt(pipe_, openError);

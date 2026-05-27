@@ -1,5 +1,6 @@
 #include "VRState.h"
 
+#include "DevFakeDevices.h"
 #include "DeviceFilters.h"
 
 VRState VRState::Load()
@@ -10,7 +11,10 @@ VRState VRState::Load()
 	// be running with SteamVR not yet up (deferred VR connection) or with
 	// SteamVR having shut down between ticks; in both cases the right thing
 	// is an empty device list, not a crash.
-	if (!vr::VRSystem()) return state;
+	if (!vr::VRSystem()) {
+		spacecal::devfake::AppendDevices(state);
+		return state;
+	}
 
 	auto& trackingSystems = state.trackingSystems;
 
@@ -100,6 +104,7 @@ VRState VRState::Load()
 		}
 	}
 
+	spacecal::devfake::AppendDevices(state);
 	return state;
 }
 

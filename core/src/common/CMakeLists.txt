@@ -34,6 +34,8 @@ add_library(openvr_pair_common STATIC
 	JsonUtil.h
 	LogPaths.cpp
 	LogPaths.h
+	ProcessPerfLog.cpp
+	ProcessPerfLog.h
 	Win32Errors.cpp
 	Win32Errors.h
 	Win32Paths.cpp
@@ -59,7 +61,8 @@ if(WIN32)
 	target_link_libraries(openvr_pair_common
 		PUBLIC
 			shell32
-			ole32)
+			ole32
+			psapi)
 endif()
 
 # Propagate the Eigen include path to every target linking common. The Eigen

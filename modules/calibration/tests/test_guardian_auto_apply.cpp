@@ -51,6 +51,10 @@ public:
         return connectResult;
     }
 
+    bool Connect(const std::string& endpoint, std::chrono::milliseconds /*timeout*/) override {
+        return Connect(endpoint);
+    }
+
     bool SetGuardianPaused(bool paused, int value) override {
         ++calls.setGuardianCalls;
         calls.lastSetPaused = paused;
@@ -358,6 +362,37 @@ TEST(GuardianAutoApply, ReconnectSavedEndpoint_reports_failed_connect)
     EXPECT_FALSE(result.reapplyAttempted);
     EXPECT_EQ(adb.calls.connectCalls, 1);
     EXPECT_FALSE(Metrics::adbConnected.last());
+}
+
+TEST(GuardianAutoApply, ReconnectSavedEndpoint_respects_backoff_after_failed_auto_attempt)
+{
+    ResetCalCtx(CalCtx);
+    CalCtx.adb.savedEndpoint = "192.168.99.42:5555";
+
+    StubAdb adb;
+    adb.connectResult = false;
+
+    const auto first = wkopenvr::adb::ReconnectSavedEndpoint(
+        adb,
+        /*reapplyGuardianPause=*/true,
+        wkopenvr::adb::SavedEndpointReconnectPolicy::RespectBackoff);
+    EXPECT_TRUE(first.endpointPresent);
+    EXPECT_FALSE(first.connected);
+    EXPECT_FALSE(first.backoffActive);
+    EXPECT_EQ(first.consecutiveFailures, 1);
+    EXPECT_GT(first.retryAfterSeconds, 0);
+    EXPECT_EQ(adb.calls.connectCalls, 1);
+
+    const auto second = wkopenvr::adb::ReconnectSavedEndpoint(
+        adb,
+        /*reapplyGuardianPause=*/true,
+        wkopenvr::adb::SavedEndpointReconnectPolicy::RespectBackoff);
+    EXPECT_TRUE(second.endpointPresent);
+    EXPECT_FALSE(second.connected);
+    EXPECT_TRUE(second.backoffActive);
+    EXPECT_EQ(second.consecutiveFailures, 1);
+    EXPECT_GT(second.retryAfterSeconds, 0);
+    EXPECT_EQ(adb.calls.connectCalls, 1);
 }
 
 // ---------------------------------------------------------------------------

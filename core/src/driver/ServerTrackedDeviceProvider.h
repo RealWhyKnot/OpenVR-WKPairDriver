@@ -40,7 +40,7 @@ public:
 	virtual const char * const *GetInterfaceVersions() { return vr::k_InterfaceVersions; }
 
 	/** Allows the driver do to some work in the main loop of the server. */
-	virtual void RunFrame() { }
+	virtual void RunFrame() override;
 
 	/** Returns true if the driver wants to block Standby mode. */
 	virtual bool ShouldBlockStandbyMode() { return false; }
@@ -302,6 +302,8 @@ private:
 	// tracker pose update.
 	mutable std::mutex               m_trackerSnapMutex;
 	driver_synth::TrackerSnapshot    m_trackerSnap;
+	driver_synth::SourceBlendState   m_driverSynthBlendState;
+	std::atomic<bool>                m_driverSynthBlendReset{false};
 
 #endif // WKOPENVR_BUILD_IS_DEV
 

@@ -29,6 +29,18 @@ std::vector<BoundaryVertex> TransformToStandingUniverse(
     const std::vector<BoundaryVertex>& lighthouseSpace,
     const Eigen::AffineCompact3d& lighthouseToStanding);
 
+// Build/apply the same profile transform sent to the driver for the calibrated
+// target tracking system. Boundary capture uses this so the painted point is
+// based on the in-headset visible controller pose, not the raw
+// pre-calibration lighthouse pose.
+Eigen::AffineCompact3d ProfileTransformFromCalibration(
+    Eigen::Vector3d eulerDeg,
+    Eigen::Vector3d transCm);
+
+Eigen::Affine3d TransformPoseToStandingUniverse(
+    const Eigen::Affine3d& rawPose,
+    const Eigen::AffineCompact3d& targetToStanding);
+
 // Push the polygon to SteamVR chaperone. Returns false if VRChaperoneSetup
 // is unavailable or any call fails. Builds vertical wall quads from floorY
 // to ceilingY, pushes a bounding-rect play area size, and commits to Live.

@@ -27,6 +27,7 @@ struct IpcClientConnectOptions
 	std::string readFailurePrefix = "Error reading IPC response";
 	std::string oversizedResponseMessage = "Invalid IPC response. Message larger than expected ";
 	std::string sizeMismatchMessagePrefix = "Invalid IPC response";
+	DWORD waitTimeoutMs = 50;
 };
 
 class IpcClientBase

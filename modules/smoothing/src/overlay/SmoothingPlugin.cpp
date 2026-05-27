@@ -60,12 +60,19 @@ void SmoothingPlugin::Tick(openvr_pair::overlay::ShellContext &)
 bool SmoothingPlugin::ConnectIfNeeded()
 {
 	if (ipc_.IsConnected()) return false;
+	const auto now = std::chrono::steady_clock::now();
+	if (nextConnectAttempt_.time_since_epoch().count() != 0 && now < nextConnectAttempt_) {
+		return false;
+	}
+	nextConnectAttempt_ = now + std::chrono::seconds(1);
+
 	try {
 		ipc_.Connect();
 		if (!connectError_.empty()) {
 			SM_LOG("[ipc] reconnect succeeded after error: %s", connectError_.c_str());
 		}
 		connectError_.clear();
+		nextConnectAttempt_ = {};
 		return true;
 	} catch (const std::exception &e) {
 		// Only log the message the first time it changes to avoid per-tick spam

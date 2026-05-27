@@ -154,6 +154,20 @@ TEST(BoundaryTransformTest, KnownTranslationApplied) {
     EXPECT_NEAR(out[1].z, 3.0, 1e-9);
 }
 
+TEST(BoundaryTransformTest, ProfileTransformAppliesToControllerPose) {
+    const Eigen::AffineCompact3d xf = ProfileTransformFromCalibration(
+        Eigen::Vector3d::Zero(),
+        Eigen::Vector3d(100.0, 0.0, -50.0));
+
+    Eigen::Affine3d raw = Eigen::Affine3d::Identity();
+    raw.translation() = Eigen::Vector3d(0.25, 1.0, 0.75);
+
+    const Eigen::Affine3d standing = TransformPoseToStandingUniverse(raw, xf);
+    EXPECT_NEAR(standing.translation().x(), 1.25, 1e-9);
+    EXPECT_NEAR(standing.translation().y(), 1.0, 1e-9);
+    EXPECT_NEAR(standing.translation().z(), 0.25, 1e-9);
+}
+
 // ---------------------------------------------------------------------------
 // CaptureSession
 // ---------------------------------------------------------------------------
@@ -270,6 +284,30 @@ TEST(CaptureSessionTest, AcceptsAlternateAxisPointerRayFallback) {
     EXPECT_TRUE(session.Tick(pose, true));
 
     EXPECT_EQ(session.rawVertexCount(), 1u);
+}
+
+TEST(CaptureSessionTest, ChoosesSteepestValidFloorRay) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translation() = Eigen::Vector3d(0.0, 1.0, 0.0);
+    pose.linear() = Eigen::AngleAxisd(
+        -20.0 * EIGEN_PI / 180.0,
+        Eigen::Vector3d::UnitX()).toRotationMatrix();
+
+    EXPECT_TRUE(session.Tick(pose, true, 0.0));
+    ASSERT_EQ(session.rawVertexCount(), 1u);
+    const auto& verts = session.vertices();
+    ASSERT_EQ(verts.size(), 1u);
+
+    const Eigen::Vector3d steepRay =
+        pose.rotation() * Eigen::Vector3d(0.0, -1.0, 0.0);
+    const double distance = -pose.translation().y() / steepRay.y();
+    const Eigen::Vector3d expected = pose.translation() + steepRay * distance;
+    EXPECT_NEAR(verts[0].x, expected.x(), 1e-9);
+    EXPECT_NEAR(verts[0].y, 0.0, 1e-9);
+    EXPECT_NEAR(verts[0].z, expected.z(), 1e-9);
 }
 
 TEST(CaptureSessionTest, FallsBackToControllerPositionWhenControllerIsBelowFloor) {

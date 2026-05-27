@@ -461,12 +461,25 @@ void CCal_TickBoundaryCapture() {
         }
         ++stats.poseOk;
 
-        const Eigen::Affine3d pose = DriverPoseToWorldAffine(dp);
+        const Eigen::Affine3d rawPose = DriverPoseToWorldAffine(dp);
+        const bool applyCalibrationToController =
+            CalCtx.enabled
+            && CalCtx.validProfile
+            && !CalCtx.targetTrackingSystem.empty()
+            && stats.lastTrackingSystem == CalCtx.targetTrackingSystem;
+        Eigen::Affine3d pose = rawPose;
+        if (applyCalibrationToController) {
+            pose = wkopenvr::boundary::TransformPoseToStandingUniverse(
+                rawPose,
+                wkopenvr::boundary::ProfileTransformFromCalibration(
+                    CalCtx.calibratedRotation,
+                    CalCtx.calibratedTranslation));
+        }
         const bool accepted = s_capture.Tick(pose, true, CalCtx.boundary.floorY);
         if (accepted) {
-            char cbuf[256];
+            char cbuf[520];
             snprintf(cbuf, sizeof cbuf,
-                "[boundary-capture] accepted controller input: session=%llu device=%d system='%s' raw=%zu button=%d legacy=%d axis=%d value=%.3f fallback_any=%d",
+                "[boundary-capture] accepted controller input: session=%llu device=%d system='%s' raw=%zu button=%d legacy=%d axis=%d value=%.3f fallback_any=%d applied_cal=%d raw_pos=(%.3f,%.3f,%.3f) paint_pos=(%.3f,%.3f,%.3f)",
                 static_cast<unsigned long long>(sessionId),
                 static_cast<int>(deviceId),
                 stats.lastTrackingSystem.c_str(),
@@ -475,7 +488,14 @@ void CCal_TickBoundaryCapture() {
                 trigger.legacyFallbackUsed ? 1 : 0,
                 trigger.analogAxis,
                 trigger.analogValue,
-                stats.fallbackAnySystem);
+                stats.fallbackAnySystem,
+                applyCalibrationToController ? 1 : 0,
+                rawPose.translation().x(),
+                rawPose.translation().y(),
+                rawPose.translation().z(),
+                pose.translation().x(),
+                pose.translation().y(),
+                pose.translation().z());
             Metrics::WriteLogAnnotation(cbuf);
             openvr_pair::common::DiagnosticLog("boundary-capture", "%s", cbuf);
         }

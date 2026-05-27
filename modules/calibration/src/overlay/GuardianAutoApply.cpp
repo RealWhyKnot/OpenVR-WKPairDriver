@@ -4,6 +4,7 @@
 #include "CalibrationMetrics.h"
 #include "DiagnosticsLog.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -15,6 +16,9 @@ static constexpr auto kAutoApplyBudget = std::chrono::seconds(30);
 // polling every tick would saturate the subprocess pipe. 7 seconds is short
 // enough to notice a headset reboot within one user-perceptible beat.
 static constexpr auto kHealthTickInterval = std::chrono::seconds(7);
+static constexpr auto kSavedEndpointConnectTimeout = std::chrono::seconds(2);
+static constexpr auto kSavedEndpointInitialBackoff = std::chrono::seconds(15);
+static constexpr auto kSavedEndpointMaxBackoff = std::chrono::minutes(5);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -154,6 +158,50 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
     }
 }
 
+struct SavedEndpointBackoffState {
+    std::string endpoint;
+    int consecutiveFailures = 0;
+    std::chrono::steady_clock::time_point nextAttempt =
+        std::chrono::steady_clock::time_point{};
+};
+
+SavedEndpointBackoffState& BackoffState()
+{
+    static SavedEndpointBackoffState s;
+    return s;
+}
+
+void ResetBackoffForEndpoint(const std::string& endpoint)
+{
+    auto& state = BackoffState();
+    if (state.endpoint != endpoint) {
+        state.endpoint = endpoint;
+        state.consecutiveFailures = 0;
+        state.nextAttempt = std::chrono::steady_clock::time_point{};
+    }
+}
+
+std::chrono::seconds BackoffDelayForFailure(int consecutiveFailures)
+{
+    int multiplier = 1;
+    const int clamped = std::min(std::max(consecutiveFailures, 1), 6);
+    for (int i = 1; i < clamped; ++i) {
+        multiplier *= 2;
+    }
+    const auto delay = kSavedEndpointInitialBackoff * multiplier;
+    return delay < kSavedEndpointMaxBackoff
+        ? std::chrono::duration_cast<std::chrono::seconds>(delay)
+        : std::chrono::duration_cast<std::chrono::seconds>(kSavedEndpointMaxBackoff);
+}
+
+int SecondsUntil(std::chrono::steady_clock::time_point when,
+                 std::chrono::steady_clock::time_point now)
+{
+    if (when <= now) return 0;
+    return static_cast<int>(
+        std::chrono::duration_cast<std::chrono::seconds>(when - now).count() + 1);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -164,7 +212,8 @@ namespace wkopenvr::adb {
 
 SavedEndpointReconnectResult ReconnectSavedEndpoint(
     AdbController& adb,
-    bool reapplyGuardianPause)
+    bool reapplyGuardianPause,
+    SavedEndpointReconnectPolicy policy)
 {
     SavedEndpointReconnectResult out;
     out.endpointPresent = !CalCtx.adb.savedEndpoint.empty();
@@ -175,17 +224,49 @@ SavedEndpointReconnectResult ReconnectSavedEndpoint(
         return out;
     }
 
+    ResetBackoffForEndpoint(CalCtx.adb.savedEndpoint);
+    auto& backoff = BackoffState();
+    const auto now = std::chrono::steady_clock::now();
+    if (policy == SavedEndpointReconnectPolicy::RespectBackoff
+        && backoff.nextAttempt > now) {
+        out.backoffActive = true;
+        out.retryAfterSeconds = SecondsUntil(backoff.nextAttempt, now);
+        out.consecutiveFailures = backoff.consecutiveFailures;
+        Metrics::adbConnected.Push(false);
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto",
+            "saved_endpoint_reconnect backoff_active failures=%d retry_after_sec=%d",
+            out.consecutiveFailures,
+            out.retryAfterSeconds);
+        return out;
+    }
+
     openvr_pair::common::DiagnosticLog(
         "guardian-auto", "saved_endpoint_reconnect start reapply=%d endpoint_set=1",
         reapplyGuardianPause ? 1 : 0);
-    out.connected = adb.Connect(CalCtx.adb.savedEndpoint);
+    out.connected = adb.Connect(CalCtx.adb.savedEndpoint, kSavedEndpointConnectTimeout);
+    out.timedOut = adb.LastConnectTimedOut();
+    out.refusedConnection = adb.LastConnectWasRefused();
     Metrics::adbConnected.Push(out.connected);
 
     if (!out.connected) {
+        ++backoff.consecutiveFailures;
+        const auto delay = BackoffDelayForFailure(backoff.consecutiveFailures);
+        backoff.nextAttempt = now + delay;
+        out.retryAfterSeconds = static_cast<int>(delay.count());
+        out.consecutiveFailures = backoff.consecutiveFailures;
         openvr_pair::common::DiagnosticLog(
-            "guardian-auto", "saved_endpoint_reconnect failed");
+            "guardian-auto",
+            "saved_endpoint_reconnect failed timed_out=%d refused=%d failures=%d retry_after_sec=%d",
+            out.timedOut ? 1 : 0,
+            out.refusedConnection ? 1 : 0,
+            out.consecutiveFailures,
+            out.retryAfterSeconds);
         return out;
     }
+
+    backoff.consecutiveFailures = 0;
+    backoff.nextAttempt = std::chrono::steady_clock::time_point{};
 
     if (reapplyGuardianPause && CalCtx.adb.guardianPauseEnabled) {
         out.reapplyAttempted = true;
@@ -364,7 +445,8 @@ void TickGuardianHealth(AdbController& adb)
         && (CalCtx.adb.setupCompleted || CalCtx.adb.guardianPauseEnabled)) {
         const auto reconnect = ReconnectSavedEndpoint(
             adb,
-            CalCtx.adb.guardianPauseEnabled);
+            CalCtx.adb.guardianPauseEnabled,
+            SavedEndpointReconnectPolicy::RespectBackoff);
         if (!reconnect.connected && s_wasConnected && CalCtx.adb.guardianPauseEnabled) {
             fprintf(stderr,
                     "[guardian-auto] ADB connection lost while guardianPauseEnabled=true\n");

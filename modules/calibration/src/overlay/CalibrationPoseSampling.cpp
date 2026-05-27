@@ -317,7 +317,7 @@ CalibrationCalc calibration;
 					&& trackerRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
 				if (s_trackerWasValid && !trackerNowValid) {
 					Metrics::WriteLogAnnotation(
-						"[head-mount] tracker invalid; falling back to non-head-mount target for this tick");
+						"[head-mount] tracker invalid; skipping synthetic head sample for this tick");
 				} else if (!s_trackerWasValid && trackerNowValid) {
 					Metrics::WriteLogAnnotation("[head-mount] tracker valid again");
 				}

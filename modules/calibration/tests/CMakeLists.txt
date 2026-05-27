@@ -52,6 +52,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_translation_solve_direct.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_common_helpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_device_filters.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_dev_fake_devices.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_quash_pose_flags.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_auto_lock_hysteresis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_warm_restart.cpp
@@ -73,6 +74,7 @@ add_executable(spacecal_tests
     ${SPACECAL_SRC}/overlay/BoundaryPreview.cpp
     ${SPACECAL_SRC}/overlay/BoundaryRePush.cpp
     ${SPACECAL_SRC}/overlay/ControllerInput.cpp
+    ${SPACECAL_SRC}/overlay/DevFakeDevices.cpp
     ${SPACECAL_SRC}/overlay/GuardianAutoApply.cpp
     ${SPACECAL_SRC}/overlay/CalibrationCalc.cpp
     ${SPACECAL_SRC}/overlay/MotionRecording.cpp

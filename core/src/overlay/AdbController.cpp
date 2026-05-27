@@ -112,6 +112,23 @@ std::string ArgsForLog(const std::vector<std::string>& args)
     return out;
 }
 
+std::string LowerAscii(std::string text)
+{
+    for (char& c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return text;
+}
+
+bool LooksLikeConnectionRefused(const std::string& out, const std::string& err)
+{
+    const std::string text = LowerAscii(out + "\n" + err);
+    return text.find("refused") != std::string::npos
+        || text.find("actively refused") != std::string::npos
+        || text.find("cannot connect") != std::string::npos
+        || text.find("failed to connect") != std::string::npos;
+}
+
 // Drain a read-end pipe handle into a std::string until EOF or the write end
 // closes. Non-blocking: reads whatever is available, returns immediately when
 // there is nothing more (handle should be drained after the process exits).
@@ -355,9 +372,26 @@ AdbController::Result AdbController::Shell(
 
 bool AdbController::Connect(const std::string& endpoint)
 {
-    Result r = Run({"connect", endpoint});
+    return Connect(endpoint, std::chrono::seconds(10));
+}
+
+bool AdbController::Connect(const std::string& endpoint, std::chrono::milliseconds timeout)
+{
+    m_lastConnectTimedOut = false;
+    m_lastConnectWasRefused = false;
+
+    Result r = Run({"connect", endpoint}, timeout);
+    m_lastConnectTimedOut = r.timedOut;
+    m_lastConnectWasRefused = LooksLikeConnectionRefused(r.out, r.err);
     if (r.timedOut) {
         fprintf(stderr, "[adb] connect timed out endpoint='%s'\n", endpoint.c_str());
+        openvr_pair::common::DiagnosticLog("adb",
+            "connect_result endpoint='%s' ok=0 timed_out=1 refused=%d exit=%d stdout='%s' stderr='%s'",
+            RedactAdbText(endpoint).c_str(),
+            m_lastConnectWasRefused ? 1 : 0,
+            r.exitCode,
+            TruncateForLog(r.out).c_str(),
+            TruncateForLog(r.err).c_str());
         return false;
     }
     // adb connect prints "connected to <endpoint>" on success and on
@@ -369,9 +403,27 @@ bool AdbController::Connect(const std::string& endpoint)
         openvr_pair::common::DiagnosticLog(
             "adb", "target_serial_set source=connect endpoint='%s'", endpoint.c_str());
     }
+    openvr_pair::common::DiagnosticLog("adb",
+        "connect_result endpoint='%s' ok=%d timed_out=0 refused=%d exit=%d stdout='%s' stderr='%s'",
+        RedactAdbText(endpoint).c_str(),
+        ok ? 1 : 0,
+        m_lastConnectWasRefused ? 1 : 0,
+        r.exitCode,
+        TruncateForLog(r.out).c_str(),
+        TruncateForLog(r.err).c_str());
     fprintf(stderr, "[adb] connect endpoint='%s' ok=%d exit=%d out='%s'\n",
             endpoint.c_str(), ok ? 1 : 0, r.exitCode, TrimAscii(r.out).c_str());
     return ok;
+}
+
+bool AdbController::LastConnectTimedOut() const
+{
+    return m_lastConnectTimedOut;
+}
+
+bool AdbController::LastConnectWasRefused() const
+{
+    return m_lastConnectWasRefused;
 }
 
 bool AdbController::Connected()

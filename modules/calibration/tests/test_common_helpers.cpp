@@ -1,6 +1,7 @@
 #include "FileLog.h"
 #include "JsonUtil.h"
 #include "LogPaths.h"
+#include "ProcessPerfLog.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -143,4 +144,69 @@ TEST(FileLog, FlushLogFileToDiskAcceptsOpenFile)
 	fclose(file);
 	DeleteFileW(path.c_str());
 	RemoveDirectoryW(dir.c_str());
+}
+
+TEST(ProcessPerfLog, CalculatesCpuPercentAgainstWholeCpu)
+{
+	constexpr uint64_t kOneSecond100ns = 10ULL * 1000ULL * 1000ULL;
+
+	EXPECT_DOUBLE_EQ(
+		100.0,
+		openvr_pair::common::CalculateProcessCpuPercentOneCore(kOneSecond100ns, 1000));
+	EXPECT_DOUBLE_EQ(
+		25.0,
+		openvr_pair::common::CalculateProcessCpuPercentTotal(kOneSecond100ns, 1000, 4));
+	EXPECT_DOUBLE_EQ(
+		100.0,
+		openvr_pair::common::CalculateProcessCpuPercentTotal(8 * kOneSecond100ns, 1000, 4));
+	EXPECT_DOUBLE_EQ(
+		0.0,
+		openvr_pair::common::CalculateProcessCpuPercentTotal(kOneSecond100ns, 0, 4));
+}
+
+TEST(ProcessPerfLog, ThrottlesBySampleInterval)
+{
+	EXPECT_TRUE(openvr_pair::common::ShouldTakeProcessPerfSample(0, 100, 10000));
+	EXPECT_FALSE(openvr_pair::common::ShouldTakeProcessPerfSample(100, 9999, 10000));
+	EXPECT_TRUE(openvr_pair::common::ShouldTakeProcessPerfSample(100, 10100, 10000));
+	EXPECT_TRUE(openvr_pair::common::ShouldTakeProcessPerfSample(500, 100, 10000));
+}
+
+TEST(ProcessPerfLog, CollectsCurrentProcessSnapshot)
+{
+	openvr_pair::common::ProcessPerfSnapshot snapshot{};
+	ASSERT_TRUE(openvr_pair::common::CollectProcessPerfSnapshot(snapshot));
+
+	EXPECT_NE(0u, snapshot.processId);
+	EXPECT_GE(snapshot.logicalProcessors, 1u);
+	EXPECT_TRUE(snapshot.cpuTimeValid || snapshot.memoryValid || snapshot.handleCountValid);
+	if (snapshot.memoryValid) {
+		EXPECT_GT(snapshot.workingSetBytes, 0u);
+	}
+}
+
+TEST(ProcessPerfLog, FormatsStableLogFields)
+{
+	openvr_pair::common::ProcessPerfSample sample{};
+	sample.snapshot.processId = 1234;
+	sample.snapshot.logicalProcessors = 8;
+	sample.snapshot.memoryValid = true;
+	sample.snapshot.workingSetBytes = 128ULL * 1024ULL * 1024ULL;
+	sample.snapshot.privateBytes = 64ULL * 1024ULL * 1024ULL;
+	sample.snapshot.peakWorkingSetBytes = 256ULL * 1024ULL * 1024ULL;
+	sample.snapshot.handleCountValid = true;
+	sample.snapshot.handleCount = 55;
+	sample.cpuValid = true;
+	sample.intervalMs = 10000;
+	sample.processCpuMs = 250;
+	sample.cpuPctTotal = 0.31;
+	sample.cpuPctOneCore = 2.50;
+
+	const std::string line = openvr_pair::common::FormatProcessPerfSample("overlay", sample);
+	EXPECT_NE(std::string::npos, line.find("role=overlay"));
+	EXPECT_NE(std::string::npos, line.find("cpu_pct_total=0.31"));
+	EXPECT_NE(std::string::npos, line.find("cpu_pct_one_core=2.50"));
+	EXPECT_NE(std::string::npos, line.find("working_set_mb=128.00"));
+	EXPECT_NE(std::string::npos, line.find("private_mb=64.00"));
+	EXPECT_NE(std::string::npos, line.find("handles=55"));
 }

@@ -1,8 +1,10 @@
 #include "ServerTrackedDeviceProvider.h"
+#include "DebugLogging.h"
 #include "FeatureFlags.h"
 #include "InterfaceHookInjector.h"
 #include "IsometryTransform.h"
 #include "Logging.h"
+#include "ProcessPerfLog.h"
 #include "PredictionSmoothingMath.h"
 #include "ServerTrackedDeviceProviderConfigPacking.h"
 #include "inputhealth/PathClassifier.h"
@@ -305,6 +307,22 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	LOG("ServerTrackedDeviceProvider::Init complete active_modules=%zu featureFlags=0x%08x",
 		activeModules.size(), (unsigned)featureFlags);
 	return vr::VRInitError_None;
+}
+
+void ServerTrackedDeviceProvider::RunFrame()
+{
+	static openvr_pair::common::ProcessPerfSampler s_perfSampler;
+	if (!openvr_pair::common::IsDebugLoggingEnabled()) {
+		s_perfSampler.Reset();
+		return;
+	}
+
+	openvr_pair::common::ProcessPerfSample perfSample{};
+	if (!s_perfSampler.MaybeSample(perfSample)) return;
+
+	const std::string line =
+		openvr_pair::common::FormatProcessPerfSample("driver-host", perfSample);
+	LOG("[perf] %s", line.c_str());
 }
 
 void ServerTrackedDeviceProvider::Cleanup()
@@ -748,6 +766,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	// driver coordinates, and still works when the visible tracker output is
 	// quashed.
 	bool driverSynthTrackerSlot = false;
+	bool driverSynthHmdMode = false;
+	bool driverSynthComposeOk = false;
+	const char* driverSynthFallbackReason = "inactive";
+	int64_t driverSynthTrackerAgeMs = -1;
+	auto driverSynthNow = std::chrono::steady_clock::now();
+	vr::DriverPose_t driverSynthPose{};
 	{
 		std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
 		driverSynthTrackerSlot =
@@ -774,6 +798,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 
 		if (hmState.mode == 3 /*DriverSynth*/) {
+			driverSynthHmdMode = true;
 			// Copy the latest calibrated tracker snapshot and attempt composition.
 			driver_synth::TrackerSnapshot trackerCopy;
 			{
@@ -790,26 +815,16 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			memcpy(synthState.headFromTrackerRot, hmState.headFromTrackerRot,
 			       sizeof synthState.headFromTrackerRot);
 
-			const auto synthNow = std::chrono::steady_clock::now();
-			vr::DriverPose_t synthPose{};
-			const bool ok = driver_synth::Compose(
-				synthState, trackerCopy, synthNow, synthPose);
-			static std::atomic<int> s_synthPoseState{0}; // 0 unknown, 1 synth, 2 fallback
+			driverSynthNow = std::chrono::steady_clock::now();
+			driverSynthTrackerAgeMs =
+				driver_synth::SnapshotAgeMs(trackerCopy, driverSynthNow);
+			driverSynthComposeOk = driver_synth::Compose(
+				synthState, trackerCopy, driverSynthNow, driverSynthPose);
 
-			if (ok) {
-				// Log each transition into tracker-driven synthesis so recovery
-				// after an occlusion is visible without per-frame noise.
-				if (s_synthPoseState.exchange(1, std::memory_order_relaxed) != 1) {
-					LOG("[driver-synth] active: deviceID=%d", hmState.deviceId);
-				}
-				pose = synthPose;
-				// The synthesized pose takes over; skip the normal
-				// calibration/quash path by returning early.
-				return true;
-			}
-			// Synthesis failed. DriverSynth intentionally falls through to the
-			// normal HMD pose path so the Quest's self-tracking remains the
-			// fallback while continuous calibration keeps the fallback aligned.
+			// Synthesis failure no longer hard-switches the HMD pose source here.
+			// The normal HMD path below first builds the Quest fallback pose, then
+			// the source blender crossfades between fallback and tracker synth.
+			if (!driverSynthComposeOk)
 			{
 				auto markReasonLogged = [](std::atomic<uint8_t>& flags, uint8_t bit) {
 					uint8_t observed = flags.load(std::memory_order_relaxed);
@@ -842,11 +857,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				if (markReasonLogged(s_loggedReasons, bit)) {
 					LOG("[driver-synth] fallback: reason='%s'", reason);
 				}
-				if (s_synthPoseState.exchange(2, std::memory_order_relaxed) != 2) {
-					LOG("[driver-synth] using Quest HMD fallback: reason='%s'", reason);
-				}
+				driverSynthFallbackReason = reason;
+				shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_DRIVER_SYNTH_FALLBACK);
 			}
-			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_DRIVER_SYNTH_FALLBACK);
 		}
 	}
 #endif // WKOPENVR_BUILD_IS_DEV
@@ -1056,6 +1069,31 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 	}
 
+#if WKOPENVR_BUILD_IS_DEV
+	if (openVRID == 0 && driverSynthHmdMode) {
+		if (m_driverSynthBlendReset.exchange(false, std::memory_order_relaxed)) {
+			m_driverSynthBlendState = driver_synth::SourceBlendState{};
+		}
+		vr::DriverPose_t blendedPose{};
+		const auto blendResult = driver_synth::StepSourceBlend(
+			m_driverSynthBlendState,
+			pose,
+			driverSynthComposeOk ? &driverSynthPose : nullptr,
+			driverSynthComposeOk,
+			driverSynthNow,
+			blendedPose);
+		pose = blendedPose;
+		if (blendResult.phaseChanged) {
+			LOG("[driver-synth] source_blend phase=%s prev=%s reason='%s' alpha=%.3f tracker_age_ms=%lld",
+			    driver_synth::PhaseName(blendResult.phase),
+			    driver_synth::PhaseName(blendResult.previousPhase),
+			    driverSynthComposeOk ? "tracker_ready" : driverSynthFallbackReason,
+			    blendResult.alpha,
+			    (long long)driverSynthTrackerAgeMs);
+		}
+	}
+#endif
+
 #if OPENVR_PAIR_HAS_PHANTOM_DRIVER
 	// Phantom-tracker pipeline. OnRealPoseObserved records the pose AFTER
 	// existing transforms (calibration / smoothing) have run so the
@@ -1153,6 +1191,7 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 	if (stateChanged) {
 		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
 		m_trackerSnap = driver_synth::TrackerSnapshot{};
+		m_driverSynthBlendReset.store(true, std::memory_order_relaxed);
 	}
 #else
 	(void)cfg;
