@@ -5,6 +5,7 @@
 
 #include "Boundary.h"
 #include "BoundaryCapture.h"
+#include "BoundaryPreview.h"
 
 #include <Eigen/Geometry>
 
@@ -369,4 +370,54 @@ TEST(BoundaryBoundsTest, NegativeCoordinates) {
     EXPECT_NEAR(b.xMax,  2.0, 1e-9);
     EXPECT_NEAR(b.zMin, -4.0, 1e-9);
     EXPECT_NEAR(b.zMax,  5.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Boundary drawing preview
+// ---------------------------------------------------------------------------
+
+TEST(BoundaryPreviewTest, EmptyPathHasNoPlane) {
+    std::vector<BoundaryVertex> empty;
+    auto plane = ComputeBoundaryPreviewPlane(empty);
+    EXPECT_FALSE(plane.valid);
+}
+
+TEST(BoundaryPreviewTest, PlaneCentersOnCapturedPath) {
+    std::vector<BoundaryVertex> pts = {
+        { -1.0, 0.0, -2.0 },
+        {  3.0, 0.0,  2.0 },
+    };
+
+    auto plane = ComputeBoundaryPreviewPlane(pts);
+
+    EXPECT_TRUE(plane.valid);
+    EXPECT_NEAR(plane.centerX, 1.0, 1e-9);
+    EXPECT_NEAR(plane.centerZ, 0.0, 1e-9);
+    EXPECT_GT(plane.spanMeters, 4.0);
+}
+
+TEST(BoundaryPreviewTest, RasterMarksLivePathPixels) {
+    std::vector<BoundaryVertex> pts = {
+        { 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0 },
+    };
+
+    auto openRaster = BuildBoundaryPreviewRaster(pts, false);
+    auto closedRaster = BuildBoundaryPreviewRaster(pts, true);
+
+    ASSERT_EQ(openRaster.rgba.size(), closedRaster.rgba.size());
+    EXPECT_TRUE(openRaster.plane.valid);
+    EXPECT_TRUE(closedRaster.plane.valid);
+    EXPECT_NE(openRaster.hash, closedRaster.hash);
+
+    size_t openAlpha = 0;
+    size_t closedAlpha = 0;
+    for (size_t i = 3; i < openRaster.rgba.size(); i += 4) {
+        if (openRaster.rgba[i] != 0) ++openAlpha;
+        if (closedRaster.rgba[i] != 0) ++closedAlpha;
+    }
+
+    EXPECT_GT(openAlpha, 0u);
+    EXPECT_GT(closedAlpha, openAlpha);
 }

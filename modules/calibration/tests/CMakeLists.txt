@@ -70,6 +70,7 @@ add_executable(spacecal_tests
     ${CMAKE_SOURCE_DIR}/core/src/overlay/DeviceFilters.cpp
     ${SPACECAL_SRC}/overlay/Boundary.cpp
     ${SPACECAL_SRC}/overlay/BoundaryCapture.cpp
+    ${SPACECAL_SRC}/overlay/BoundaryPreview.cpp
     ${SPACECAL_SRC}/overlay/BoundaryRePush.cpp
     ${SPACECAL_SRC}/overlay/ControllerInput.cpp
     ${SPACECAL_SRC}/overlay/GuardianAutoApply.cpp

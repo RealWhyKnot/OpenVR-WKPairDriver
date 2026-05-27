@@ -5,6 +5,7 @@
 #include "DiagnosticsLog.h"
 #include "Boundary.h"
 #include "BoundaryCapture.h"
+#include "BoundaryPreview.h"
 #include "GuardianAutoApply.h"
 #include "SpaceCalibratorUmbrellaRuntime.h"
 #include "UserInterfaceHeadMount.h"
@@ -42,8 +43,14 @@ std::string s_guardianError;
 std::string s_adbCleanupStatus;
 bool s_adbCleanupHadWarning = false;
 
-void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts) {
-    if (verts.size() < 2) return;
+void HideBoundaryPreviewOverlay() {
+    wkopenvr::boundary::TickBoundaryPreview(false, {}, CalCtx.boundary.floorY, false);
+}
+
+void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts,
+                        bool closeLoop = true,
+                        bool activePath = false) {
+    if (verts.empty()) return;
 
     double xMin = verts[0].x, xMax = verts[0].x;
     double zMin = verts[0].z, zMax = verts[0].z;
@@ -57,7 +64,7 @@ void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts) {
     const double rangeZ = zMax - zMin;
     const double range = (rangeX > rangeZ ? rangeX : rangeZ);
     const double pad = range * 0.1 + 0.5;
-    const double drawSpan = range + pad * 2.0;
+    const double drawSpan = std::max(1.0, range + pad * 2.0);
 
     const float canvasW = ImGui::GetContentRegionAvail().x;
     const float canvasH = canvasW * 0.6f;
@@ -74,13 +81,18 @@ void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts) {
         return ImVec2(cx, cy);
     };
 
-    for (size_t i = 0; i < verts.size(); ++i) {
+    const ImU32 lineColor = activePath ? IM_COL32(0, 245, 160, 255) : IM_COL32(0, 200, 100, 255);
+    const size_t segmentCount = closeLoop ? verts.size() : (verts.size() > 1 ? verts.size() - 1 : 0);
+    for (size_t i = 0; i < segmentCount; ++i) {
         const auto& a = verts[i];
         const auto& b = verts[(i + 1) % verts.size()];
-        dl->AddLine(toCanvas(a.x, a.z), toCanvas(b.x, b.z), IM_COL32(0, 200, 100, 255), 1.5f);
+        dl->AddLine(toCanvas(a.x, a.z), toCanvas(b.x, b.z), lineColor, activePath ? 2.5f : 1.5f);
     }
-    for (const auto& v : verts) {
-        dl->AddCircleFilled(toCanvas(v.x, v.z), 3.0f, IM_COL32(0, 200, 100, 255));
+    for (size_t i = 0; i < verts.size(); ++i) {
+        const auto& v = verts[i];
+        const bool last = i + 1 == verts.size();
+        const ImU32 dotColor = activePath && last ? IM_COL32(255, 245, 90, 255) : lineColor;
+        dl->AddCircleFilled(toCanvas(v.x, v.z), activePath && last ? 5.0f : 3.0f, dotColor);
     }
 
     {
@@ -113,6 +125,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
         if (!hasVerts) {
             if (ImGui::Button("Draw boundary")) {
                 s_capture.Start();
+                HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
             if (ImGui::IsItemHovered()) {
@@ -121,6 +134,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
         } else {
             if (ImGui::Button("Re-draw")) {
                 s_capture.Start();
+                HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
             ImGui::SameLine();
@@ -200,13 +214,25 @@ void DrawBoundarySection(ImVec2 panelSize) {
         ImGui::TextColored(pal.statusWarn,
             "Recording. Point at the floor and trace the edge. Click Done when finished.");
         ImGui::TextDisabled("Raw vertices: %d", (int)s_capture.rawVertexCount());
+        DrawPolygonPreview(s_capture.vertices(), false, true);
+        wkopenvr::boundary::TickBoundaryPreview(
+            true,
+            s_capture.vertices(),
+            CalCtx.boundary.floorY,
+            false);
         ImGui::Spacing();
         if (ImGui::Button("Done##bnd_done")) {
             s_capture.Finish();
+            wkopenvr::boundary::TickBoundaryPreview(
+                true,
+                s_capture.vertices(),
+                CalCtx.boundary.floorY,
+                true);
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel##bnd_cancel")) {
             s_capture.Cancel();
+            HideBoundaryPreviewOverlay();
         }
     } else { // Finished
         const auto& verts = s_capture.vertices();
@@ -217,6 +243,11 @@ void DrawBoundarySection(ImVec2 panelSize) {
         ImGui::TextDisabled("Cleaned to edge vertices.");
 
         DrawPolygonPreview(verts);
+        wkopenvr::boundary::TickBoundaryPreview(
+            true,
+            verts,
+            CalCtx.boundary.floorY,
+            true);
 
         ImGui::Spacing();
         if (ImGui::Button("Keep this boundary##bnd_apply")) {
@@ -241,6 +272,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 SaveProfile(CalCtx);
                 if (appliedOk) {
                     s_capture.Cancel();
+                    HideBoundaryPreviewOverlay();
                     s_boundaryError.clear();
                 }
             }
@@ -248,6 +280,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
         ImGui::SameLine();
         if (ImGui::Button("Discard##bnd_discard_fin")) {
             s_capture.Cancel();
+            HideBoundaryPreviewOverlay();
         }
     }
 
@@ -893,6 +926,14 @@ void CCal_TickBoundaryCapture() {
     if (s_capture.state() != wkopenvr::boundary::CaptureState::Active)
         return;
 
+    auto tickPreview = []() {
+        wkopenvr::boundary::TickBoundaryPreview(
+            true,
+            s_capture.vertices(),
+            CalCtx.boundary.floorY,
+            false);
+    };
+
     auto* vrs = vr::VRSystem();
     const uint64_t sessionId = s_capture.sessionId();
     static uint64_t s_lastSessionId = 0;
@@ -908,6 +949,7 @@ void CCal_TickBoundaryCapture() {
             s_noVrLoggedSession = sessionId;
             Metrics::WriteLogAnnotation("[boundary-capture] waiting: no VRSystem available");
         }
+        tickPreview();
         return;
     }
 
@@ -1008,9 +1050,11 @@ void CCal_TickBoundaryCapture() {
     }
 
     if (captured) {
+        tickPreview();
         return;
     }
 
+    tickPreview();
     ++s_waitTicks;
     if (s_waitTicks == 1 || (s_waitTicks % 120) == 0) {
         WriteBoundaryInputSummary(stats, sessionId, s_capture.rawVertexCount());
