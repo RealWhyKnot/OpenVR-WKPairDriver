@@ -18,6 +18,7 @@
 namespace skeletal { void MarkFingersNeedReseed(uint16_t fingerBits); }
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <random>
@@ -115,8 +116,9 @@ double ComputeSmartMotionRamp(const vr::DriverPose_t &pose)
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriverContext)
 {
 	TRACE("ServerTrackedDeviceProvider::Init()");
-	LOG("ServerTrackedDeviceProvider::Init begin version=%s protocol=%u",
-		PAIRDRIVER_VERSION_STRING, (unsigned)protocol::Version);
+	LOG("ServerTrackedDeviceProvider::Init begin version=%s protocol=%u build_is_dev=%d",
+		PAIRDRIVER_VERSION_STRING, (unsigned)protocol::Version,
+		(int)WKOPENVR_BUILD_IS_DEV);
 	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
 
 	// QPF is constant for the lifetime of the boot; capture it once instead of
@@ -740,49 +742,30 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 #if WKOPENVR_BUILD_IS_DEV
 	// DriverSynth: dev-only experimental path that replaces the upstream Quest
 	// HMD pose with one synthesized from the head-mounted lighthouse tracker.
-	//
-	// Two separate tasks:
-	//   (a) Cache the upstream HMD pose every time openVRID == 0 arrives, so
-	//       the synthesis branch has a fresh worldFromDriver source.
-	//   (b) Cache the head-mount tracker pose every time its deviceId matches,
-	//       so the HMD branch can compose from the most recent valid snapshot.
-	//   (c) On openVRID == 0, attempt synthesis; replace `pose` on success.
-	//
-	// All snapshot writes happen under m_trackerSnapMutex (separate from
-	// stateMutex; no ordering risk because SetHeadMountConfig and the snapshot
-	// writers never hold stateMutex themselves).
-
+	// The tracker snapshot is written later in this function, after the normal
+	// calibration transform has been applied to a copy of the tracker pose. That
+	// makes the HMD follow the calibrated lighthouse pose instead of raw tracker
+	// driver coordinates, and still works when the visible tracker output is
+	// quashed.
+	bool driverSynthTrackerSlot = false;
 	{
-		// (a) and (b): snapshot updates.
-		const auto snapNow = std::chrono::steady_clock::now();
-
-		// Read the current head-mount deviceId cheaply under its own mutex.
-		int32_t hmDeviceId = -1;
-		{
-			std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
-			hmDeviceId = m_headMountState.deviceId;
-		}
-
-		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
-
-		if (openVRID == 0) {
-			// Cache the upstream Quest HMD pose for worldFromDriver + sanity gate.
-			m_upstreamHmdSnap.pose      = pose;
-			m_upstreamHmdSnap.capturedAt = snapNow;
-			m_upstreamHmdSnap.capturedForDeviceId = 0;
-			m_upstreamHmdSnap.valid      = true;
-		} else if (hmDeviceId >= 0
-		           && static_cast<int32_t>(openVRID) == hmDeviceId) {
-			// Cache the head-mount tracker pose for composition.
-			m_trackerSnap.pose      = pose;
-			m_trackerSnap.capturedAt = snapNow;
-			m_trackerSnap.capturedForDeviceId = static_cast<int32_t>(openVRID);
-			m_trackerSnap.valid      = true;
-		}
+		std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
+		driverSynthTrackerSlot =
+			m_headMountState.mode == 3
+			&& m_headMountState.deviceId >= 0
+			&& static_cast<int32_t>(openVRID) == m_headMountState.deviceId;
 	}
+	auto snapshotDriverSynthTracker = [&](const vr::DriverPose_t& snapshotPose) {
+		if (!driverSynthTrackerSlot) return;
+		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+		m_trackerSnap.pose = snapshotPose;
+		m_trackerSnap.capturedAt = std::chrono::steady_clock::now();
+		m_trackerSnap.capturedForDeviceId = static_cast<int32_t>(openVRID);
+		m_trackerSnap.valid = true;
+	};
 
 	if (openVRID == 0) {
-		// (c): attempt HMD synthesis. Copy the cached state out under its mutex
+		// Attempt HMD synthesis. Copy the cached state out under its mutex
 		// (tiny), release, then work on the copy.
 		HeadMountDriverState hmState{};
 		{
@@ -791,13 +774,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 
 		if (hmState.mode == 3 /*DriverSynth*/) {
-			// Copy the two snapshots and attempt composition.
+			// Copy the latest calibrated tracker snapshot and attempt composition.
 			driver_synth::TrackerSnapshot trackerCopy;
-			driver_synth::TrackerSnapshot upstreamCopy;
 			{
 				std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
-				trackerCopy  = m_trackerSnap;
-				upstreamCopy = m_upstreamHmdSnap;
+				trackerCopy = m_trackerSnap;
 			}
 
 			driver_synth::SynthState synthState{};
@@ -812,41 +793,84 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			const auto synthNow = std::chrono::steady_clock::now();
 			vr::DriverPose_t synthPose{};
 			const bool ok = driver_synth::Compose(
-				synthState, trackerCopy, upstreamCopy, synthNow, synthPose);
+				synthState, trackerCopy, synthNow, synthPose);
 
 			if (ok) {
 				// Log first successful synthesis per session.
-				static bool s_synthActiveLogged = false;
-				if (!s_synthActiveLogged) {
-					s_synthActiveLogged = true;
+				static std::atomic<bool> s_synthActiveLogged{false};
+				if (!s_synthActiveLogged.exchange(true, std::memory_order_relaxed)) {
 					LOG("[driver-synth] active: deviceID=%d", hmState.deviceId);
+				}
+				{
+					std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+					m_lastSynthHmdSnap.pose = synthPose;
+					m_lastSynthHmdSnap.capturedAt = synthNow;
+					m_lastSynthHmdSnap.capturedForDeviceId = hmState.deviceId;
+					m_lastSynthHmdSnap.valid = true;
 				}
 				pose = synthPose;
 				// The synthesized pose takes over; skip the normal
 				// calibration/quash path by returning early.
 				return true;
 			}
-			// Synthesis failed: fall through to the normal calibration path.
-			// Log each unique failure reason once per session.
+			// Synthesis failed. In DriverSynth mode, a stale tracker should not
+			// silently hand control back to Quest SLAM once a good synthesized
+			// pose exists; hold the last synthesized pose instead.
 			{
-				static uint8_t s_loggedReasons = 0;
-				enum { R_INVALID=1, R_STALE=2, R_UPSTREAM=4, R_MISMATCH=8, R_SANITY=16 };
+				auto markReasonLogged = [](std::atomic<uint8_t>& flags, uint8_t bit) {
+					uint8_t observed = flags.load(std::memory_order_relaxed);
+					while ((observed & bit) == 0) {
+						if (flags.compare_exchange_weak(
+							observed, static_cast<uint8_t>(observed | bit),
+							std::memory_order_relaxed, std::memory_order_relaxed)) {
+							return true;
+						}
+					}
+					return false;
+				};
+				static std::atomic<uint8_t> s_loggedReasons{0};
+				enum { R_UNRESOLVED=1, R_OFFSET=2, R_INVALID=4, R_STALE=8, R_MISMATCH=16, R_UNKNOWN=32 };
 				const char* reason = "unknown";
 				uint8_t bit = 0;
-				if (!trackerCopy.valid || !trackerCopy.pose.poseIsValid) {
+				if (synthState.deviceId < 0) {
+					reason = "tracker_unresolved"; bit = R_UNRESOLVED;
+				} else if (!synthState.offsetCalibrated) {
+					reason = "offset_not_calibrated"; bit = R_OFFSET;
+				} else if (!trackerCopy.valid || !trackerCopy.pose.poseIsValid) {
 					reason = "tracker_invalid"; bit = R_INVALID;
 				} else if (!driver_synth::IsTrackerFresh(trackerCopy, synthNow)) {
 					reason = "tracker_stale"; bit = R_STALE;
-				} else if (!driver_synth::IsUpstreamHmdFresh(upstreamCopy, synthNow)) {
-					reason = "upstream_stale"; bit = R_UPSTREAM;
 				} else if (trackerCopy.capturedForDeviceId != synthState.deviceId) {
 					reason = "snapshot_device_mismatch"; bit = R_MISMATCH;
 				} else {
-					reason = "sanity_gate_world_pos_delta"; bit = R_SANITY;
+					reason = "unknown"; bit = R_UNKNOWN;
 				}
-				if (!(s_loggedReasons & bit)) {
-					s_loggedReasons |= bit;
+				if (markReasonLogged(s_loggedReasons, bit)) {
 					LOG("[driver-synth] fallback: reason='%s'", reason);
+				}
+
+				vr::DriverPose_t heldPose{};
+				bool haveHeldPose = false;
+				{
+					std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+					if (m_lastSynthHmdSnap.valid
+						&& m_lastSynthHmdSnap.capturedForDeviceId == synthState.deviceId) {
+						heldPose = m_lastSynthHmdSnap.pose;
+						haveHeldPose = true;
+					}
+				}
+				if (haveHeldPose) {
+					static std::atomic<uint8_t> s_loggedHoldReasons{0};
+					if (markReasonLogged(s_loggedHoldReasons, bit)) {
+						LOG("[driver-synth] holding last synthesized HMD pose: reason='%s'", reason);
+					}
+					heldPose.vecVelocity[0] = heldPose.vecVelocity[1] = heldPose.vecVelocity[2] = 0.0;
+					heldPose.vecAngularVelocity[0] = heldPose.vecAngularVelocity[1] = heldPose.vecAngularVelocity[2] = 0.0;
+					heldPose.vecAcceleration[0] = heldPose.vecAcceleration[1] = heldPose.vecAcceleration[2] = 0.0;
+					heldPose.vecAngularAcceleration[0] = heldPose.vecAngularAcceleration[1] = heldPose.vecAngularAcceleration[2] = 0.0;
+					heldPose.poseTimeOffset = 0.0;
+					pose = heldPose;
+					return true;
 				}
 			}
 			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_DRIVER_SYNTH_FALLBACK);
@@ -858,6 +882,26 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	tf.prevQuash = tf.quash;
 
 	if (tf.quash) {
+#if WKOPENVR_BUILD_IS_DEV
+		if (driverSynthTrackerSlot && tf.enabled) {
+			vr::DriverPose_t synthTrackerPose = pose;
+			synthTrackerPose.vecPosition[0] *= tf.scale;
+			synthTrackerPose.vecPosition[1] *= tf.scale;
+			synthTrackerPose.vecPosition[2] *= tf.scale;
+
+			auto deviceWorldPose = toIsoPose(synthTrackerPose);
+			tf.currentRate = GetTransformDeltaSize(
+				tf.currentRate, deviceWorldPose, tf.transform, tf.targetTransform);
+			BlendTransform(tf, deviceWorldPose);
+			ApplyTransform(tf, synthTrackerPose);
+			snapshotDriverSynthTracker(synthTrackerPose);
+		} else if (driverSynthTrackerSlot) {
+			static std::atomic<bool> s_loggedHiddenNoTransform{false};
+			if (!s_loggedHiddenNoTransform.exchange(true, std::memory_order_relaxed)) {
+				LOG("[driver-synth] tracker snapshot skipped: hidden selected tracker has no enabled transform");
+			}
+		}
+#endif
 		openvr_pair::common::quash::ApplyQuashToPose(pose);
 		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_QUASH_APPLY);
 
@@ -905,6 +949,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
+#if WKOPENVR_BUILD_IS_DEV
+		snapshotDriverSynthTracker(pose);
+#endif
 		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_PER_ID_APPLY);
 	}
 	else
@@ -976,6 +1023,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 
 		if (deviceSystem[openVRID].empty()) {
+#if WKOPENVR_BUILD_IS_DEV
+			if (driverSynthTrackerSlot) {
+				static std::atomic<bool> s_loggedUnknownSystem{false};
+				if (!s_loggedUnknownSystem.exchange(true, std::memory_order_relaxed)) {
+					LOG("[driver-synth] tracker snapshot skipped: tracking system unknown for selected tracker");
+				}
+			}
+#endif
 			return true; // No system known yet; nothing to fall back to.
 		}
 
@@ -1013,6 +1068,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			BlendTransform(tf, deviceWorldPose);
 			ApplyTransform(tf, pose);
+#if WKOPENVR_BUILD_IS_DEV
+			snapshotDriverSynthTracker(pose);
+#endif
 			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_FALLBACK_APPLY);
 		}
 		else if (tf.fallbackActive) {
@@ -1094,19 +1152,35 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 	memcpy(next.headFromTrackerRot, cfg.headFromTrackerRot,
 	       sizeof cfg.headFromTrackerRot);
 
+	bool stateChanged = false;
 	{
 		HeadMountDriverState prev{};
 		std::lock_guard<std::mutex> lk(m_headMountStateMutex);
 		prev = m_headMountState;
 		m_headMountState = next;
+		stateChanged =
+			next.mode != prev.mode
+			|| next.deviceId != prev.deviceId
+			|| next.hideTracker != prev.hideTracker
+			|| next.offsetCalibrated != prev.offsetCalibrated
+			|| memcmp(next.trackerSerial, prev.trackerSerial, sizeof next.trackerSerial) != 0
+			|| memcmp(next.trackerTrackingSystem, prev.trackerTrackingSystem,
+			          sizeof next.trackerTrackingSystem) != 0
+			|| memcmp(next.headFromTrackerTrans, prev.headFromTrackerTrans,
+			          sizeof next.headFromTrackerTrans) != 0
+			|| memcmp(next.headFromTrackerRot, prev.headFromTrackerRot,
+			          sizeof next.headFromTrackerRot) != 0;
 		// Log on change only to avoid flooding when the overlay re-sends
 		// the same config on every AssignTargets scan.
-		if (next.mode != prev.mode
-		    || next.deviceId != prev.deviceId
-		    || next.offsetCalibrated != prev.offsetCalibrated) {
+		if (stateChanged) {
 			LOG("[driver-head-mount] config: mode=%d deviceID=%d offsetCalibrated=%d",
 			    next.mode, next.deviceId, (int)next.offsetCalibrated);
 		}
+	}
+	if (stateChanged) {
+		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
+		m_trackerSnap = driver_synth::TrackerSnapshot{};
+		m_lastSynthHmdSnap = driver_synth::TrackerSnapshot{};
 	}
 #else
 	(void)cfg;

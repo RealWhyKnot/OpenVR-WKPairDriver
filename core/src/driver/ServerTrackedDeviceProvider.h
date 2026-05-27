@@ -2,6 +2,7 @@
 
 #define EIGEN_MPL2_ONLY
 
+#include "BuildChannel.h"
 #include "DriverModule.h"
 #include "DriverSynthCompose.h"
 #include "IPCServer.h"
@@ -302,12 +303,10 @@ private:
 	mutable std::mutex               m_trackerSnapMutex;
 	driver_synth::TrackerSnapshot    m_trackerSnap;
 
-	// Upstream Quest HMD pose cache. Updated every time openVRID == 0 arrives
-	// in HandleDevicePoseUpdated (before the synthesis branch runs), so the
-	// synthesis branch always has a fresh upstream pose available for the
-	// worldFromDriver values and the sanity gate. Same mutex as the tracker
-	// snapshot (two tiny PODs, single lock, reduces mutex count).
-	driver_synth::TrackerSnapshot    m_upstreamHmdSnap;
+	// Last good synthesized HMD pose. When DriverSynth owns the HMD and the
+	// head tracker goes stale, the driver holds this pose instead of silently
+	// falling back to Quest SLAM. Same mutex as the tracker snapshot.
+	driver_synth::TrackerSnapshot    m_lastSynthHmdSnap;
 #endif // WKOPENVR_BUILD_IS_DEV
 
 	// Finger-smoothing config packed into an atomic uint64_t. Single-writer
