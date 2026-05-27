@@ -46,7 +46,7 @@ std::filesystem::path ResolveManifestPath()
 
 } // namespace
 
-void RegisterApplicationManifest()
+void RegisterApplicationManifest(bool allowRuntimeLaunch)
 {
 	using namespace vr;
 
@@ -57,9 +57,13 @@ void RegisterApplicationManifest()
 	}
 
 	EVRInitError initErr = VRInitError_None;
-	VR_Init(&initErr, VRApplication_Utility);
+	const EVRApplicationType appType = allowRuntimeLaunch
+		? VRApplication_Utility
+		: VRApplication_Background;
+	VR_Init(&initErr, appType);
 	if (initErr != VRInitError_None) {
-		fprintf(stderr, "VR_Init (utility) failed: %s\n",
+		fprintf(stderr, "VR_Init (%s) failed: %s\n",
+			allowRuntimeLaunch ? "utility" : "background",
 			VR_GetVRInitErrorAsEnglishDescription(initErr));
 		return;
 	}

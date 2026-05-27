@@ -163,14 +163,16 @@ int main(int argc, char **argv)
 	// immediately once the new locations already exist.
 	RunFirstLaunchMigration();
 
-	// Register vrmanifest with SteamVR if not already installed. Idempotent;
-	// no-ops on subsequent launches and when the runtime is unavailable.
-	RegisterApplicationManifest();
-
 	if (registerOnly) {
 		openvr_pair::common::DiagnosticLog("overlay", "register-only requested");
+		RegisterApplicationManifest(true);
 		return 0;
 	}
+
+	// Register vrmanifest with SteamVR if it is already reachable. Idempotent;
+	// normal desktop launches use a no-launch probe so WKOpenVR does not wake
+	// SteamVR just to open the desktop window.
+	RegisterApplicationManifest(false);
 
 	glfwSetErrorCallback(GlfwErrorCallback);
 	if (!glfwInit()) {
