@@ -516,12 +516,17 @@ bool AdbController::DisableWirelessAdb(const std::string& endpoint)
 
 bool AdbController::EnableWirelessAdb(int port)
 {
+    return EnableWirelessAdb(m_targetSerial, port);
+}
+
+bool AdbController::EnableWirelessAdb(const std::string& serial, int port)
+{
     if (port <= 0 || port > 65535) port = 5555;
 
     std::vector<std::string> args;
-    if (!m_targetSerial.empty()) {
+    if (!serial.empty()) {
         args.push_back("-s");
-        args.push_back(m_targetSerial);
+        args.push_back(serial);
     }
     args.push_back("tcpip");
     args.push_back(std::to_string(port));
@@ -532,13 +537,18 @@ bool AdbController::EnableWirelessAdb(int port)
         return false;
     }
     const bool ok = (r.exitCode == 0);
-    fprintf(stderr, "[adb] tcpip port=%d ok=%d exit=%d out='%s' err='%s'\n",
-            port, ok ? 1 : 0, r.exitCode,
+    fprintf(stderr, "[adb] tcpip serial='%s' port=%d ok=%d exit=%d out='%s' err='%s'\n",
+            RedactAdbText(serial).c_str(), port, ok ? 1 : 0, r.exitCode,
             TrimAscii(r.out).c_str(), TrimAscii(r.err).c_str());
     return ok;
 }
 
 bool AdbController::OpenInteractiveShell() const
+{
+    return OpenInteractiveShell({});
+}
+
+bool AdbController::OpenInteractiveShell(const std::string& serial) const
 {
     if (!BinaryAvailable()) return false;
 
@@ -548,6 +558,10 @@ bool AdbController::OpenInteractiveShell() const
     const std::wstring directory = toolsDir.wstring();
     std::wstring args = L"/K \"";
     args += QuoteForCmd(adbPath);
+    if (!serial.empty()) {
+        args += L" -s ";
+        args += QuoteForCmd(openvr_pair::common::Utf8ToWide(serial));
+    }
     args += L" shell\"";
 
     HINSTANCE launched = ShellExecuteW(

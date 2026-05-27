@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <string>
 
 namespace wkopenvr::questapp {
@@ -24,18 +25,116 @@ bool ContainsNoCase(const std::string& text, const char* needle)
     return LowerAscii(text).find(LowerAscii(needle)) != std::string::npos;
 }
 
+std::string TrimAscii(std::string s)
+{
+    while (!s.empty() && static_cast<unsigned char>(s.back()) <= ' ') {
+        s.pop_back();
+    }
+    size_t start = 0;
+    while (start < s.size() && static_cast<unsigned char>(s[start]) <= ' ') {
+        ++start;
+    }
+    return s.substr(start);
+}
+
+bool ParseAdbDeviceLine(const std::string& line, std::string& serial, std::string& state)
+{
+    std::istringstream fields(line);
+    if (!(fields >> serial >> state)) return false;
+    state = LowerAscii(state);
+    return state == "device" || state == "unauthorized" || state == "offline";
+}
+
+bool IsUsbSerial(const std::string& serial)
+{
+    return !serial.empty() && serial.find(':') == std::string::npos;
+}
+
+bool LineIdentifiesQuest(const std::string& lowerLine)
+{
+    return lowerLine.find("quest") != std::string::npos
+        || lowerLine.find("seacliff") != std::string::npos
+        || lowerLine.find("hollywood") != std::string::npos
+        || lowerLine.find("eureka") != std::string::npos
+        || lowerLine.find("panther") != std::string::npos
+        || lowerLine.find("product:") != std::string::npos;
+}
+
+std::string FindAuthorizedQuestSerial(const std::string& output, bool requireUsb)
+{
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        line = TrimAscii(line);
+        if (line.empty()) continue;
+
+        std::string serial;
+        std::string state;
+        if (!ParseAdbDeviceLine(line, serial, state)) continue;
+        if (IsUsbSerial(serial) != requireUsb) continue;
+
+        const std::string lowerLine = LowerAscii(line);
+        if (state == "device" && LineIdentifiesQuest(lowerLine)) {
+            return serial;
+        }
+    }
+    return {};
+}
+
+enum class UsbDeviceState {
+    None,
+    Authorized,
+    Unauthorized,
+    Offline,
+};
+
+UsbDeviceState FindUsbQuestState(const std::string& output)
+{
+    bool sawUnauthorized = false;
+    bool sawOffline = false;
+
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        line = TrimAscii(line);
+        if (line.empty()) continue;
+
+        std::string serial;
+        std::string state;
+        if (!ParseAdbDeviceLine(line, serial, state)) continue;
+        if (!IsUsbSerial(serial)) continue;
+
+        const std::string lowerLine = LowerAscii(line);
+        if (state == "device" && LineIdentifiesQuest(lowerLine)) {
+            return UsbDeviceState::Authorized;
+        }
+        if (state == "unauthorized") {
+            sawUnauthorized = true;
+        } else if (state == "offline") {
+            sawOffline = true;
+        }
+    }
+
+    if (sawUnauthorized) return UsbDeviceState::Unauthorized;
+    if (sawOffline) return UsbDeviceState::Offline;
+    return UsbDeviceState::None;
+}
+
 } // namespace
 
 bool DevicesOutputHasAuthorizedQuest(const std::string& output)
 {
-    const std::string lower = LowerAscii(output);
-    if (lower.find("\tdevice") == std::string::npos) return false;
-    return lower.find("quest") != std::string::npos
-        || lower.find("seacliff") != std::string::npos
-        || lower.find("hollywood") != std::string::npos
-        || lower.find("eureka") != std::string::npos
-        || lower.find("panther") != std::string::npos
-        || lower.find("product:") != std::string::npos;
+    return FindUsbQuestState(output) == UsbDeviceState::Authorized;
+}
+
+std::string FindAuthorizedUsbQuestSerial(const std::string& output)
+{
+    return FindAuthorizedQuestSerial(output, true);
+}
+
+std::string FindAuthorizedWifiQuestSerial(const std::string& output)
+{
+    return FindAuthorizedQuestSerial(output, false);
 }
 
 AdbSetupWizard::AdbSetupWizard(AdbController& adb)
@@ -128,18 +227,18 @@ StepResult AdbSetupWizard::CheckUsbAuthorization()
         return Commit(SetupStep::UsbAuthorization, result);
     }
 
-    const std::string lower = LowerAscii(devices.out);
-    if (lower.find("unauthorized") != std::string::npos) {
+    const UsbDeviceState state = FindUsbQuestState(devices.out);
+    if (state == UsbDeviceState::Unauthorized) {
         result.status = StepStatus::Failed;
         result.detail = "Quest is visible but unauthorized. Put on the headset and allow USB debugging.";
         return Commit(SetupStep::UsbAuthorization, result);
     }
-    if (lower.find("offline") != std::string::npos) {
+    if (state == UsbDeviceState::Offline) {
         result.status = StepStatus::Failed;
         result.detail = "Quest is visible but offline. Replug USB, unlock the headset, and try again.";
         return Commit(SetupStep::UsbAuthorization, result);
     }
-    if (!DevicesOutputHasAuthorizedQuest(devices.out)) {
+    if (state != UsbDeviceState::Authorized) {
         result.status = StepStatus::Failed;
         result.detail = "No authorized Quest was found over USB.";
         return Commit(SetupStep::UsbAuthorization, result);

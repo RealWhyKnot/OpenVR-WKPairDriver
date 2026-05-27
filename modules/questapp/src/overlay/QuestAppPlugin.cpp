@@ -40,6 +40,13 @@ std::string ExtractWifiAdbEndpoint(const std::string& routeOutput, int port)
     return {};
 }
 
+std::string PreferredAdbSerialFromDevices(const std::string& devicesOutput)
+{
+    std::string serial = wkopenvr::questapp::FindAuthorizedUsbQuestSerial(devicesOutput);
+    if (!serial.empty()) return serial;
+    return wkopenvr::questapp::FindAuthorizedWifiQuestSerial(devicesOutput);
+}
+
 } // namespace
 #endif
 
@@ -313,8 +320,18 @@ void QuestAppPlugin::DrawAdbDevTools()
         openvr_pair::overlay::ui::DisabledSection disabled(
             !adbInstalled, "Install ADB platform-tools from the Setup tab first.");
         if (ImGui::Button("Open adb shell")) {
-            const bool ok = adb_.OpenInteractiveShell();
-            SetStatus(ok ? "Opened adb shell terminal." : "Could not open adb shell terminal.", !ok);
+            const auto devices = adb_.Run({"devices", "-l"}, std::chrono::seconds(8));
+            std::string serial;
+            if (!devices.timedOut && devices.exitCode == 0) {
+                lastDevicesOutput_ = TrimAscii(devices.out);
+                serial = PreferredAdbSerialFromDevices(devices.out);
+            }
+            const bool ok = adb_.OpenInteractiveShell(serial);
+            if (ok && !serial.empty()) {
+                SetStatus("Opened adb shell for " + serial + ".", false);
+            } else {
+                SetStatus(ok ? "Opened adb shell terminal." : "Could not open adb shell terminal.", !ok);
+            }
         }
         disabled.AttachReasonTooltip();
     }
@@ -336,12 +353,23 @@ void QuestAppPlugin::DrawAdbDevTools()
             !adbInstalled, "Install ADB platform-tools from the Setup tab first.");
         if (ImGui::Button("Enable Wi-Fi ADB on USB headset")) {
             const int port = 5555;
-            const auto route = adb_.Shell("ip route", std::chrono::seconds(5));
+            const auto devices = adb_.Run({"devices", "-l"}, std::chrono::seconds(8));
+            std::string usbSerial;
+            if (!devices.timedOut && devices.exitCode == 0) {
+                lastDevicesOutput_ = TrimAscii(devices.out);
+                usbSerial = wkopenvr::questapp::FindAuthorizedUsbQuestSerial(devices.out);
+            }
+            if (usbSerial.empty()) {
+                SetStatus("No authorized USB Quest was found.", true);
+                disabled.AttachReasonTooltip();
+                return;
+            }
+            const auto route = adb_.Run({"-s", usbSerial, "shell", "ip", "route"}, std::chrono::seconds(5));
             std::string endpoint;
             if (!route.timedOut && route.exitCode == 0) {
                 endpoint = ExtractWifiAdbEndpoint(route.out, port);
             }
-            const bool ok = adb_.EnableWirelessAdb(port);
+            const bool ok = adb_.EnableWirelessAdb(usbSerial, port);
             if (ok) {
                 lastWifiEndpoint_ = endpoint;
                 if (!endpoint.empty()) {
@@ -360,8 +388,21 @@ void QuestAppPlugin::DrawAdbDevTools()
         openvr_pair::overlay::ui::DisabledSection disabled(
             !adbInstalled, "Install ADB platform-tools from the Setup tab first.");
         if (ImGui::Button("Return ADB to USB")) {
-            const bool ok = adb_.DisableWirelessAdb();
-            SetStatus(ok ? "ADB switched back to USB mode." : "Could not switch ADB back to USB mode.", !ok);
+            const auto devices = adb_.Run({"devices", "-l"}, std::chrono::seconds(8));
+            std::string serial;
+            if (!devices.timedOut && devices.exitCode == 0) {
+                lastDevicesOutput_ = TrimAscii(devices.out);
+                serial = wkopenvr::questapp::FindAuthorizedWifiQuestSerial(devices.out);
+                if (serial.empty()) {
+                    serial = wkopenvr::questapp::FindAuthorizedUsbQuestSerial(devices.out);
+                }
+            }
+            if (serial.empty()) {
+                SetStatus("No authorized Quest was found for adb usb.", true);
+            } else {
+                const bool ok = adb_.DisableWirelessAdb(serial);
+                SetStatus(ok ? "ADB switched back to USB mode." : "Could not switch ADB back to USB mode.", !ok);
+            }
         }
         disabled.AttachReasonTooltip();
     }

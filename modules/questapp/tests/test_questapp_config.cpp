@@ -19,6 +19,7 @@ TEST(QuestAppConfig, RoundTripsInstallStateOnly)
     wkopenvr::questapp::QuestAppConfig src;
     src.pairingKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     src.pairedDeviceSerial = "230YC01DBK003Q";
+    src.companionHost = "192.168.50.93";
     src.companionInstalled = true;
 
     std::stringstream stream;
@@ -29,6 +30,7 @@ TEST(QuestAppConfig, RoundTripsInstallStateOnly)
 
     EXPECT_EQ(dst.pairingKey, src.pairingKey);
     EXPECT_EQ(dst.pairedDeviceSerial, src.pairedDeviceSerial);
+    EXPECT_EQ(dst.companionHost, src.companionHost);
     EXPECT_TRUE(dst.companionInstalled);
     EXPECT_TRUE(wkopenvr::questapp::CanContactCompanion(dst));
     EXPECT_FALSE(wkopenvr::questapp::NeedsCompanionReinstall(dst));

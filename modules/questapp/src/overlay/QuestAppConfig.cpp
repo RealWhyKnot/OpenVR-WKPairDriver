@@ -69,6 +69,7 @@ QuestAppConfig ParseQuestAppConfig(std::istream& in)
 
         if (key == "pairing_key") cfg.pairingKey = value;
         else if (key == "paired_device_serial") cfg.pairedDeviceSerial = value;
+        else if (key == "companion_host") cfg.companionHost = value;
         else if (key == "companion_installed") cfg.companionInstalled = ParseBool(value);
     }
     if (!IsValidPairingKey(cfg.pairingKey)) cfg.pairingKey.clear();
@@ -79,6 +80,7 @@ void WriteQuestAppConfig(const QuestAppConfig& cfg, std::ostream& out)
 {
     WritePair(out, "pairing_key", cfg.pairingKey);
     WritePair(out, "paired_device_serial", cfg.pairedDeviceSerial);
+    WritePair(out, "companion_host", cfg.companionHost);
     out << "companion_installed=" << (cfg.companionInstalled ? 1 : 0) << "\n";
 }
 

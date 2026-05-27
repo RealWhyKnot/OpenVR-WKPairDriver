@@ -1,5 +1,6 @@
 #include "QuestAppInstaller.h"
 
+#include "AdbSetupWizard.h"
 #include "QuestAppCatalog.h"
 #include "Win32Paths.h"
 #include "Win32Text.h"
@@ -108,6 +109,46 @@ bool ContainsNoCase(std::string text, std::string needle)
     return text.find(needle) != std::string::npos;
 }
 
+std::string StripEndpointPort(const std::string& endpoint)
+{
+    const size_t colon = endpoint.find(':');
+    return colon == std::string::npos ? endpoint : endpoint.substr(0, colon);
+}
+
+std::string ExtractRouteSourceIp(const std::string& routeOutput)
+{
+    std::istringstream fields(routeOutput);
+    std::string token;
+    while (fields >> token) {
+        if (token != "src") continue;
+        std::string ip;
+        if (fields >> ip) return ip;
+    }
+    return {};
+}
+
+std::string UrlEncode(const std::string& value)
+{
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size());
+    for (unsigned char c : value) {
+        const bool safe =
+            (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~';
+        if (safe) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0F]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> CompanionServiceCommand(
     const QuestAppConfig& cfg,
     const QuestCompanionSettings* settings)
@@ -135,7 +176,43 @@ std::vector<std::string> CompanionServiceCommand(
     return args;
 }
 
-OperationResult HttpGetLocalCompanion(const std::wstring& path, std::string& body)
+std::vector<std::string> TargetAdbArgs(std::string serial, std::vector<std::string> args)
+{
+    if (!serial.empty()) {
+        args.insert(args.begin(), serial);
+        args.insert(args.begin(), "-s");
+    }
+    return args;
+}
+
+std::string FindPreferredQuestSerial(AdbController& adb, bool usbOnly)
+{
+    adb.RefreshResolvedBinaryPath();
+    auto devices = adb.Run({"devices", "-l"}, std::chrono::seconds(8));
+    if (devices.timedOut || devices.exitCode != 0) return {};
+
+    std::string serial = FindAuthorizedUsbQuestSerial(devices.out);
+    if (!serial.empty() || usbOnly) return serial;
+    return FindAuthorizedWifiQuestSerial(devices.out);
+}
+
+std::wstring CompanionConfigPath(const QuestAppConfig& cfg, const QuestCompanionSettings& settings)
+{
+    std::string path = "/config?key=" + UrlEncode(cfg.pairingKey) +
+        "&autoLaunch=" + std::string(settings.autoLaunchEnabled ? "true" : "false");
+    if (!settings.selectedPackage.empty()) {
+        path += "&package=" + UrlEncode(settings.selectedPackage);
+    }
+    if (!settings.selectedActivity.empty()) {
+        path += "&activity=" + UrlEncode(settings.selectedActivity);
+    }
+    return openvr_pair::common::Utf8ToWide(path);
+}
+
+OperationResult HttpGetCompanion(
+    const std::wstring& host,
+    const std::wstring& path,
+    std::string& body)
 {
     OperationResult out;
     HINTERNET session = WinHttpOpen(
@@ -149,10 +226,10 @@ OperationResult HttpGetLocalCompanion(const std::wstring& path, std::string& bod
         return out;
     }
 
-    HINTERNET connect = WinHttpConnect(session, L"127.0.0.1", 39789, 0);
+    HINTERNET connect = WinHttpConnect(session, host.c_str(), 39789, 0);
     if (!connect) {
         WinHttpCloseHandle(session);
-        out.message = "Could not connect to forwarded companion endpoint.";
+        out.message = "Could not connect to companion endpoint.";
         return out;
     }
 
@@ -226,6 +303,43 @@ OperationResult HttpGetLocalCompanion(const std::wstring& path, std::string& bod
     return out;
 }
 
+OperationResult TryHttpCompanion(
+    const QuestAppConfig& cfg,
+    const std::wstring& path,
+    std::string& body)
+{
+    if (cfg.companionHost.empty()) {
+        return {false, "Companion Wi-Fi address is not known yet."};
+    }
+    return HttpGetCompanion(openvr_pair::common::Utf8ToWide(cfg.companionHost), path, body);
+}
+
+bool RefreshCompanionHostFromAdb(AdbController& adb, QuestAppConfig& cfg)
+{
+    adb.RefreshResolvedBinaryPath();
+
+    auto devices = adb.Run({"devices", "-l"}, std::chrono::seconds(8));
+    if (devices.timedOut || devices.exitCode != 0) return false;
+
+    std::string host = StripEndpointPort(FindAuthorizedWifiQuestSerial(devices.out));
+    if (host.empty()) {
+        const std::string usbSerial = FindAuthorizedUsbQuestSerial(devices.out);
+        if (!usbSerial.empty()) {
+            auto route = adb.Run({"-s", usbSerial, "shell", "ip", "route"}, std::chrono::seconds(5));
+            if (!route.timedOut && route.exitCode == 0) {
+                host = ExtractRouteSourceIp(route.out);
+            }
+        }
+    }
+
+    if (host.empty()) return false;
+    if (cfg.companionHost != host) {
+        cfg.companionHost = host;
+        SaveQuestAppConfig(cfg);
+    }
+    return true;
+}
+
 } // namespace
 
 std::wstring QuestAppDataDir(bool create)
@@ -287,8 +401,15 @@ OperationResult InstallCompanionApp(
 
     const bool mustClearHeadsetKey =
         cfg.companionInstalled && !IsValidPairingKey(cfg.pairingKey);
+    const std::string usbSerial = FindPreferredQuestSerial(adb, true);
+    if (usbSerial.empty()) {
+        out.message = "Connect an authorized USB Quest to install the companion.";
+        return out;
+    }
     if (mustClearHeadsetKey) {
-        auto uninstall = adb.Run({"uninstall", "org.wkopenvr.quest"}, std::chrono::seconds(30));
+        auto uninstall = adb.Run(
+            TargetAdbArgs(usbSerial, {"uninstall", "org.wkopenvr.quest"}),
+            std::chrono::seconds(30));
         const bool alreadyGone =
             ContainsNoCase(uninstall.out, "not installed") ||
             ContainsNoCase(uninstall.err, "not installed") ||
@@ -306,20 +427,23 @@ OperationResult InstallCompanionApp(
     }
 
     const std::string apk = Narrow(CompanionApkPath(context));
-    auto install = adb.Run({"install", "-r", apk}, std::chrono::minutes(2));
+    auto install = adb.Run(TargetAdbArgs(usbSerial, {"install", "-r", apk}), std::chrono::minutes(2));
     if (install.timedOut || install.exitCode != 0 ||
         (!ContainsNoCase(install.out, "success") && !ContainsNoCase(install.err, "success"))) {
         out.message = "Companion install failed.";
         return out;
     }
 
-    auto configure = adb.Run(CompanionServiceCommand(cfg, nullptr), std::chrono::seconds(10));
+    auto configure = adb.Run(
+        TargetAdbArgs(usbSerial, CompanionServiceCommand(cfg, nullptr)),
+        std::chrono::seconds(10));
     if (configure.timedOut || configure.exitCode != 0) {
         out.message = "Companion installed, but the initial key setup did not confirm.";
         return out;
     }
 
     cfg.companionInstalled = true;
+    RefreshCompanionHostFromAdb(adb, cfg);
     SaveQuestAppConfig(cfg);
     out.ok = true;
     out.message = "Companion app installed and paired.";
@@ -340,10 +464,26 @@ OperationResult SyncCompanionConfig(
         out.message = "Install key is missing. Reinstall the companion to create a new key.";
         return out;
     }
+
+    QuestAppConfig mutableCfg = cfg;
+    std::string body;
+    OperationResult http = TryHttpCompanion(mutableCfg, CompanionConfigPath(mutableCfg, settings), body);
+    if (!http.ok && RefreshCompanionHostFromAdb(adb, mutableCfg)) {
+        http = TryHttpCompanion(mutableCfg, CompanionConfigPath(mutableCfg, settings), body);
+    }
+    if (http.ok) {
+        out.ok = true;
+        out.message = "Companion settings sent over Wi-Fi.";
+        return out;
+    }
+
     adb.RefreshResolvedBinaryPath();
-    auto result = adb.Run(CompanionServiceCommand(cfg, &settings), std::chrono::seconds(10));
+    const std::string serial = FindPreferredQuestSerial(adb, false);
+    auto result = adb.Run(
+        TargetAdbArgs(serial, CompanionServiceCommand(cfg, &settings)),
+        std::chrono::seconds(10));
     if (result.timedOut || result.exitCode != 0) {
-        out.message = "Companion settings did not confirm over ADB.";
+        out.message = "Companion settings did not confirm over Wi-Fi or ADB.";
         return out;
     }
     out.ok = true;
@@ -363,16 +503,25 @@ SettingsQueryResult QueryCompanionSettings(AdbController& adb, const QuestAppCon
         return out;
     }
 
+    QuestAppConfig mutableCfg = cfg;
     adb.RefreshResolvedBinaryPath();
-    auto forward = adb.Run({"forward", "tcp:39789", "tcp:39789"}, std::chrono::seconds(10));
-    if (forward.timedOut || forward.exitCode != 0) {
-        out.result.message = "Could not forward the companion settings endpoint over ADB.";
-        return out;
-    }
-
     std::string body;
     std::wstring path = L"/settings?key=" + openvr_pair::common::Utf8ToWide(cfg.pairingKey);
-    out.result = HttpGetLocalCompanion(path, body);
+    out.result = TryHttpCompanion(mutableCfg, path, body);
+    if (!out.result.ok && RefreshCompanionHostFromAdb(adb, mutableCfg)) {
+        out.result = TryHttpCompanion(mutableCfg, path, body);
+    }
+    if (!out.result.ok) {
+        const std::string serial = FindPreferredQuestSerial(adb, false);
+        auto forward = adb.Run(
+            TargetAdbArgs(serial, {"forward", "tcp:39789", "tcp:39789"}),
+            std::chrono::seconds(10));
+        if (forward.timedOut || forward.exitCode != 0) {
+            out.result.message = "Could not reach the companion over Wi-Fi or ADB.";
+            return out;
+        }
+        out.result = HttpGetCompanion(L"127.0.0.1", path, body);
+    }
     if (!out.result.ok) return out;
 
     picojson::value parsed;
@@ -402,7 +551,10 @@ OperationResult UninstallCompanionApp(AdbController& adb, QuestAppConfig& cfg)
 {
     OperationResult out;
     adb.RefreshResolvedBinaryPath();
-    auto uninstall = adb.Run({"uninstall", "org.wkopenvr.quest"}, std::chrono::seconds(30));
+    const std::string serial = FindPreferredQuestSerial(adb, false);
+    auto uninstall = adb.Run(
+        TargetAdbArgs(serial, {"uninstall", "org.wkopenvr.quest"}),
+        std::chrono::seconds(30));
     if (uninstall.timedOut || uninstall.exitCode != 0) {
         out.message = "Companion uninstall did not confirm.";
         return out;
@@ -420,7 +572,10 @@ std::vector<QuestLaunchTarget> QueryInstalledPackages(AdbController& adb)
 {
     std::vector<QuestLaunchTarget> out;
     adb.RefreshResolvedBinaryPath();
-    auto result = adb.Run({"shell", "pm", "list", "packages"}, std::chrono::seconds(10));
+    const std::string serial = FindPreferredQuestSerial(adb, false);
+    auto result = adb.Run(
+        TargetAdbArgs(serial, {"shell", "pm", "list", "packages"}),
+        std::chrono::seconds(10));
     if (result.timedOut || result.exitCode != 0) return out;
 
     std::istringstream lines(result.out);

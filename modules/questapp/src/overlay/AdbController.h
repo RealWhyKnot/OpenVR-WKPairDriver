@@ -59,9 +59,11 @@ public:
     // `adb tcpip <port>` asks adbd to listen on Wi-Fi/TCP. This usually needs
     // an authorized USB connection first and does not survive headset reboot.
     virtual bool EnableWirelessAdb(int port = 5555);
+    virtual bool EnableWirelessAdb(const std::string& serial, int port);
 
     // Opens an interactive cmd.exe window running `adb shell`.
     bool OpenInteractiveShell() const;
+    bool OpenInteractiveShell(const std::string& serial) const;
 
     // Opens cmd.exe in the platform-tools directory for ad hoc adb commands.
     bool OpenToolsTerminal() const;

@@ -51,5 +51,7 @@ private:
 };
 
 bool DevicesOutputHasAuthorizedQuest(const std::string& output);
+std::string FindAuthorizedUsbQuestSerial(const std::string& output);
+std::string FindAuthorizedWifiQuestSerial(const std::string& output);
 
 } // namespace wkopenvr::questapp

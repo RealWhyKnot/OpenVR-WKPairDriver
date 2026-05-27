@@ -8,6 +8,7 @@ namespace wkopenvr::questapp {
 struct QuestAppConfig {
     std::string pairingKey;
     std::string pairedDeviceSerial;
+    std::string companionHost;
     bool companionInstalled = false;
 };
 

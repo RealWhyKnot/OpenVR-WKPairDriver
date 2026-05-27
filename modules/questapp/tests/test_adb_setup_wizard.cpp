@@ -83,6 +83,19 @@ TEST(QuestAdbSetupWizard, UsbAuthorizationDetectsAuthorizedQuest)
     EXPECT_EQ(wiz.currentStep(), wkopenvr::questapp::SetupStep::CompanionInstall);
 }
 
+TEST(QuestAdbSetupWizard, UsbAuthorizationAcceptsSpacePaddedAdbOutput)
+{
+    StubAdb adb;
+    adb.results = {
+        AdbResult("List of devices attached\n230YC01DBK003Q         device product:seacliff model:Quest_Pro device:seacliff transport_id:6\n")
+    };
+
+    wkopenvr::questapp::AdbSetupWizard wiz(adb);
+    const auto result = wiz.CheckUsbAuthorization();
+
+    EXPECT_EQ(result.status, wkopenvr::questapp::StepStatus::Passed);
+}
+
 TEST(QuestAdbSetupWizard, UsbAuthorizationReportsUnauthorized)
 {
     StubAdb adb;
@@ -95,6 +108,63 @@ TEST(QuestAdbSetupWizard, UsbAuthorizationReportsUnauthorized)
 
     EXPECT_EQ(result.status, wkopenvr::questapp::StepStatus::Failed);
     EXPECT_NE(result.detail.find("unauthorized"), std::string::npos);
+}
+
+TEST(QuestAdbSetupWizard, UsbAuthorizationIgnoresWifiOnlyQuest)
+{
+    StubAdb adb;
+    adb.results = {
+        AdbResult("List of devices attached\n192.168.50.93:5555     device product:seacliff model:Quest_Pro device:seacliff transport_id:3\n")
+    };
+
+    wkopenvr::questapp::AdbSetupWizard wiz(adb);
+    const auto result = wiz.CheckUsbAuthorization();
+
+    EXPECT_EQ(result.status, wkopenvr::questapp::StepStatus::Failed);
+    EXPECT_NE(result.detail.find("USB"), std::string::npos);
+}
+
+TEST(QuestAdbSetupWizard, UsbAuthorizationPassesWithUsbAndWifiQuest)
+{
+    StubAdb adb;
+    adb.results = {
+        AdbResult(
+            "List of devices attached\n"
+            "230YC01DBK003Q         device product:seacliff model:Quest_Pro device:seacliff transport_id:6\n"
+            "192.168.50.93:5555     device product:seacliff model:Quest_Pro device:seacliff transport_id:3\n")
+    };
+
+    wkopenvr::questapp::AdbSetupWizard wiz(adb);
+    const auto result = wiz.CheckUsbAuthorization();
+
+    EXPECT_EQ(result.status, wkopenvr::questapp::StepStatus::Passed);
+}
+
+TEST(QuestAdbSetupWizard, DeviceParserReturnsUsbAndWifiSerials)
+{
+    const std::string output =
+        "List of devices attached\n"
+        "230YC01DBK003Q         device product:seacliff model:Quest_Pro device:seacliff transport_id:6\n"
+        "192.168.50.93:5555     device product:seacliff model:Quest_Pro device:seacliff transport_id:3\n";
+
+    EXPECT_EQ(wkopenvr::questapp::FindAuthorizedUsbQuestSerial(output), "230YC01DBK003Q");
+    EXPECT_EQ(wkopenvr::questapp::FindAuthorizedWifiQuestSerial(output), "192.168.50.93:5555");
+}
+
+TEST(QuestAdbSetupWizard, UsbAuthorizationDoesNotFailOnUnauthorizedWifiWhenUsbIsAuthorized)
+{
+    StubAdb adb;
+    adb.results = {
+        AdbResult(
+            "List of devices attached\n"
+            "230YC01DBK003Q         device product:seacliff model:Quest_Pro device:seacliff transport_id:6\n"
+            "192.168.50.93:5555     unauthorized\n")
+    };
+
+    wkopenvr::questapp::AdbSetupWizard wiz(adb);
+    const auto result = wiz.CheckUsbAuthorization();
+
+    EXPECT_EQ(result.status, wkopenvr::questapp::StepStatus::Passed);
 }
 
 TEST(QuestAdbSetupWizard, InstallCompanionRequiresPairingKey)

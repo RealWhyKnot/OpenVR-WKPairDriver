@@ -147,6 +147,19 @@ TEST(AdbControllerTest, EnableWirelessAdb_targets_saved_endpoint_when_present)
                   "-s", "192.168.1.10:5555", "tcpip", "5555"}));
 }
 
+TEST(AdbControllerTest, EnableWirelessAdb_targets_explicit_serial)
+{
+    StubAdbController ctrl;
+    ctrl.stubOut = "restarting in TCP mode port: 5555\n";
+    ctrl.stubExit = 0;
+
+    EXPECT_TRUE(ctrl.EnableWirelessAdb("230YC01DBK003Q", 5555));
+    ASSERT_EQ(ctrl.calls.size(), 1u);
+    EXPECT_EQ(ctrl.calls[0],
+              (std::vector<std::string>{
+                  "-s", "230YC01DBK003Q", "tcpip", "5555"}));
+}
+
 TEST(AdbControllerTest, Shell_targets_last_connected_endpoint)
 {
     StubAdbController ctrl;
