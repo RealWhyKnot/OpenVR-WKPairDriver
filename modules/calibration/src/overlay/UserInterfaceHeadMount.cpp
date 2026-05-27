@@ -5,6 +5,7 @@
 #include "BuildChannel.h"
 #include "Configuration.h"
 #include "HeadMountOffsetModal.h"
+#include "HeadMountOffsetPreflight.h"
 #include "HeadMountTargetBinding.h"
 #include "IPCClient.h"
 #include "Protocol.h"
@@ -109,19 +110,21 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 
 	const bool hasTracker = hasContinuousTarget && !hm.trackerSerial.empty();
 	const bool offsetOk   = hm.offsetCalibrated;
+	const wkopenvr::headmount::OffsetCalibrationPreflight offsetPreflight =
+		wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(CalCtx);
 
 	ImGui::Spacing();
 	ImGui::TextUnformatted("2. Calibrate the tracker-to-headset offset");
 	{
-		openvr_pair::overlay::ui::DisabledSection ds(!hasTracker,
-			"Start continuous calibration with the headset-mounted tracker as the target first.");
+		openvr_pair::overlay::ui::DisabledSection ds(!offsetPreflight.ready,
+			offsetPreflight.message);
 		const char* btnLabel = offsetOk ? "Re-calibrate offset" : "Calibrate offset";
 		if (ImGui::Button(btnLabel)) {
 			wkopenvr::headmount::OpenOffsetModal();
 		}
 		ds.AttachReasonTooltip();
 	}
-	if (ImGui::IsItemHovered() && hasTracker) {
+	if (ImGui::IsItemHovered() && offsetPreflight.ready) {
 		ImGui::SetTooltip(
 			"Solves the rigid offset from the tracker to the headset.\n"
 			"Move your head slowly through pitch, yaw, and roll for ~10 seconds.");
@@ -141,6 +144,9 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 			"Nudge the solved offset by hand. Useful if the auto-solve\n"
 			"got close but the in-headset preview marker doesn't sit\n"
 			"exactly at your eye position.");
+	}
+	if (!offsetPreflight.ready) {
+		ImGui::TextDisabled("%s", offsetPreflight.message);
 	}
 
 	if (s_offsetSlidersOpen && offsetOk) {

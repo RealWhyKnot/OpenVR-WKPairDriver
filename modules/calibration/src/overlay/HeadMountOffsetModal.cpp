@@ -5,6 +5,7 @@
 #include "CalibrationMetrics.h"
 #include "HeadFromTrackerSolve.h"
 #include "HeadMountPreview.h"
+#include "HeadMountOffsetPreflight.h"
 
 #include <imgui/imgui.h>
 #include <Eigen/Geometry>
@@ -49,6 +50,9 @@ struct ModalState {
     double          lastDerivedLinearSpeedMps = 0.0;
     double          lastDerivedAngularSpeedRadps = 0.0;
     double          lastEffectiveSpeedMps = 0.0;
+    bool            pausedContinuousForCollection = false;
+    bool            previousCalibrationPaused = false;
+    std::string     lastPreflightLogReason;
 };
 
 ModalState& MS() {
@@ -62,6 +66,63 @@ constexpr double kAngularMotionToLinearMps = 0.50;
 double NowSeconds() {
     return std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void LogPreflightState(ModalState& s,
+                       const OffsetCalibrationPreflight& preflight,
+                       const char* context,
+                       bool force)
+{
+    if (!force && s.lastPreflightLogReason == preflight.reason) {
+        return;
+    }
+    s.lastPreflightLogReason = preflight.reason;
+
+    char pbuf[480];
+    std::snprintf(pbuf, sizeof pbuf,
+        "[head-mount-modal] %s: ready=%d reason=%s state=%d validProfile=%d"
+        " relPosCal=%d mode=%s deviceID=%d targetID=%d paused=%d",
+        context,
+        preflight.ready ? 1 : 0,
+        preflight.reason,
+        static_cast<int>(CalCtx.state),
+        CalCtx.validProfile ? 1 : 0,
+        CalCtx.relativePosCalibrated ? 1 : 0,
+        HeadMountModeLabel(CalCtx.headMount.mode),
+        static_cast<int>(CalCtx.headMount.deviceID),
+        static_cast<int>(CalCtx.targetID),
+        CalCtx.calibrationPaused ? 1 : 0);
+    Metrics::WriteLogAnnotation(pbuf);
+}
+
+void PauseContinuousForCollection(ModalState& s) {
+    if (s.pausedContinuousForCollection) return;
+
+    s.previousCalibrationPaused = CalCtx.calibrationPaused;
+    CalCtx.calibrationPaused = true;
+    s.pausedContinuousForCollection = true;
+
+    char pbuf[160];
+    std::snprintf(pbuf, sizeof pbuf,
+        "[head-mount-modal] continuous updates paused for offset solve:"
+        " previousPaused=%d",
+        s.previousCalibrationPaused ? 1 : 0);
+    Metrics::WriteLogAnnotation(pbuf);
+}
+
+void RestoreContinuousPause(ModalState& s, const char* reason) {
+    if (!s.pausedContinuousForCollection) return;
+
+    CalCtx.calibrationPaused = s.previousCalibrationPaused;
+    s.pausedContinuousForCollection = false;
+
+    char pbuf[180];
+    std::snprintf(pbuf, sizeof pbuf,
+        "[head-mount-modal] continuous updates restored after offset solve:"
+        " reason=%s paused=%d",
+        reason ? reason : "unknown",
+        CalCtx.calibrationPaused ? 1 : 0);
+    Metrics::WriteLogAnnotation(pbuf);
 }
 
 void ResetCollectionFrame(ModalState& s) {
@@ -81,6 +142,7 @@ void ResetCollectionFrame(ModalState& s) {
 }
 
 void CancelSolverAndFrame(ModalState& s) {
+    RestoreContinuousPause(s, "cancel");
     s.solver.Cancel();
     ResetCollectionFrame(s);
 }
@@ -107,7 +169,7 @@ void LogCollectingStatus(ModalState& s, double now) {
         " frame_frozen=%d samples=%zu ready=%d overall=%.2f sample=%.2f motion=%.2f"
         " consistency=%.2f residual_mm=%.2f axes_deg=(%.1f,%.1f,%.1f)"
         " accepted=%d rejected=%d speed_reported=%.3f speed_derived=%.3f"
-        " angular_radps=%.3f speed_effective=%.3f",
+        " angular_radps=%.3f speed_effective=%.3f mode=%s paused=%d",
         s.hasFrozenFrame ? 1 : 0,
         ready.samplesUsed,
         ready.ready ? 1 : 0,
@@ -124,7 +186,9 @@ void LogCollectingStatus(ModalState& s, double now) {
         s.lastReportedSpeedMps,
         s.lastDerivedLinearSpeedMps,
         s.lastDerivedAngularSpeedRadps,
-        s.lastEffectiveSpeedMps);
+        s.lastEffectiveSpeedMps,
+        HeadMountModeLabel(CalCtx.headMount.mode),
+        CalCtx.calibrationPaused ? 1 : 0);
     Metrics::WriteLogAnnotation(cbuf);
 
     s.lastCollectingLogTime = now;
@@ -145,6 +209,7 @@ void OpenOffsetModal() {
     s.showResult  = false;
     s.popupOpened = false;
     s.wantOpen    = true;
+    s.lastPreflightLogReason.clear();
 }
 
 bool OffsetModalIsOpen() {
@@ -180,27 +245,43 @@ bool DrawOffsetModal() {
         ImGui::Spacing();
 
         const SolveState st = s.solver.state();
+        const OffsetCalibrationPreflight preflight =
+            EvaluateOffsetCalibrationPreflight(CalCtx);
+
+        if (st == SolveState::Collecting && !preflight.ready) {
+            LogPreflightState(s, preflight, "collection aborted", true);
+            CancelSolverAndFrame(s);
+        }
 
         if (!s.showResult) {
             // --- Idle / collecting phase ---
-            if (st == SolveState::Idle) {
+            if (s.solver.state() == SolveState::Idle) {
                 ImGui::TextWrapped(
                     "Attach the tracker firmly to your headset. "
-                    "Click Start, then move your head slowly through "
-                    "pitch, yaw, and roll for ~10 seconds.");
+                    "Let continuous calibration settle, then move your head slowly through "
+                    "pitch, yaw, and roll while the offset is collected.");
                 ImGui::Spacing();
+                if (!preflight.ready) {
+                    ImGui::TextWrapped("%s", preflight.message);
+                    LogPreflightState(s, preflight, "start unavailable", false);
+                }
+                ImGui::Spacing();
+
+                if (!preflight.ready) ImGui::BeginDisabled();
                 if (ImGui::Button("Start##hmt_start")) {
                     ResetCollectionFrame(s);
+                    PauseContinuousForCollection(s);
                     s.solver.Start();
-                    Metrics::WriteLogAnnotation("[head-mount-modal] solver started");
+                    LogPreflightState(s, preflight, "solver started", true);
                 }
+                if (!preflight.ready) ImGui::EndDisabled();
                 ImGui::SameLine();
                 if (ImGui::Button("Cancel##hmt_cancel_idle")) {
                     ImGui::CloseCurrentPopup();
                     s.popupOpened = false;
                 }
             }
-            else if (st == SolveState::Collecting) {
+            else if (s.solver.state() == SolveState::Collecting) {
                 const size_t collected = s.solver.sampleCount();
                 const CollectionReadiness ready = s.solver.readiness();
                 const float  fraction  = static_cast<float>(ready.overallScore);
@@ -243,6 +324,7 @@ bool DrawOffsetModal() {
                 if (!canFinish) ImGui::BeginDisabled();
                 if (ImGui::Button("Finish##hmt_finish")) {
                     s.solver.Finish();
+                    RestoreContinuousPause(s, "finish");
                     s.lastResult  = s.solver.result();
                     s.showResult  = true;
                     // Push solve residual so the diagnostics graph shows per-solve
@@ -315,7 +397,7 @@ bool DrawOffsetModal() {
                     }
                     savedOffset   = true;
                     s.showResult  = false;
-                    s.solver.Cancel();
+                    CancelSolverAndFrame(s);
                     ImGui::CloseCurrentPopup();
                     s.popupOpened = false;
                 }

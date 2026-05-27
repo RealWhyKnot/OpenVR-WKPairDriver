@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include "Calibration.h"  // HeadMountMode, HeadMountConfig
+#include "HeadMountOffsetPreflight.h"
 #include "HeadMountTargetBinding.h"
 
 // ---------------------------------------------------------------------------
@@ -28,9 +29,21 @@ bool DriverSynthRadioEnabled(bool offsetCalibrated) {
 
 // Returns true when mode m requires offsetCalibrated to be meaningful.
 bool ModeRequiresOffset(HeadMountMode m) {
-    return m == HeadMountMode::AutoPaired
-        || m == HeadMountMode::Corroborate
-        || m == HeadMountMode::DriverSynth;
+    return wkopenvr::headmount::HeadMountModeUsesOffsetInContinuous(m);
+}
+
+CalibrationContext ReadyOffsetCalibrationContext() {
+    CalibrationContext ctx;
+    ctx.state = CalibrationState::Continuous;
+    ctx.validProfile = true;
+    ctx.relativePosCalibrated = true;
+    ctx.targetID = 7;
+    ctx.targetStandby.trackingSystem = "lighthouse";
+    ctx.targetStandby.model = "VIVE Tracker 3.0";
+    ctx.targetStandby.serial = "LHR-HEAD";
+    wkopenvr::headmount::BindHeadMountToContinuousTarget(ctx);
+    ctx.headMount.mode = HeadMountMode::Off;
+    return ctx;
 }
 
 } // namespace
@@ -73,6 +86,64 @@ TEST(HeadMountPanelLogic, DefaultConfigHasOffModeAndNoOffset) {
     EXPECT_FALSE(hm.offsetCalibrated);
     EXPECT_TRUE(hm.trackerSerial.empty());
     EXPECT_EQ(-1, hm.deviceID);
+}
+
+TEST(HeadMountPanelLogic, OffsetPreflightAllowsStableContinuousWithModeOff) {
+    CalibrationContext ctx = ReadyOffsetCalibrationContext();
+
+    const auto result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+
+    EXPECT_TRUE(result.ready);
+    EXPECT_STREQ("ready", result.reason);
+}
+
+TEST(HeadMountPanelLogic, OffsetPreflightRequiresContinuousState) {
+    CalibrationContext ctx = ReadyOffsetCalibrationContext();
+    ctx.state = CalibrationState::ContinuousStandby;
+
+    const auto result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("continuous_not_running", result.reason);
+}
+
+TEST(HeadMountPanelLogic, OffsetPreflightRequiresValidProfile) {
+    CalibrationContext ctx = ReadyOffsetCalibrationContext();
+    ctx.validProfile = false;
+
+    const auto result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("profile_not_ready", result.reason);
+}
+
+TEST(HeadMountPanelLogic, OffsetPreflightRequiresRelativePoseLock) {
+    CalibrationContext ctx = ReadyOffsetCalibrationContext();
+    ctx.relativePosCalibrated = false;
+
+    const auto result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("relative_pose_not_ready", result.reason);
+}
+
+TEST(HeadMountPanelLogic, OffsetPreflightBlocksModesThatUseSolvedOffset) {
+    CalibrationContext ctx = ReadyOffsetCalibrationContext();
+
+    ctx.headMount.mode = HeadMountMode::AutoPaired;
+    auto result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("head_mount_mode_active", result.reason);
+
+    ctx.headMount.mode = HeadMountMode::Corroborate;
+    result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("head_mount_mode_active", result.reason);
+
+    ctx.headMount.mode = HeadMountMode::DriverSynth;
+    result = wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(ctx);
+    EXPECT_FALSE(result.ready);
+    EXPECT_STREQ("head_mount_mode_active", result.reason);
 }
 
 TEST(HeadMountPanelLogic, CorroborateWithoutOffsetShouldBeDisabled) {
