@@ -9,6 +9,9 @@
 #include "RouteTable.h"
 #include "RouteTable.cpp"
 
+#include <algorithm>
+#include <cstring>
+
 using namespace oscrouter;
 
 // ---------------------------------------------------------------------------
@@ -264,7 +267,7 @@ TEST(OscWire, PubPipeFrameFormat)
     // Write 32-byte source-id (NUL-padded).
     const char *srcId = "translator";
     memset(wire + wirePos, 0, 32);
-    strncpy(reinterpret_cast<char*>(wire + wirePos), srcId, 31);
+    memcpy(wire + wirePos, srcId, std::min<size_t>(strlen(srcId), 31));
     wirePos += 32;
 
     // Write 4-byte LE length.

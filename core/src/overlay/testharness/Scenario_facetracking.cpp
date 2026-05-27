@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <thread>
@@ -92,7 +93,7 @@ ScenarioResult RunScenario_facetracking(ScenarioContext &ctx) {
 		cfg.gaze_smoothing = 50;
 		cfg.openness_smoothing = 50;
 		cfg.osc_port = 9000;
-		std::strncpy(cfg.osc_host, "127.0.0.1", sizeof(cfg.osc_host) - 1);
+		std::snprintf(cfg.osc_host, sizeof(cfg.osc_host), "%s", "127.0.0.1");
 
 		const auto resp = client.SendBlocking(req);
 		if (resp.type != protocol::ResponseSuccess) {

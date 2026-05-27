@@ -108,8 +108,7 @@ void MockSettings::GetString(const char *pchSection, const char *pchSettingsKey,
 		if (peError) *peError = vr::VRSettingsError_UnsetSettingHasNoDefault;
 		return;
 	}
-	std::strncpy(pchValue, it->second.c_str(), unValueLen);
-	pchValue[unValueLen - 1] = '\0';
+	std::snprintf(pchValue, static_cast<size_t>(unValueLen), "%s", it->second.c_str());
 }
 void MockSettings::RemoveSection(const char *pchSection, vr::EVRSettingsError *peError) {
 	if (peError) *peError = vr::VRSettingsError_None;

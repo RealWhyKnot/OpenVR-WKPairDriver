@@ -12,6 +12,7 @@
 #include "Protocol.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 
@@ -59,9 +60,9 @@ ScenarioResult RunScenario_captions(ScenarioContext &ctx) {
 		cfg.notify_sound = 0;
 		cfg.transcript_logging = 0;
 		cfg.chatbox_port = 9000;
-		std::strncpy(cfg.source_lang, "en", sizeof(cfg.source_lang) - 1);
-		std::strncpy(cfg.target_lang, "en", sizeof(cfg.target_lang) - 1);
-		std::strncpy(cfg.chatbox_address, "/chatbox/input", sizeof(cfg.chatbox_address) - 1);
+		std::snprintf(cfg.source_lang, sizeof(cfg.source_lang), "%s", "en");
+		std::snprintf(cfg.target_lang, sizeof(cfg.target_lang), "%s", "en");
+		std::snprintf(cfg.chatbox_address, sizeof(cfg.chatbox_address), "%s", "/chatbox/input");
 
 		const auto resp = client.SendBlocking(req);
 		if (resp.type != protocol::ResponseSuccess) {

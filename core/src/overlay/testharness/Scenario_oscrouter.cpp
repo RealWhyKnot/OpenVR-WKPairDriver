@@ -12,6 +12,7 @@
 #include "Protocol.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 
@@ -28,7 +29,7 @@ bool WriteOscPublishDatagram(HANDLE pipe, const char *source_id,
 	const void *osc_bytes, uint32_t osc_len)
 {
 	char source[32]{};
-	std::strncpy(source, source_id, sizeof(source));
+	std::snprintf(source, sizeof(source), "%s", source_id ? source_id : "");
 	if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
 
 	DWORD written = 0;
@@ -93,7 +94,7 @@ ScenarioResult RunScenario_oscrouter(ScenarioContext &ctx) {
 		sub.subscriber_id = 0xCAFE0001u;
 		sub.enabled = 1;
 		sub._reserved[0] = sub._reserved[1] = sub._reserved[2] = 0;
-		std::strncpy(sub.pattern, "/test/*", sizeof(sub.pattern) - 1);
+		std::snprintf(sub.pattern, sizeof(sub.pattern), "%s", "/test/*");
 		const auto resp = client.SendBlocking(req);
 		if (resp.type != protocol::ResponseSuccess) {
 			return Fail("oscrouter", duration_now(),
