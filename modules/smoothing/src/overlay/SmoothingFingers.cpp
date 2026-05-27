@@ -48,32 +48,34 @@ void SmoothingPlugin::DrawFingersTab()
 		"smoothing produces an artifact without giving up the feature on the other nine.");
 	ImGui::Spacing();
 
-	openvr_pair::overlay::ui::TableScope fingerTable("fingers_grid", 6,
-		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
-	if (fingerTable)
 	{
-		ImGui::TableSetupColumn("Hand");
-		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
-		ImGui::TableHeadersRow();
-		for (int hand = 0; hand < 2; ++hand) {
-			ImGui::TableNextRow();
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(kHandLabels[hand]);
-			for (int finger = 0; finger < 5; ++finger) {
-				const int bit = hand * 5 + finger;
+		openvr_pair::overlay::ui::TableScope fingerTable("fingers_grid", 6,
+			ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
+		if (fingerTable)
+		{
+			ImGui::TableSetupColumn("Hand");
+			for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
+			ImGui::TableHeadersRow();
+			for (int hand = 0; hand < 2; ++hand) {
+				ImGui::TableNextRow();
 				ImGui::TableNextColumn();
-				bool enabled = ((cfg_.finger_mask >> bit) & 1) != 0;
-				ImGui::PushID(bit);
-				if (ImGui::Checkbox("##fingerbit", &enabled)) {
-					if (enabled) cfg_.finger_mask |= (uint16_t)(1u << bit);
-					else         cfg_.finger_mask &= (uint16_t)~(1u << bit);
-					dirty = true;
+				ImGui::TextUnformatted(kHandLabels[hand]);
+				for (int finger = 0; finger < 5; ++finger) {
+					const int bit = hand * 5 + finger;
+					ImGui::TableNextColumn();
+					bool enabled = ((cfg_.finger_mask >> bit) & 1) != 0;
+					ImGui::PushID(bit);
+					if (ImGui::Checkbox("##fingerbit", &enabled)) {
+						if (enabled) cfg_.finger_mask |= (uint16_t)(1u << bit);
+						else         cfg_.finger_mask &= (uint16_t)~(1u << bit);
+						dirty = true;
+					}
+					if (ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("%s %s", kHandLabels[hand], kFingerLabels[finger]);
+					}
+					smoothingEnabled.AttachReasonTooltip();
+					ImGui::PopID();
 				}
-				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip("%s %s", kHandLabels[hand], kFingerLabels[finger]);
-				}
-				smoothingEnabled.AttachReasonTooltip();
-				ImGui::PopID();
 			}
 		}
 	}
@@ -103,40 +105,42 @@ void SmoothingPlugin::DrawFingersTab()
 		"value. Useful when one finger needs more or less smoothing than the rest.");
 	ImGui::Spacing();
 
-	openvr_pair::overlay::ui::TableScope strengthTable("fingers_strength_grid", 6,
-		ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
-	if (strengthTable)
 	{
-		ImGui::TableSetupColumn("Hand");
-		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
-		ImGui::TableHeadersRow();
-		for (int hand = 0; hand < 2; ++hand) {
-			ImGui::TableNextRow();
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(kHandLabels[hand]);
-			for (int finger = 0; finger < 5; ++finger) {
-				const int idx = hand * 5 + finger;
-				const bool fingerEnabled = ((cfg_.finger_mask >> idx) & 1) != 0;
+		openvr_pair::overlay::ui::TableScope strengthTable("fingers_strength_grid", 6,
+			ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV);
+		if (strengthTable)
+		{
+			ImGui::TableSetupColumn("Hand");
+			for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(kFingerLabels[f]);
+			ImGui::TableHeadersRow();
+			for (int hand = 0; hand < 2; ++hand) {
+				ImGui::TableNextRow();
 				ImGui::TableNextColumn();
-				ImGui::PushID(idx);
-				ImGui::BeginDisabled(!fingerEnabled);
-				int v = cfg_.per_finger_smoothness[idx];
-				ImGui::SetNextItemWidth(-FLT_MIN);
-				if (ImGui::SliderInt("##perfingerstrength", &v, 0, 100, "%d")) {
-					if (v < 0)   v = 0;
-					if (v > 100) v = 100;
-					if (cfg_.per_finger_smoothness[idx] != v) {
-						cfg_.per_finger_smoothness[idx] = v;
-						dirty = true;
+				ImGui::TextUnformatted(kHandLabels[hand]);
+				for (int finger = 0; finger < 5; ++finger) {
+					const int idx = hand * 5 + finger;
+					const bool fingerEnabled = ((cfg_.finger_mask >> idx) & 1) != 0;
+					ImGui::TableNextColumn();
+					ImGui::PushID(idx);
+					ImGui::BeginDisabled(!fingerEnabled);
+					int v = cfg_.per_finger_smoothness[idx];
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					if (ImGui::SliderInt("##perfingerstrength", &v, 0, 100, "%d")) {
+						if (v < 0)   v = 0;
+						if (v > 100) v = 100;
+						if (cfg_.per_finger_smoothness[idx] != v) {
+							cfg_.per_finger_smoothness[idx] = v;
+							dirty = true;
+						}
 					}
+					if (ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("%s %s\n0 = use global Strength (%d).",
+							kHandLabels[hand], kFingerLabels[finger], cfg_.smoothness);
+					}
+					ImGui::EndDisabled();
+					smoothingEnabled.AttachReasonTooltip();
+					ImGui::PopID();
 				}
-				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip("%s %s\n0 = use global Strength (%d).",
-						kHandLabels[hand], kFingerLabels[finger], cfg_.smoothness);
-				}
-				ImGui::EndDisabled();
-				smoothingEnabled.AttachReasonTooltip();
-				ImGui::PopID();
 			}
 		}
 	}
