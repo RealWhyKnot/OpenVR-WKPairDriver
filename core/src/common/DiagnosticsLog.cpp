@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <mutex>
 
+#include <io.h>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -29,6 +31,8 @@ tm LocalTimeForLog()
 	return value;
 }
 
+void FlushDiagnosticsFile();
+
 bool EnsureDiagnosticsLogOpen()
 {
 	if (!IsDebugLoggingEnabled()) return false;
@@ -42,6 +46,7 @@ bool EnsureDiagnosticsLogOpen()
 		g_logFile = stderr;
 	}
 	if (!g_logFile) return false;
+	setvbuf(g_logFile, nullptr, _IONBF, 0);
 
 	tm now = LocalTimeForLog();
 	fprintf(g_logFile,
@@ -49,8 +54,20 @@ bool EnsureDiagnosticsLogOpen()
 		now.tm_hour, now.tm_min, now.tm_sec,
 		GetCurrentProcessId(), GetCurrentThreadId(),
 		WKOPENVR_BUILD_STAMP, WKOPENVR_BUILD_CHANNEL);
-	fflush(g_logFile);
+	FlushDiagnosticsFile();
 	return true;
+}
+
+void FlushDiagnosticsFile()
+{
+	if (!g_logFile) return;
+	fflush(g_logFile);
+	if (g_logFile == stderr) return;
+	const int fd = _fileno(g_logFile);
+	if (fd < 0) return;
+	const intptr_t osHandle = _get_osfhandle(fd);
+	if (osHandle == -1) return;
+	FlushFileBuffers(reinterpret_cast<HANDLE>(osHandle));
 }
 
 } // namespace
@@ -69,7 +86,7 @@ void DiagnosticLogV(const char* component, const char* fmt, va_list args)
 		component ? component : "general");
 	vfprintf(g_logFile, fmt ? fmt : "", args);
 	fputc('\n', g_logFile);
-	fflush(g_logFile);
+	FlushDiagnosticsFile();
 }
 
 void DiagnosticLog(const char* component, const char* fmt, ...)

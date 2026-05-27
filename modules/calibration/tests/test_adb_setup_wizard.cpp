@@ -488,8 +488,11 @@ TEST(AdbSetupWizardTest, WifiVerify_uses_manual_endpoint_after_wireless_fallback
 
     EXPECT_EQ(r.status, StepStatus::Passed) << r.detail;
     EXPECT_EQ(wiz.DiscoveredEndpoint(), "192.168.1.10:44999");
-    ASSERT_GE(adb.calls.size(), 2u);
+    ASSERT_GE(adb.calls.size(), 3u);
     EXPECT_EQ(adb.calls[1], (std::vector<std::string>{"connect", "192.168.1.10:44999"}));
+    EXPECT_EQ(adb.calls[2],
+              (std::vector<std::string>{
+                  "-s", "192.168.1.10:44999", "shell", "getprop ro.product.model"}));
 }
 
 // ---------------------------------------------------------------------------

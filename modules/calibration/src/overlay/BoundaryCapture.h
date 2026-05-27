@@ -37,6 +37,7 @@ private:
     CaptureState m_state = CaptureState::Idle;
     uint64_t m_sessionId = 0;
     size_t m_projectionRejectLogCount = 0;
+    size_t m_debounceRejectLogCount = 0;
     std::vector<BoundaryVertex> m_raw;
     std::vector<BoundaryVertex> m_simplified;
 

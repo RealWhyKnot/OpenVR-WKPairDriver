@@ -32,6 +32,7 @@ bool LegacyAxisFallback(
 		const float value = state.rAxis[axis].x;
 		NoteAnalogValue(reading, static_cast<int>(axis), value);
 		if (value >= threshold) {
+			if (reading) reading->legacyFallbackUsed = true;
 			return true;
 		}
 	}
@@ -57,17 +58,23 @@ bool IsTriggerHeldFromAxisTypes(
 	}
 
 	const size_t count = std::min<size_t>(axisCount, vr::k_unControllerStateAxisCount);
+	bool sawTriggerAxis = false;
 	for (size_t axis = 0; axis < count; ++axis) {
 		if (axisTypes[axis] != static_cast<int32_t>(vr::k_eControllerAxis_Trigger)) {
 			continue;
 		}
 
+		sawTriggerAxis = true;
 		if (reading) ++reading->triggerAxisCount;
 		const float value = state.rAxis[axis].x;
 		NoteAnalogValue(reading, static_cast<int>(axis), value);
 		if (value >= analogThreshold) {
 			return true;
 		}
+	}
+
+	if (!sawTriggerAxis) {
+		return LegacyAxisFallback(state, analogThreshold, reading);
 	}
 
 	return false;

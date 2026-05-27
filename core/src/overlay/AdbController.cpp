@@ -343,7 +343,14 @@ AdbController::Result AdbController::Shell(
     const std::string& cmd,
     std::chrono::milliseconds timeout)
 {
-    return Run({"shell", cmd}, timeout);
+    std::vector<std::string> args;
+    if (!m_targetSerial.empty()) {
+        args.push_back("-s");
+        args.push_back(m_targetSerial);
+    }
+    args.push_back("shell");
+    args.push_back(cmd);
+    return Run(args, timeout);
 }
 
 bool AdbController::Connect(const std::string& endpoint)
@@ -357,6 +364,11 @@ bool AdbController::Connect(const std::string& endpoint)
     // already-connected, so a substring check is idempotent.
     const bool ok = (r.exitCode == 0)
         && (r.out.find("connected to") != std::string::npos);
+    if (ok) {
+        m_targetSerial = endpoint;
+        openvr_pair::common::DiagnosticLog(
+            "adb", "target_serial_set source=connect endpoint='%s'", endpoint.c_str());
+    }
     fprintf(stderr, "[adb] connect endpoint='%s' ok=%d exit=%d out='%s'\n",
             endpoint.c_str(), ok ? 1 : 0, r.exitCode, TrimAscii(r.out).c_str());
     return ok;
@@ -364,7 +376,14 @@ bool AdbController::Connect(const std::string& endpoint)
 
 bool AdbController::Connected()
 {
-    Result r = Run({"get-state"});
+    std::vector<std::string> args;
+    if (!m_targetSerial.empty()) {
+        args.push_back("-s");
+        args.push_back(m_targetSerial);
+    }
+    args.push_back("get-state");
+
+    Result r = Run(args);
     if (r.timedOut) return false;
     return (r.exitCode == 0) && (r.out.find("device") != std::string::npos);
 }
@@ -382,6 +401,11 @@ bool AdbController::Disconnect(const std::string& endpoint)
         return false;
     }
     const bool ok = (r.exitCode == 0);
+    if (ok && (endpoint.empty() || endpoint == m_targetSerial)) {
+        m_targetSerial.clear();
+        openvr_pair::common::DiagnosticLog(
+            "adb", "target_serial_cleared source=disconnect endpoint='%s'", endpoint.c_str());
+    }
     fprintf(stderr, "[adb] disconnect endpoint='%s' ok=%d exit=%d out='%s'\n",
             endpoint.c_str(), ok ? 1 : 0, r.exitCode, TrimAscii(r.out).c_str());
     return ok;
@@ -402,6 +426,11 @@ bool AdbController::DisableWirelessAdb(const std::string& endpoint)
         return false;
     }
     const bool ok = (r.exitCode == 0);
+    if (ok && !endpoint.empty() && endpoint == m_targetSerial) {
+        m_targetSerial.clear();
+        openvr_pair::common::DiagnosticLog(
+            "adb", "target_serial_cleared source=usb endpoint='%s'", endpoint.c_str());
+    }
     fprintf(stderr, "[adb] usb endpoint='%s' ok=%d exit=%d out='%s' err='%s'\n",
             endpoint.c_str(), ok ? 1 : 0, r.exitCode,
             TrimAscii(r.out).c_str(), TrimAscii(r.err).c_str());
@@ -413,23 +442,52 @@ bool AdbController::SetGuardianPaused(bool /*paused*/, int valueToWrite)
     Result r = Shell("setprop debug.oculus.guardian_pause " + std::to_string(valueToWrite));
     if (r.timedOut) {
         fprintf(stderr, "[adb] SetGuardianPaused timed out\n");
+        openvr_pair::common::DiagnosticLog("adb",
+            "guardian_set value=%d timed_out=1 exit=%d stdout='%s' stderr='%s'",
+            valueToWrite, r.exitCode,
+            TruncateForLog(r.out).c_str(),
+            TruncateForLog(r.err).c_str());
         return false;
     }
+    openvr_pair::common::DiagnosticLog("adb",
+        "guardian_set value=%d timed_out=0 exit=%d stdout='%s' stderr='%s'",
+        valueToWrite, r.exitCode,
+        TruncateForLog(r.out).c_str(),
+        TruncateForLog(r.err).c_str());
     return r.exitCode == 0;
 }
 
 int AdbController::GetGuardianPaused()
 {
     Result r = Shell("getprop debug.oculus.guardian_pause");
-    if (r.timedOut || r.exitCode != 0) return -1;
+    if (r.timedOut || r.exitCode != 0) {
+        openvr_pair::common::DiagnosticLog("adb",
+            "guardian_get failed timed_out=%d exit=%d stdout='%s' stderr='%s'",
+            r.timedOut ? 1 : 0,
+            r.exitCode,
+            TruncateForLog(r.out).c_str(),
+            TruncateForLog(r.err).c_str());
+        return -1;
+    }
 
     std::string trimmed = TrimAscii(r.out);
-    if (trimmed.empty()) return -1;
+    if (trimmed.empty()) {
+        openvr_pair::common::DiagnosticLog("adb",
+            "guardian_get empty stdout='%s' stderr='%s'",
+            TruncateForLog(r.out).c_str(),
+            TruncateForLog(r.err).c_str());
+        return -1;
+    }
 
     try {
-        return std::stoi(trimmed);
+        const int value = std::stoi(trimmed);
+        openvr_pair::common::DiagnosticLog("adb",
+            "guardian_get value=%d raw='%s'", value, TruncateForLog(trimmed).c_str());
+        return value;
     } catch (...) {
         fprintf(stderr, "[adb] GetGuardianPaused: could not parse '%s'\n", trimmed.c_str());
+        openvr_pair::common::DiagnosticLog("adb",
+            "guardian_get parse_failed raw='%s'", TruncateForLog(trimmed).c_str());
         return -1;
     }
 }

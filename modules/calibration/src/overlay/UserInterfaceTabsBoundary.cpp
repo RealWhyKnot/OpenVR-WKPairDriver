@@ -2,6 +2,7 @@
 #include "CalibrationMetrics.h"
 #include "Configuration.h"
 #include "ControllerInput.h"
+#include "DiagnosticsLog.h"
 #include "Boundary.h"
 #include "BoundaryCapture.h"
 #include "GuardianAutoApply.h"
@@ -474,7 +475,18 @@ void DrawSetupWizardModal() {
                             : std::string();
                     auto res = wiz->RunWifiVerify(manualEndpoint);
                     if (res.status == wkopenvr::adb::StepStatus::Passed) {
-                        wkopenvr::adb::ProbeGuardianPolarity(CCal_GetAdb());
+                        const auto polarity =
+                            wkopenvr::adb::ProbeGuardianPolarity(CCal_GetAdb());
+                        {
+                            char pbuf[160];
+                            snprintf(pbuf, sizeof pbuf,
+                                "[adb-wizard-ui] guardian probe complete: wrote=%d read=%d match=%d",
+                                polarity.writtenValue,
+                                polarity.readBackValue,
+                                polarity.readMatchesWrite ? 1 : 0);
+                            Metrics::WriteLogAnnotation(pbuf);
+                            openvr_pair::common::DiagnosticLog("adb-wizard-ui", "%s", pbuf);
+                        }
                         const std::string ep = wiz->DiscoveredEndpoint();
                         if (!ep.empty()) {
                             CalCtx.adb.savedEndpoint = ep;
@@ -519,6 +531,10 @@ void DrawSetupWizardModal() {
             ImGui::TextWrapped("Did Quest Guardian visibly disappear in-headset just now?");
             ImGui::Spacing();
             if (ImGui::Button("Yes, Guardian disappeared", actionButtonSize)) {
+                Metrics::WriteLogAnnotation("[adb-wizard-ui] guardian confirmation: user_confirmed_disappeared");
+                openvr_pair::common::DiagnosticLog(
+                    "adb-wizard-ui", "guardian confirmation user_confirmed_disappeared value=%d",
+                    CalCtx.adb.guardianPauseValue);
                 CalCtx.adb.setupCompleted = true;
                 SaveProfile(CalCtx);
                 s_awaitPolarityConfirm = false;
@@ -528,6 +544,11 @@ void DrawSetupWizardModal() {
                 ImGui::SameLine();
             }
             if (ImGui::Button("No, flip the value", actionButtonSize)) {
+                Metrics::WriteLogAnnotation("[adb-wizard-ui] guardian confirmation: user_requested_flip");
+                openvr_pair::common::DiagnosticLog(
+                    "adb-wizard-ui", "guardian confirmation user_requested_flip old_value=%d new_value=%d",
+                    CalCtx.adb.guardianPauseValue,
+                    CalCtx.adb.guardianPauseValue == 1 ? 0 : 1);
                 wkopenvr::adb::SetGuardianPauseValueOverride(CCal_GetAdb(),
                     CalCtx.adb.guardianPauseValue == 1 ? 0 : 1);
                 CalCtx.adb.setupCompleted = true;
@@ -774,16 +795,21 @@ void DrawGuardianSection(ImVec2 panelSize) {
 struct BoundaryInputStats {
     int trackedControllers = 0;
     int matchingControllers = 0;
+    int fallbackAnySystem = 0;
     int skippedTrackingSystem = 0;
     int controllerStateFailed = 0;
     int stateOk = 0;
     int triggerHeld = 0;
+    int buttonPressed = 0;
+    int legacyFallbackUsed = 0;
     int poseOk = 0;
     int poseInvalid = 0;
     int axisPropertyErrors = 0;
     int triggerAxisCount = 0;
+    int lastDeviceId = -1;
     int lastTriggerAxis = -1;
     float lastTriggerValue = 0.0f;
+    std::string lastTrackingSystem;
 };
 
 std::string TrackingSystemName(vr::IVRSystem* vrs, vr::TrackedDeviceIndex_t deviceId) {
@@ -799,22 +825,6 @@ std::string TrackingSystemName(vr::IVRSystem* vrs, vr::TrackedDeviceIndex_t devi
         return {};
     }
     return std::string(buffer);
-}
-
-bool MatchesBoundaryTrackingSystem(
-    vr::IVRSystem* vrs,
-    vr::TrackedDeviceIndex_t deviceId,
-    BoundaryInputStats& stats)
-{
-    if (CalCtx.targetTrackingSystem.empty()) {
-        return true;
-    }
-    const std::string system = TrackingSystemName(vrs, deviceId);
-    if (system == CalCtx.targetTrackingSystem) {
-        return true;
-    }
-    ++stats.skippedTrackingSystem;
-    return false;
 }
 
 Eigen::Affine3d DriverPoseToWorldAffine(const vr::DriverPose_t& dp) {
@@ -839,25 +849,31 @@ Eigen::Affine3d DriverPoseToWorldAffine(const vr::DriverPose_t& dp) {
 }
 
 void WriteBoundaryInputSummary(const BoundaryInputStats& stats, uint64_t sessionId, size_t rawCount) {
-    char lbuf[384];
+    char lbuf[640];
     snprintf(lbuf, sizeof lbuf,
-        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d skipped_system=%d state_ok=%d state_failed=%d trigger=%d pose_ok=%d pose_invalid=%d trigger_axes=%d axis_prop_errors=%d last_axis=%d last_value=%.3f",
+        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d fallback_any=%d skipped_system=%d state_ok=%d state_failed=%d trigger=%d button=%d legacy=%d pose_ok=%d pose_invalid=%d trigger_axes=%d axis_prop_errors=%d last_device=%d last_system='%s' last_axis=%d last_value=%.3f",
         static_cast<unsigned long long>(sessionId),
         rawCount,
         CalCtx.targetTrackingSystem.c_str(),
         stats.trackedControllers,
         stats.matchingControllers,
+        stats.fallbackAnySystem,
         stats.skippedTrackingSystem,
         stats.stateOk,
         stats.controllerStateFailed,
         stats.triggerHeld,
+        stats.buttonPressed,
+        stats.legacyFallbackUsed,
         stats.poseOk,
         stats.poseInvalid,
         stats.triggerAxisCount,
         stats.axisPropertyErrors,
+        stats.lastDeviceId,
+        stats.lastTrackingSystem.c_str(),
         stats.lastTriggerAxis,
         stats.lastTriggerValue);
     Metrics::WriteLogAnnotation(lbuf);
+    openvr_pair::common::DiagnosticLog("boundary-capture", "%s", lbuf);
 }
 
 } // namespace
@@ -890,21 +906,26 @@ void CCal_TickBoundaryCapture() {
     }
 
     BoundaryInputStats stats;
-    for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
+    auto tryController = [&](vr::TrackedDeviceIndex_t deviceId, bool enforceTrackingSystem, bool countDevice) {
         if (vrs->GetTrackedDeviceClass(deviceId) != vr::TrackedDeviceClass_Controller) {
-            continue;
+            return false;
         }
-        ++stats.trackedControllers;
+        if (countDevice) ++stats.trackedControllers;
+        stats.lastDeviceId = static_cast<int>(deviceId);
+        stats.lastTrackingSystem = TrackingSystemName(vrs, deviceId);
 
-        if (!MatchesBoundaryTrackingSystem(vrs, deviceId, stats)) {
-            continue;
+        if (enforceTrackingSystem && !CalCtx.targetTrackingSystem.empty()
+            && stats.lastTrackingSystem != CalCtx.targetTrackingSystem)
+        {
+            if (countDevice) ++stats.skippedTrackingSystem;
+            return false;
         }
         ++stats.matchingControllers;
 
         vr::VRControllerState_t st = {};
         if (!vrs->GetControllerState(deviceId, &st, sizeof(st))) {
             ++stats.controllerStateFailed;
-            continue;
+            return false;
         }
         ++stats.stateOk;
 
@@ -912,13 +933,17 @@ void CCal_TickBoundaryCapture() {
         if (!wkopenvr::controller_input::IsTriggerHeld(vrs, deviceId, st, 0.75f, &trigger)) {
             stats.axisPropertyErrors += trigger.propertyErrors;
             stats.triggerAxisCount += trigger.triggerAxisCount;
+            if (trigger.buttonPressed) ++stats.buttonPressed;
+            if (trigger.legacyFallbackUsed) ++stats.legacyFallbackUsed;
             if (trigger.analogAxis >= 0) {
                 stats.lastTriggerAxis = trigger.analogAxis;
                 stats.lastTriggerValue = trigger.analogValue;
             }
-            continue;
+            return false;
         }
         ++stats.triggerHeld;
+        if (trigger.buttonPressed) ++stats.buttonPressed;
+        if (trigger.legacyFallbackUsed) ++stats.legacyFallbackUsed;
         stats.axisPropertyErrors += trigger.propertyErrors;
         stats.triggerAxisCount += trigger.triggerAxisCount;
         if (trigger.analogAxis >= 0) {
@@ -929,12 +954,54 @@ void CCal_TickBoundaryCapture() {
         const auto& dp = CalCtx.devicePoses[deviceId];
         if (!dp.poseIsValid || dp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
             ++stats.poseInvalid;
-            continue;
+            return false;
         }
         ++stats.poseOk;
 
         const Eigen::Affine3d pose = DriverPoseToWorldAffine(dp);
-        s_capture.Tick(pose, true, CalCtx.boundary.floorY);
+        const bool accepted = s_capture.Tick(pose, true, CalCtx.boundary.floorY);
+        if (accepted) {
+            char cbuf[256];
+            snprintf(cbuf, sizeof cbuf,
+                "[boundary-capture] accepted controller input: session=%llu device=%d system='%s' raw=%zu button=%d legacy=%d axis=%d value=%.3f fallback_any=%d",
+                static_cast<unsigned long long>(sessionId),
+                static_cast<int>(deviceId),
+                stats.lastTrackingSystem.c_str(),
+                s_capture.rawVertexCount(),
+                trigger.buttonPressed ? 1 : 0,
+                trigger.legacyFallbackUsed ? 1 : 0,
+                trigger.analogAxis,
+                trigger.analogValue,
+                stats.fallbackAnySystem);
+            Metrics::WriteLogAnnotation(cbuf);
+            openvr_pair::common::DiagnosticLog("boundary-capture", "%s", cbuf);
+        }
+        return accepted;
+    };
+
+    bool captured = false;
+    for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
+        if (tryController(deviceId, true, true)) {
+            captured = true;
+            break;
+        }
+    }
+
+    if (!captured
+        && stats.trackedControllers > 0
+        && stats.matchingControllers == 0
+        && !CalCtx.targetTrackingSystem.empty())
+    {
+        stats.fallbackAnySystem = 1;
+        for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
+            if (tryController(deviceId, false, false)) {
+                captured = true;
+                break;
+            }
+        }
+    }
+
+    if (captured) {
         return;
     }
 

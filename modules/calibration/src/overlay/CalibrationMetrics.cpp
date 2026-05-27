@@ -1,5 +1,6 @@
 #include "CalibrationMetrics.h"
 #include "BuildStamp.h"
+#include "DiagnosticsLog.h"
 #include "LogPaths.h"
 #include "MotionRecording.h"
 #include "Win32Text.h"
@@ -511,8 +512,13 @@ namespace Metrics {
 
 		logFile.open(path);
 		if (logFile.fail()) {
+			openvr_pair::common::DiagnosticLog(
+				"spacecal", "log_open_failed path='%ls'", path.c_str());
 			return false;
 		}
+		openvr_pair::common::DiagnosticLog(
+			"spacecal", "log_opened path='%ls' enable_logs=%d",
+			path.c_str(), enableLogs ? 1 : 0);
 
 		// Wire-format version annotation. v2 added per-tick raw reference + target
 		// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
@@ -523,6 +529,7 @@ namespace Metrics {
 		// rotationDiversity, translationAxisRangesCm.{x,y,z}) are still v2 because
 		// the replay harness looks columns up by name, not position.
 		logFile << "# spacecal_log_v2\n";
+		logFile.flush();
 
 		// === Self-describing header ============================================
 		// Triage from a debug log starts with "what build was this, on what
@@ -639,6 +646,7 @@ namespace Metrics {
 		logFile << "\n";
 
 		logFileIsOpen = true;
+		logFile.flush();
 
 		return true;
 	}

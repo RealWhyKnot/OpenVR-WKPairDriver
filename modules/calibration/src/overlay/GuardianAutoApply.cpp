@@ -2,6 +2,7 @@
 
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
+#include "DiagnosticsLog.h"
 
 #include <chrono>
 #include <cstdio>
@@ -30,19 +31,28 @@ bool PreconditionsMet(const char* site)
 
     if (!a.guardianPauseEnabled) {
         fprintf(stderr, "[guardian-auto] %s: skip -- guardianPauseEnabled=false\n", site);
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "%s precondition_failed gate=guardian_pause_disabled", site);
         return false;
     }
     if (!b.enabled) {
         fprintf(stderr, "[guardian-auto] %s: skip -- boundary.enabled=false\n", site);
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "%s precondition_failed gate=boundary_disabled", site);
         return false;
     }
     if (b.vertices.size() < 3) {
         fprintf(stderr, "[guardian-auto] %s: skip -- boundary has %zu vertices (need >=3)\n",
                 site, b.vertices.size());
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "%s precondition_failed gate=few_vertices vertices=%zu",
+            site, b.vertices.size());
         return false;
     }
     if (a.savedEndpoint.empty()) {
         fprintf(stderr, "[guardian-auto] %s: skip -- savedEndpoint is empty\n", site);
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "%s precondition_failed gate=no_endpoint", site);
         return false;
     }
     return true;
@@ -56,6 +66,11 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
 {
     *aborted = false;
     const auto deadline = std::chrono::steady_clock::now() + kAutoApplyBudget;
+    openvr_pair::common::DiagnosticLog(
+        "guardian-auto", "pause_sequence_start desired=%d endpoint_set=%d value=%d",
+        paused ? 1 : 0,
+        CalCtx.adb.savedEndpoint.empty() ? 0 : 1,
+        paused ? CalCtx.adb.guardianPauseValue : 0);
 
     // Step 1: connect (idempotent; already-connected succeeds cheaply).
     {
@@ -71,6 +86,8 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
             fprintf(stderr, "[guardian-auto] connect failed to %s\n",
                     CalCtx.adb.savedEndpoint.c_str());
             Metrics::adbConnected.Push(false);
+            openvr_pair::common::DiagnosticLog(
+                "guardian-auto", "pause_sequence_connect_failed");
             return false;
         }
         Metrics::adbConnected.Push(true);
@@ -92,6 +109,9 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
             fprintf(stderr, "[guardian-auto] SetGuardianPaused(%s, %d) failed\n",
                     paused ? "true" : "false", CalCtx.adb.guardianPauseValue);
             Metrics::guardianPaused.Push(false);
+            openvr_pair::common::DiagnosticLog(
+                "guardian-auto", "pause_sequence_set_failed desired=%d value=%d",
+                paused ? 1 : 0, CalCtx.adb.guardianPauseValue);
             return false;
         }
     }
@@ -119,6 +139,12 @@ bool RunPauseSequence(AdbController& adb, bool paused, bool* aborted)
             fprintf(stderr, "[guardian-auto] Guardian %s confirmed (value=%d)\n",
                     paused ? "paused" : "resumed", read);
         }
+        openvr_pair::common::DiagnosticLog(
+            "guardian-auto", "pause_sequence_readback desired=%d want=%d read=%d matched=%d",
+            paused ? 1 : 0,
+            want,
+            read,
+            matched ? 1 : 0);
 
         Metrics::guardianPaused.Push(matched && paused);
         return matched;

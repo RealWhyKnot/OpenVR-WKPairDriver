@@ -59,6 +59,24 @@ TEST(ControllerInputTest, ButtonMaskCountsAsTrigger) {
 	EXPECT_TRUE(reading.buttonPressed);
 }
 
+TEST(ControllerInputTest, FallsBackToHighAnalogWhenNoTriggerAxisIsReported) {
+	vr::VRControllerState_t state = EmptyState();
+	state.rAxis[2].x = 0.96f;
+
+	int32_t axisTypes[vr::k_unControllerStateAxisCount] = {};
+	for (uint32_t i = 0; i < vr::k_unControllerStateAxisCount; ++i) {
+		axisTypes[i] = static_cast<int32_t>(vr::k_eControllerAxis_None);
+	}
+
+	wkopenvr::controller_input::TriggerReading reading;
+	EXPECT_TRUE(wkopenvr::controller_input::IsTriggerHeldFromAxisTypes(
+		state, axisTypes, vr::k_unControllerStateAxisCount, 0.75f, &reading));
+	EXPECT_TRUE(reading.legacyFallbackUsed);
+	EXPECT_EQ(reading.analogAxis, 2);
+	EXPECT_FLOAT_EQ(reading.analogValue, 0.96f);
+	EXPECT_EQ(reading.triggerAxisCount, 0);
+}
+
 TEST(ControllerInputTest, FillsControllersPastFirstEightDevices) {
 	std::vector<VRDevice> devices;
 	for (int i = 0; i < 10; ++i) {

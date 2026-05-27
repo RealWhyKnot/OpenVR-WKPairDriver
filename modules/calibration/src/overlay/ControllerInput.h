@@ -13,6 +13,7 @@ namespace wkopenvr::controller_input {
 
 struct TriggerReading {
 	bool buttonPressed = false;
+	bool legacyFallbackUsed = false;
 	int analogAxis = -1;
 	float analogValue = 0.0f;
 	int triggerAxisCount = 0;

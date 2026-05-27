@@ -116,27 +116,56 @@ FloorProjectionAttempt ProjectAimToFloor(
     double floorY)
 {
     // OpenVR controller poses are not guaranteed to expose the model pointer
-    // ray on the same local Z sign across controller drivers. Keep -Z first
-    // for the historical path, but accept +Z as a narrow fallback.
-    const FloorProjectionAttempt primary = ProjectSingleRayToFloor(
-        controllerPose,
-        Eigen::Vector3d(0.0, 0.0, -1.0),
-        "-Z",
-        floorY);
-    if (primary.status == FloorProjectionStatus::Ok) {
-        return primary;
+    // ray on the same local axis/sign across controller drivers. Keep -Z first
+    // for the historical path, then try every cardinal local axis so an Index
+    // controller that reports a different pointer convention can still paint.
+    struct CandidateRay {
+        Eigen::Vector3d ray;
+        const char* name;
+    };
+    const CandidateRay rays[] = {
+        { Eigen::Vector3d( 0.0,  0.0, -1.0), "-Z" },
+        { Eigen::Vector3d( 0.0,  0.0,  1.0), "+Z" },
+        { Eigen::Vector3d( 0.0, -1.0,  0.0), "-Y" },
+        { Eigen::Vector3d( 0.0,  1.0,  0.0), "+Y" },
+        { Eigen::Vector3d(-1.0,  0.0,  0.0), "-X" },
+        { Eigen::Vector3d( 1.0,  0.0,  0.0), "+X" },
+    };
+
+    FloorProjectionAttempt bestFailed;
+    bestFailed.aimY = 1.0;
+    bool haveFailed = false;
+    for (const auto& r : rays) {
+        const FloorProjectionAttempt attempt =
+            ProjectSingleRayToFloor(controllerPose, r.ray, r.name, floorY);
+        if (attempt.status == FloorProjectionStatus::Ok) {
+            return attempt;
+        }
+        if (!haveFailed || attempt.aimY < bestFailed.aimY) {
+            bestFailed = attempt;
+            haveFailed = true;
+        }
     }
 
-    const FloorProjectionAttempt oppositeZ = ProjectSingleRayToFloor(
-        controllerPose,
-        Eigen::Vector3d(0.0, 0.0, 1.0),
-        "+Z",
-        floorY);
-    if (oppositeZ.status == FloorProjectionStatus::Ok) {
-        return oppositeZ;
+    const Eigen::Vector3d origin = controllerPose.translation();
+    const double floorDelta = origin.y() - floorY;
+    if (haveFailed
+        && bestFailed.status == FloorProjectionStatus::DistanceOutOfRange
+        && origin.allFinite()
+        && floorDelta <= 0.25
+        && floorDelta >= -3.0)
+    {
+        FloorProjectionAttempt fallback;
+        fallback.status = FloorProjectionStatus::Ok;
+        fallback.hit = { origin.x(), floorY, origin.z() };
+        fallback.rayName = "originXZ";
+        fallback.originY = origin.y();
+        fallback.aimY = 0.0;
+        fallback.distanceMeters = 0.0;
+        return fallback;
     }
 
-    return primary;
+    return bestFailed;
 }
 
 std::vector<BoundaryVertex> RemoveNearDuplicates(
@@ -222,6 +251,7 @@ void CaptureSession::Start() {
     m_raw.clear();
     m_simplified.clear();
     m_projectionRejectLogCount = 0;
+    m_debounceRejectLogCount = 0;
     ++m_sessionId;
     m_state = CaptureState::Active;
     Metrics::WriteLogAnnotation("[boundary-capture] started");
@@ -279,13 +309,28 @@ bool CaptureSession::Tick(const Eigen::Affine3d& controllerPose,
     if (!m_raw.empty()) {
         const BoundaryVertex& last = m_raw.back();
         const double dist = std::sqrt(DistanceSq(candidate, last));
-        if (dist < kVertexDebounceMeters) return false;
+        if (dist < kVertexDebounceMeters) {
+            ++m_debounceRejectLogCount;
+            if (m_debounceRejectLogCount == 1 || (m_debounceRejectLogCount % 120) == 0) {
+                char dbuf[192];
+                snprintf(dbuf, sizeof dbuf,
+                    "[boundary-capture] vertex debounced: dist=%.3f min=%.3f raw=%zu rejects=%zu ray=%s",
+                    dist,
+                    kVertexDebounceMeters,
+                    m_raw.size(),
+                    m_debounceRejectLogCount,
+                    projection.rayName);
+                Metrics::WriteLogAnnotation(dbuf);
+            }
+            return false;
+        }
     }
 
-    if (m_raw.empty()) {
+    if (m_raw.empty() || ((m_raw.size() + 1) % 20) == 0) {
         char lbuf[128];
         snprintf(lbuf, sizeof lbuf,
-            "[boundary-capture] first vertex: pos=(%.3f,%.3f,%.3f) ray=%s",
+            "[boundary-capture] vertex added: index=%zu pos=(%.3f,%.3f,%.3f) ray=%s",
+            m_raw.size(),
             candidate.x, candidate.y, candidate.z, projection.rayName);
         Metrics::WriteLogAnnotation(lbuf);
     }

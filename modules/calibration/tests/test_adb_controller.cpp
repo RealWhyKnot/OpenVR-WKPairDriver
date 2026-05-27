@@ -122,6 +122,41 @@ TEST(AdbControllerTest, DisableWirelessAdb_targets_saved_tcp_endpoint)
               (std::vector<std::string>{"-s", "192.168.1.10:5555", "usb"}));
 }
 
+TEST(AdbControllerTest, Shell_targets_last_connected_endpoint)
+{
+    StubAdbController ctrl;
+    ctrl.stubOut = "connected to 192.168.1.10:5555\n";
+    ctrl.stubExit = 0;
+
+    EXPECT_TRUE(ctrl.Connect("192.168.1.10:5555"));
+
+    ctrl.stubOut = "Quest 3\n";
+    const auto result = ctrl.Shell("getprop ro.product.model");
+
+    EXPECT_EQ(result.out, "Quest 3\n");
+    ASSERT_EQ(ctrl.calls.size(), 2u);
+    EXPECT_EQ(ctrl.calls[1],
+              (std::vector<std::string>{
+                  "-s", "192.168.1.10:5555", "shell", "getprop ro.product.model"}));
+}
+
+TEST(AdbControllerTest, Connected_targets_last_connected_endpoint)
+{
+    StubAdbController ctrl;
+    ctrl.stubOut = "already connected to 192.168.1.10:5555\n";
+    ctrl.stubExit = 0;
+
+    EXPECT_TRUE(ctrl.Connect("192.168.1.10:5555"));
+
+    ctrl.stubOut = "device\n";
+    EXPECT_TRUE(ctrl.Connected());
+
+    ASSERT_EQ(ctrl.calls.size(), 2u);
+    EXPECT_EQ(ctrl.calls[1],
+              (std::vector<std::string>{
+                  "-s", "192.168.1.10:5555", "get-state"}));
+}
+
 // ---------------------------------------------------------------------------
 // Run_with_fake_binary_times_out
 //

@@ -29,6 +29,24 @@ bool Contains(const std::string& haystack, const std::string& needle)
     return haystack.find(needle) != std::string::npos;
 }
 
+std::string TrimAsciiForUi(std::string s)
+{
+    auto isSpace = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    while (!s.empty() && isSpace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && isSpace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+    }
+    if (s.size() > 240) {
+        s.resize(240);
+        s += "...";
+    }
+    return s;
+}
+
 // True if the devices output has at least one non-header, non-empty line.
 // Any status (unauthorized, offline, device) counts as "something present."
 UsbDeviceState ClassifyDevices(const std::string& output)
@@ -643,6 +661,11 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
 
     openvr_pair::common::DiagnosticLog("adb-wizard", "run_wifi_verify");
     std::string endpoint = endpointOverride.empty() ? m_discoveredEndpoint : endpointOverride;
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "wifi_verify_endpoint endpoint='%s' override=%d discovered_empty=%d",
+        endpoint.c_str(),
+        endpointOverride.empty() ? 0 : 1,
+        m_discoveredEndpoint.empty() ? 1 : 0);
     if (endpoint.empty()) {
         r.status = StepStatus::Failed;
         r.detail = "No endpoint discovered. Re-run Discover while USB ADB is authorized, or use the manual pairing-code fallback only if the Quest shows an Android Wireless debugging screen.";
@@ -654,6 +677,8 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
     }
 
     if (!m_adb.Connect(endpoint)) {
+        openvr_pair::common::DiagnosticLog("adb-wizard",
+            "wifi_verify_connect_failed endpoint='%s'", endpoint.c_str());
         r.status = StepStatus::Failed;
         r.detail = "Failed to connect to " + endpoint +
                    ". Ensure the Quest is awake and on the same Wi-Fi network.";
@@ -662,12 +687,20 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
 
     const auto prop = m_adb.Shell("getprop ro.product.model", std::chrono::seconds(5));
     if (prop.timedOut || prop.exitCode != 0) {
+        openvr_pair::common::DiagnosticLog("adb-wizard",
+            "wifi_verify_getprop_failed timed_out=%d exit=%d stdout='%s' stderr='%s'",
+            prop.timedOut ? 1 : 0,
+            prop.exitCode,
+            TrimAsciiForUi(prop.out).c_str(),
+            TrimAsciiForUi(prop.err).c_str());
         r.status = StepStatus::Failed;
         r.detail = "Connected but getprop timed out or failed.";
         return Commit(WizardStep::WifiVerify, r);
     }
 
     const std::string model = prop.out;
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "wifi_verify_model raw='%s'", TrimAsciiForUi(model).c_str());
     if (!Contains(model, "Quest")) {
         r.status = StepStatus::Failed;
         r.detail = "Connected but device does not look like a Quest (model: " + model + ").";
@@ -695,8 +728,12 @@ PolarityResult ProbeGuardianPolarity(AdbController& adb)
     out.readMatchesWrite = false;
 
     // Write 1; read back.
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "guardian_probe_start write_value=%d", out.writtenValue);
     if (!adb.SetGuardianPaused(true, out.writtenValue)) {
         fprintf(stderr, "[adb-wizard] ProbeGuardianPolarity: SetGuardianPaused failed\n");
+        openvr_pair::common::DiagnosticLog("adb-wizard",
+            "guardian_probe_set_failed write_value=%d", out.writtenValue);
         return out;
     }
 
@@ -705,6 +742,11 @@ PolarityResult ProbeGuardianPolarity(AdbController& adb)
 
     fprintf(stderr, "[adb-wizard] ProbeGuardianPolarity: wrote=%d read=%d match=%d\n",
             out.writtenValue, out.readBackValue, out.readMatchesWrite ? 1 : 0);
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "guardian_probe_result wrote=%d read=%d match=%d",
+        out.writtenValue,
+        out.readBackValue,
+        out.readMatchesWrite ? 1 : 0);
     return out;
 }
 

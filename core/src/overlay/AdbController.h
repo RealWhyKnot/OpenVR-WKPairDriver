@@ -66,6 +66,8 @@ protected:
     std::string m_adbPath;
 
 private:
+    std::string m_targetSerial;
+
     // Quote an argument if it contains spaces or is empty, so CreateProcessW
     // sees it as a single token.
     static std::string QuoteArg(const std::string& arg);
