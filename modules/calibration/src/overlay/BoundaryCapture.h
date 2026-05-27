@@ -27,6 +27,7 @@ public:
     // at least kVertexDebounceMeters from the last recorded position.
     bool Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
     bool TickPointerPose(const Eigen::Affine3d& pointerPose, bool triggerHeld, double floorY = 0.0);
+    bool TickProjectedPosition(const Eigen::Affine3d& controllerPose, bool active, double floorY = 0.0);
 
     CaptureState state() const { return m_state; }
     uint64_t sessionId() const { return m_sessionId; }
@@ -47,6 +48,10 @@ private:
         bool triggerHeld,
         double floorY,
         bool pointerOnly);
+    bool AppendProjectedPosition(
+        const Eigen::Affine3d& controllerPose,
+        bool active,
+        double floorY);
 
     // Minimum motion required to record a new vertex (avoids duplicate points
     // while the user holds still with the trigger pressed).

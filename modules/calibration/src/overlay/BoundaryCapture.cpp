@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <algorithm>
 
 namespace wkopenvr::boundary {
 
@@ -38,6 +39,111 @@ double SegmentDistanceSq(const BoundaryVertex& p,
     const double ry = py - t * dy;
     const double rz = pz - t * dz;
     return rx * rx + ry * ry + rz * rz;
+}
+
+double CrossXZ(const BoundaryVertex& a,
+               const BoundaryVertex& b,
+               const BoundaryVertex& c)
+{
+    return (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
+}
+
+bool SameXZ(const BoundaryVertex& a, const BoundaryVertex& b)
+{
+    return std::fabs(a.x - b.x) <= 1e-6 && std::fabs(a.z - b.z) <= 1e-6;
+}
+
+int OrientationXZ(const BoundaryVertex& a,
+                  const BoundaryVertex& b,
+                  const BoundaryVertex& c)
+{
+    const double cross = CrossXZ(a, b, c);
+    if (std::fabs(cross) <= 1e-9) return 0;
+    return cross > 0.0 ? 1 : -1;
+}
+
+bool OnSegmentXZ(const BoundaryVertex& a,
+                 const BoundaryVertex& b,
+                 const BoundaryVertex& p)
+{
+    if (OrientationXZ(a, b, p) != 0) return false;
+    return p.x >= std::min(a.x, b.x) - 1e-9
+        && p.x <= std::max(a.x, b.x) + 1e-9
+        && p.z >= std::min(a.z, b.z) - 1e-9
+        && p.z <= std::max(a.z, b.z) + 1e-9;
+}
+
+bool SegmentsIntersectXZ(const BoundaryVertex& a,
+                         const BoundaryVertex& b,
+                         const BoundaryVertex& c,
+                         const BoundaryVertex& d)
+{
+    const int o1 = OrientationXZ(a, b, c);
+    const int o2 = OrientationXZ(a, b, d);
+    const int o3 = OrientationXZ(c, d, a);
+    const int o4 = OrientationXZ(c, d, b);
+
+    if (o1 != o2 && o3 != o4) return true;
+    if (o1 == 0 && OnSegmentXZ(a, b, c)) return true;
+    if (o2 == 0 && OnSegmentXZ(a, b, d)) return true;
+    if (o3 == 0 && OnSegmentXZ(c, d, a)) return true;
+    if (o4 == 0 && OnSegmentXZ(c, d, b)) return true;
+    return false;
+}
+
+bool HasSelfIntersectionXZ(const std::vector<BoundaryVertex>& poly)
+{
+    const size_t n = poly.size();
+    if (n < 4) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const size_t iNext = (i + 1) % n;
+        for (size_t j = i + 1; j < n; ++j) {
+            const size_t jNext = (j + 1) % n;
+            if (i == j || iNext == j || jNext == i) continue;
+            if (i == 0 && jNext == 0) continue;
+            if (SegmentsIntersectXZ(poly[i], poly[iNext], poly[j], poly[jNext])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::vector<BoundaryVertex> ConvexHullXZ(std::vector<BoundaryVertex> points)
+{
+    std::sort(points.begin(), points.end(), [](const BoundaryVertex& a, const BoundaryVertex& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.z != b.z) return a.z < b.z;
+        return a.y < b.y;
+    });
+    points.erase(
+        std::unique(points.begin(), points.end(), SameXZ),
+        points.end());
+    if (points.size() <= 3) return points;
+
+    std::vector<BoundaryVertex> hull;
+    hull.reserve(points.size() * 2);
+    for (const auto& p : points) {
+        while (hull.size() >= 2
+            && CrossXZ(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0) {
+            hull.pop_back();
+        }
+        hull.push_back(p);
+    }
+
+    const size_t lowerSize = hull.size();
+    for (size_t idx = points.size(); idx-- > 0;) {
+        const auto& p = points[idx];
+        while (hull.size() > lowerSize
+            && CrossXZ(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0) {
+            hull.pop_back();
+        }
+        hull.push_back(p);
+    }
+    if (!hull.empty()) {
+        hull.pop_back();
+    }
+    return hull;
 }
 
 enum class FloorProjectionStatus {
@@ -263,7 +369,11 @@ std::vector<BoundaryVertex> CleanPaintedLoop(
         DistanceSq(simplified.front(), simplified.back()) < closeSq) {
         simplified.pop_back();
     }
-    return RemoveClosedCollinearVertices(simplified, simplifyMeters);
+    simplified = RemoveClosedCollinearVertices(simplified, simplifyMeters);
+    if (HasSelfIntersectionXZ(simplified)) {
+        return ConvexHullXZ(simplified);
+    }
+    return simplified;
 }
 
 }  // namespace
@@ -312,6 +422,59 @@ bool CaptureSession::TickPointerPose(const Eigen::Affine3d& pointerPose,
                                      bool triggerHeld,
                                      double floorY) {
     return AppendProjection(pointerPose, triggerHeld, floorY, true);
+}
+
+bool CaptureSession::TickProjectedPosition(const Eigen::Affine3d& controllerPose,
+                                           bool active,
+                                           double floorY) {
+    return AppendProjectedPosition(controllerPose, active, floorY);
+}
+
+bool CaptureSession::AppendProjectedPosition(const Eigen::Affine3d& controllerPose,
+                                             bool active,
+                                             double floorY) {
+    if (m_state != CaptureState::Active) return false;
+    if (!active) return false;
+
+    const Eigen::Vector3d origin = controllerPose.translation();
+    if (!origin.allFinite() || !std::isfinite(floorY)) {
+        ++m_projectionRejectLogCount;
+        if (m_projectionRejectLogCount == 1 || (m_projectionRejectLogCount % 120) == 0) {
+            Metrics::WriteLogAnnotation("[boundary-capture] projected position rejected: non_finite");
+        }
+        return false;
+    }
+
+    const BoundaryVertex candidate{ origin.x(), floorY, origin.z() };
+    if (!m_raw.empty()) {
+        const BoundaryVertex& last = m_raw.back();
+        const double dist = std::sqrt(DistanceSq(candidate, last));
+        if (dist < kVertexDebounceMeters) {
+            ++m_debounceRejectLogCount;
+            if (m_debounceRejectLogCount == 1 || (m_debounceRejectLogCount % 120) == 0) {
+                char dbuf[192];
+                snprintf(dbuf, sizeof dbuf,
+                    "[boundary-capture] vertex debounced: dist=%.3f min=%.3f raw=%zu rejects=%zu ray=controllerXZ",
+                    dist,
+                    kVertexDebounceMeters,
+                    m_raw.size(),
+                    m_debounceRejectLogCount);
+                Metrics::WriteLogAnnotation(dbuf);
+            }
+            return false;
+        }
+    }
+
+    if (m_raw.empty() || ((m_raw.size() + 1) % 20) == 0) {
+        char lbuf[128];
+        snprintf(lbuf, sizeof lbuf,
+            "[boundary-capture] vertex added: index=%zu pos=(%.3f,%.3f,%.3f) ray=controllerXZ",
+            m_raw.size(),
+            candidate.x, candidate.y, candidate.z);
+        Metrics::WriteLogAnnotation(lbuf);
+    }
+    m_raw.push_back(candidate);
+    return true;
 }
 
 bool CaptureSession::AppendProjection(const Eigen::Affine3d& poseForLog,

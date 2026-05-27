@@ -161,6 +161,38 @@ double TransformHeightToStandingUniverse(
     return p.y();
 }
 
+double TargetFloorYForStandingFloor(
+    const std::vector<BoundaryVertex>& targetSpace,
+    const Eigen::AffineCompact3d& targetToStanding,
+    double standingFloorY)
+{
+    double centerX = 0.0;
+    double centerZ = 0.0;
+    if (!targetSpace.empty()) {
+        double minX = targetSpace[0].x;
+        double maxX = targetSpace[0].x;
+        double minZ = targetSpace[0].z;
+        double maxZ = targetSpace[0].z;
+        for (const auto& v : targetSpace) {
+            if (v.x < minX) minX = v.x;
+            if (v.x > maxX) maxX = v.x;
+            if (v.z < minZ) minZ = v.z;
+            if (v.z > maxZ) maxZ = v.z;
+        }
+        centerX = (minX + maxX) * 0.5;
+        centerZ = (minZ + maxZ) * 0.5;
+    }
+
+    const auto& m = targetToStanding.matrix();
+    const double yCoeff = m(1, 1);
+    if (std::fabs(yCoeff) < 1e-9) {
+        return 0.0;
+    }
+
+    return (standingFloorY - m(1, 0) * centerX - m(1, 2) * centerZ - m(1, 3))
+        / yCoeff;
+}
+
 Eigen::AffineCompact3d ProfileTransformFromCalibration(
     Eigen::Vector3d eulerDeg,
     Eigen::Vector3d transCm)

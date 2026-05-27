@@ -190,6 +190,24 @@ TEST(BoundaryTransformTest, BoundaryHeightUsesPolygonCenter) {
     EXPECT_NE(standingY, TransformHeightToStandingUniverse(targetY, xf));
 }
 
+TEST(BoundaryTransformTest, TargetFloorYMapsToStandingFloorAtPolygonCenter) {
+    Eigen::AffineCompact3d xf = Eigen::AffineCompact3d::Identity();
+    xf.linear() = Eigen::AngleAxisd(
+        10.0 * EIGEN_PI / 180.0,
+        Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    xf.translation() = Eigen::Vector3d(0.25, 1.50, -0.10);
+
+    std::vector<BoundaryVertex> verts = {
+        { 2.0, 0.0, -1.0 },
+        { 4.0, 0.0, -1.0 },
+        { 4.0, 0.0,  1.0 },
+        { 2.0, 0.0,  1.0 },
+    };
+
+    const double floorY = TargetFloorYForStandingFloor(verts, xf);
+    EXPECT_NEAR(TransformHeightToStandingUniverse(verts, floorY, xf), 0.0, 1e-9);
+}
+
 TEST(BoundaryTransformTest, ProfileTransformAppliesToControllerPose) {
     const Eigen::AffineCompact3d xf = ProfileTransformFromCalibration(
         Eigen::Vector3d::Zero(),
@@ -371,6 +389,22 @@ TEST(CaptureSessionTest, PointerPoseUsesTipMinusZOnly) {
     EXPECT_NEAR(verts[0].z, expected.z(), 1e-9);
 }
 
+TEST(CaptureSessionTest, ProjectedPositionUsesControllerXZAndFloorY) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translation() = Eigen::Vector3d(1.25, 1.0, -0.75);
+
+    ASSERT_TRUE(session.TickProjectedPosition(pose, true, -2.50));
+    ASSERT_EQ(session.rawVertexCount(), 1u);
+    const auto& verts = session.vertices();
+    ASSERT_EQ(verts.size(), 1u);
+    EXPECT_NEAR(verts[0].x, 1.25, 1e-9);
+    EXPECT_NEAR(verts[0].y, -2.50, 1e-9);
+    EXPECT_NEAR(verts[0].z, -0.75, 1e-9);
+}
+
 TEST(CaptureSessionTest, FallsBackToControllerPositionWhenControllerIsBelowFloor) {
     CaptureSession session;
     session.Start();
@@ -417,6 +451,30 @@ TEST(CaptureSessionTest, FinishCleansPaintedSquareToEdges) {
 
     session.Finish();
 
+    const auto& verts = session.vertices();
+    EXPECT_EQ(verts.size(), 4u);
+    EXPECT_NEAR(AbsoluteAreaXZ(ProjectXZ(verts)), 4.0, 1e-9);
+}
+
+TEST(CaptureSessionTest, FinishUsesOuterHullForSelfIntersectingLoop) {
+    CaptureSession session;
+    session.Start();
+
+    const std::vector<Eigen::Vector3d> points = {
+        { 0.0, 1.0, 0.0 },
+        { 2.0, 1.0, 2.0 },
+        { 0.0, 1.0, 2.0 },
+        { 2.0, 1.0, 0.0 },
+        { 0.0, 1.0, 0.0 },
+    };
+
+    for (const auto& p : points) {
+        Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+        pose.translation() = p;
+        session.TickProjectedPosition(pose, true, 0.0);
+    }
+
+    session.Finish();
     const auto& verts = session.vertices();
     EXPECT_EQ(verts.size(), 4u);
     EXPECT_NEAR(AbsoluteAreaXZ(ProjectXZ(verts)), 4.0, 1e-9);

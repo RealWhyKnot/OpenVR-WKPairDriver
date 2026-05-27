@@ -1,7 +1,6 @@
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
 #include "Configuration.h"
-#include "ControllerInput.h"
 #include "DiagnosticsLog.h"
 #include "Boundary.h"
 #include "BoundaryCapture.h"
@@ -39,7 +38,6 @@ wkopenvr::boundary::CaptureSession s_capture;
 std::string s_boundaryError;
 bool s_floorCaptureActive = false;
 uint64_t s_floorSessionId = 0;
-bool s_useSteamVrWorkingPreview = false;
 bool s_steamVrWorkingPreviewVisible = false;
 
 void HideBoundaryPreviewOverlay() {
@@ -96,12 +94,7 @@ void TickBoundaryPreviewForTargetVertices(
         BoundaryHeightToStanding(targetVertices, CalCtx.boundary.floorY),
         closeLoop);
 
-    if (s_useSteamVrWorkingPreview && closeLoop && targetVertices.size() >= 3) {
-        s_steamVrWorkingPreviewVisible = wkopenvr::boundary::ShowWorkingChaperonePreview(
-            BoundaryVerticesToStanding(targetVertices),
-            BoundaryHeightToStanding(targetVertices, CalCtx.boundary.floorY),
-            BoundaryHeightToStanding(targetVertices, CalCtx.boundary.ceilingY));
-    } else if (s_steamVrWorkingPreviewVisible) {
+    if (s_steamVrWorkingPreviewVisible) {
         wkopenvr::boundary::HideWorkingChaperonePreview();
         s_steamVrWorkingPreviewVisible = false;
     }
@@ -164,6 +157,23 @@ void ApplyBoundaryCeilingY(double ceilingY)
     CalCtx.boundary.ceilingY = std::max(ceilingY, minCeiling);
 }
 
+void ApplyBoundaryFloorFromStandingFloor()
+{
+    if (!BoundaryTransformReady()) return;
+
+    const double height = BoundaryRoomHeightMeters();
+    const double floorY = wkopenvr::boundary::TargetFloorYForStandingFloor(
+        CalCtx.boundary.vertices,
+        BoundaryTargetToStandingTransform());
+    if (!std::isfinite(floorY)) return;
+
+    CalCtx.boundary.floorY = floorY;
+    CalCtx.boundary.ceilingY = floorY + height;
+    for (auto& v : CalCtx.boundary.vertices) {
+        v.y = floorY;
+    }
+}
+
 bool BoundaryLoopNearlyClosed(const std::vector<BoundaryVertex>& verts)
 {
     if (verts.size() < 3) return false;
@@ -212,17 +222,25 @@ bool ApplyFloorFromControllerPose(
 }
 
 struct FloorCaptureWindow {
-    std::vector<double> ySamples;
     double firstSampleTime = 0.0;
-    int deviceId = -1;
-    std::string trackingSystem;
+    double bestSampleTime = 0.0;
+    double bestY = 0.0;
+    bool haveBest = false;
+    size_t totalSamples = 0;
+    size_t nearBestSamples = 0;
+    int bestDeviceId = -1;
+    std::string bestTrackingSystem;
 
     void Reset()
     {
-        ySamples.clear();
         firstSampleTime = 0.0;
-        deviceId = -1;
-        trackingSystem.clear();
+        bestSampleTime = 0.0;
+        bestY = 0.0;
+        haveBest = false;
+        totalSamples = 0;
+        nearBestSamples = 0;
+        bestDeviceId = -1;
+        bestTrackingSystem.clear();
     }
 
     bool Add(
@@ -231,102 +249,45 @@ struct FloorCaptureWindow {
         const std::string& system,
         double now,
         double& floorY,
-        double& sigmaY,
-        size_t& sampleCount)
+        size_t& sampleCount,
+        int& outDeviceId,
+        std::string& outSystem)
     {
-        if (ySamples.empty()) {
+        const double y = rawPose.translation().y();
+        if (!std::isfinite(y)) return false;
+
+        if (totalSamples == 0) {
             firstSampleTime = now;
-            deviceId = static_cast<int>(id);
-            trackingSystem = system;
         }
-        if (deviceId != static_cast<int>(id) || trackingSystem != system) {
-            Reset();
-            firstSampleTime = now;
-            deviceId = static_cast<int>(id);
-            trackingSystem = system;
+        ++totalSamples;
+
+        if (!haveBest || y < bestY) {
+            bestY = y;
+            bestSampleTime = now;
+            bestDeviceId = static_cast<int>(id);
+            bestTrackingSystem = system;
+            nearBestSamples = 0;
         }
 
-        ySamples.push_back(rawPose.translation().y());
-        sampleCount = ySamples.size();
-
-        std::vector<double> sorted = ySamples;
-        std::sort(sorted.begin(), sorted.end());
-        floorY = sorted[sorted.size() / 2];
-
-        double mean = 0.0;
-        for (double y : ySamples) mean += y;
-        mean /= static_cast<double>(ySamples.size());
-        double variance = 0.0;
-        for (double y : ySamples) {
-            const double d = y - mean;
-            variance += d * d;
+        haveBest = true;
+        if (std::fabs(y - bestY) <= 0.03) {
+            ++nearBestSamples;
         }
-        sigmaY = ySamples.size() > 1
-            ? std::sqrt(variance / static_cast<double>(ySamples.size() - 1))
-            : 0.0;
 
-        const bool enoughSamples = ySamples.size() >= 10;
-        const bool enoughTime = now - firstSampleTime >= 0.35;
-        return enoughSamples && enoughTime && sigmaY <= 0.015;
+        floorY = bestY;
+        sampleCount = totalSamples;
+        outDeviceId = bestDeviceId;
+        outSystem = bestTrackingSystem;
+
+        const bool enoughSamples = totalSamples >= 20;
+        const bool enoughTime = now - firstSampleTime >= 1.0;
+        const bool bestSettled = now - bestSampleTime >= 0.35;
+        const bool stableAtBest = nearBestSamples >= 5;
+        return enoughSamples && enoughTime && bestSettled && stableAtBest;
     }
 };
 
 FloorCaptureWindow s_floorWindow;
-
-Eigen::Affine3d HmdMatrix34ToAffine(const vr::HmdMatrix34_t& m)
-{
-    Eigen::Affine3d out = Eigen::Affine3d::Identity();
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            out.linear()(r, c) = m.m[r][c];
-        }
-        out.translation()(r) = m.m[r][3];
-    }
-    return out;
-}
-
-bool TryGetControllerTipPose(
-    vr::IVRSystem* vrs,
-    vr::TrackedDeviceIndex_t deviceId,
-    const vr::VRControllerState_t& controllerState,
-    const Eigen::Affine3d& rawPose,
-    Eigen::Affine3d& outTipPose,
-    std::string& outRenderModel)
-{
-    auto* renderModels = vr::VRRenderModels();
-    if (!vrs || !renderModels) return false;
-
-    char model[vr::k_unMaxPropertyStringSize] = {};
-    vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-    vrs->GetStringTrackedDeviceProperty(
-        deviceId,
-        vr::Prop_RenderModelName_String,
-        model,
-        sizeof(model),
-        &err);
-    if (err != vr::TrackedProp_Success || model[0] == '\0') {
-        return false;
-    }
-    outRenderModel = model;
-
-    if (!renderModels->RenderModelHasComponent(model, vr::k_pch_Controller_Component_Tip)) {
-        return false;
-    }
-
-    vr::RenderModel_ControllerMode_State_t modeState{};
-    vr::RenderModel_ComponentState_t componentState{};
-    if (!renderModels->GetComponentState(
-            model,
-            vr::k_pch_Controller_Component_Tip,
-            &controllerState,
-            &modeState,
-            &componentState)) {
-        return false;
-    }
-
-    outTipPose = rawPose * HmdMatrix34ToAffine(componentState.mTrackingToComponentLocal);
-    return true;
-}
 
 void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts,
                         bool closeLoop = true,
@@ -404,7 +365,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
     const bool transformReady = BoundaryTransformReady();
 
     ImGui::TextWrapped(
-        "Set the floor, then point an Index controller at the floor, hold the trigger, and trace the play-space edge.");
+        "Draw by moving one lighthouse controller around the play-space edge. The lowest matching controller is used.");
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Stored in the target tracking system's coordinates. Unlike Quest Guardian, this\n"
@@ -421,7 +382,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
         const bool hasVerts = !CalCtx.boundary.vertices.empty();
         if (s_floorCaptureActive) {
             ImGui::TextColored(pal.statusWarn,
-                "Touch the controller to the floor and hold the trigger still.");
+                "Touch a controller to the floor. The lowest stable sample will be used.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Cancel floor set")) {
                 s_floorCaptureActive = false;
@@ -435,18 +396,11 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 s_floorWindow.Reset();
                 s_boundaryError.clear();
                 HideBoundaryPreviewOverlay();
-                Metrics::WriteLogAnnotation("[boundary-floor] waiting for controller trigger");
+                Metrics::WriteLogAnnotation("[boundary-floor] waiting for lowest controller sample");
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Touch the controller to the floor and hold the trigger briefly. The floor is set from a stable sample window, not a single frame.");
+                ImGui::SetTooltip("No trigger needed. Touch the lowest controller to the floor and hold it still for about a second.");
             }
-        }
-
-        ImGui::Spacing();
-
-        ImGui::Checkbox("SteamVR native preview##bnd_working_preview", &s_useSteamVrWorkingPreview);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Experimental. Shows SteamVR's working chaperone preview while a closed loop is available. The custom floor overlay stays active either way.");
         }
 
         ImGui::Spacing();
@@ -478,17 +432,19 @@ void DrawBoundarySection(ImVec2 panelSize) {
             if (!transformReady || s_floorCaptureActive) ImGui::BeginDisabled();
             if (ImGui::Button("Draw boundary")) {
                 s_capture.Start();
+                ApplyBoundaryFloorFromStandingFloor();
                 HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
             if (!transformReady || s_floorCaptureActive) ImGui::EndDisabled();
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Aim the controller at the floor. The pointer ray paints floor points while the trigger is held.");
+                ImGui::SetTooltip("Move the lowest lighthouse controller around the edge. Trigger input is not required.");
             }
         } else {
             if (!transformReady || s_floorCaptureActive) ImGui::BeginDisabled();
             if (ImGui::Button("Re-draw")) {
                 s_capture.Start();
+                ApplyBoundaryFloorFromStandingFloor();
                 HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
@@ -556,7 +512,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
     } else if (state == wkopenvr::boundary::CaptureState::Active) {
         const bool closePreview = BoundaryLoopNearlyClosed(s_capture.vertices());
         ImGui::TextColored(pal.statusWarn,
-            "Recording. Point at the floor and trace the edge. Click Done when finished.");
+            "Recording. Move the lowest controller around the edge, then click Done.");
         ImGui::TextDisabled("Raw vertices: %d", (int)s_capture.rawVertexCount());
         DrawPolygonPreview(s_capture.vertices(), closePreview, true);
         TickBoundaryPreviewForTargetVertices(
@@ -603,6 +559,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
                     }
                 }
                 CalCtx.boundary.vertices = verts;
+                ApplyBoundaryFloorFromStandingFloor();
                 bool appliedOk = true;
                 if (CalCtx.boundary.enabled) {
                     if (!PushTargetBoundaryToChaperone(s_boundaryError)) {
@@ -645,21 +602,20 @@ void DrawQuestAppPointerSection(ImVec2 panelSize) {
 struct BoundaryInputStats {
     int trackedControllers = 0;
     int matchingControllers = 0;
-    int fallbackAnySystem = 0;
     int skippedTrackingSystem = 0;
-    int controllerStateFailed = 0;
-    int stateOk = 0;
-    int triggerHeld = 0;
-    int buttonPressed = 0;
-    int legacyFallbackUsed = 0;
     int poseOk = 0;
     int poseInvalid = 0;
-    int axisPropertyErrors = 0;
-    int triggerAxisCount = 0;
     int lastDeviceId = -1;
-    int lastTriggerAxis = -1;
-    float lastTriggerValue = 0.0f;
+    int chosenDeviceId = -1;
+    double chosenY = 0.0;
     std::string lastTrackingSystem;
+    std::string chosenTrackingSystem;
+};
+
+struct ControllerCandidate {
+    vr::TrackedDeviceIndex_t deviceId = vr::k_unTrackedDeviceIndexInvalid;
+    std::string trackingSystem;
+    Eigen::Affine3d rawPose = Eigen::Affine3d::Identity();
 };
 
 std::string TrackingSystemName(vr::IVRSystem* vrs, vr::TrackedDeviceIndex_t deviceId) {
@@ -701,27 +657,20 @@ Eigen::Affine3d DriverPoseToWorldAffine(const vr::DriverPose_t& dp) {
 void WriteBoundaryInputSummary(const BoundaryInputStats& stats, uint64_t sessionId, size_t rawCount) {
     char lbuf[640];
     snprintf(lbuf, sizeof lbuf,
-        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d fallback_any=%d skipped_system=%d state_ok=%d state_failed=%d trigger=%d button=%d legacy=%d pose_ok=%d pose_invalid=%d trigger_axes=%d axis_prop_errors=%d last_device=%d last_system='%s' last_axis=%d last_value=%.3f",
+        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d skipped_system=%d pose_ok=%d pose_invalid=%d last_device=%d last_system='%s' chosen_device=%d chosen_system='%s' chosen_y=%.3f",
         static_cast<unsigned long long>(sessionId),
         rawCount,
         CalCtx.targetTrackingSystem.c_str(),
         stats.trackedControllers,
         stats.matchingControllers,
-        stats.fallbackAnySystem,
         stats.skippedTrackingSystem,
-        stats.stateOk,
-        stats.controllerStateFailed,
-        stats.triggerHeld,
-        stats.buttonPressed,
-        stats.legacyFallbackUsed,
         stats.poseOk,
         stats.poseInvalid,
-        stats.triggerAxisCount,
-        stats.axisPropertyErrors,
         stats.lastDeviceId,
         stats.lastTrackingSystem.c_str(),
-        stats.lastTriggerAxis,
-        stats.lastTriggerValue);
+        stats.chosenDeviceId,
+        stats.chosenTrackingSystem.c_str(),
+        stats.chosenY);
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-capture", "%s", lbuf);
 }
@@ -765,180 +714,124 @@ void CCal_TickBoundaryCapture() {
     }
 
     BoundaryInputStats stats;
-    auto tryController = [&](vr::TrackedDeviceIndex_t deviceId, bool enforceTrackingSystem, bool countDevice) {
+    std::vector<ControllerCandidate> candidates;
+    for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
         if (vrs->GetTrackedDeviceClass(deviceId) != vr::TrackedDeviceClass_Controller) {
-            return false;
+            continue;
         }
-        if (countDevice) ++stats.trackedControllers;
+        ++stats.trackedControllers;
         stats.lastDeviceId = static_cast<int>(deviceId);
         stats.lastTrackingSystem = TrackingSystemName(vrs, deviceId);
 
-        if (enforceTrackingSystem && !CalCtx.targetTrackingSystem.empty()
+        if (!CalCtx.targetTrackingSystem.empty()
             && stats.lastTrackingSystem != CalCtx.targetTrackingSystem)
         {
-            if (countDevice) ++stats.skippedTrackingSystem;
-            return false;
+            ++stats.skippedTrackingSystem;
+            continue;
         }
         ++stats.matchingControllers;
-
-        vr::VRControllerState_t st = {};
-        if (!vrs->GetControllerState(deviceId, &st, sizeof(st))) {
-            ++stats.controllerStateFailed;
-            return false;
-        }
-        ++stats.stateOk;
-
-        wkopenvr::controller_input::TriggerReading trigger;
-        if (!wkopenvr::controller_input::IsTriggerHeld(vrs, deviceId, st, 0.75f, &trigger)) {
-            stats.axisPropertyErrors += trigger.propertyErrors;
-            stats.triggerAxisCount += trigger.triggerAxisCount;
-            if (trigger.buttonPressed) ++stats.buttonPressed;
-            if (trigger.legacyFallbackUsed) ++stats.legacyFallbackUsed;
-            if (trigger.analogAxis >= 0) {
-                stats.lastTriggerAxis = trigger.analogAxis;
-                stats.lastTriggerValue = trigger.analogValue;
-            }
-            return false;
-        }
-        ++stats.triggerHeld;
-        if (trigger.buttonPressed) ++stats.buttonPressed;
-        if (trigger.legacyFallbackUsed) ++stats.legacyFallbackUsed;
-        stats.axisPropertyErrors += trigger.propertyErrors;
-        stats.triggerAxisCount += trigger.triggerAxisCount;
-        if (trigger.analogAxis >= 0) {
-            stats.lastTriggerAxis = trigger.analogAxis;
-            stats.lastTriggerValue = trigger.analogValue;
-        }
 
         const auto& dp = CalCtx.devicePoses[deviceId];
         if (!dp.poseIsValid || dp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
             ++stats.poseInvalid;
-            return false;
+            continue;
         }
         ++stats.poseOk;
 
         const Eigen::Affine3d rawPose = DriverPoseToWorldAffine(dp);
-        if (s_floorCaptureActive) {
-            double floorY = 0.0;
-            double sigmaY = 0.0;
-            size_t floorSamples = 0;
-            const bool stable = s_floorWindow.Add(
-                rawPose,
-                deviceId,
-                stats.lastTrackingSystem,
-                Metrics::timestamp(),
-                floorY,
-                sigmaY,
-                floorSamples);
-            if (!stable) {
-                if (floorSamples == 1 || (floorSamples % 15) == 0) {
-                    char fbuf[240];
-                    snprintf(fbuf, sizeof fbuf,
-                        "[boundary-floor] sampling: device=%d system='%s' samples=%zu median_y=%.3f sigma_y_mm=%.2f",
-                        static_cast<int>(deviceId),
-                        stats.lastTrackingSystem.c_str(),
-                        floorSamples,
-                        floorY,
-                        sigmaY * 1000.0);
-                    Metrics::WriteLogAnnotation(fbuf);
-                }
-                return true;
-            }
-
-            Eigen::Affine3d floorPose = rawPose;
-            floorPose.translation().y() = floorY;
-            const bool applied = ApplyFloorFromControllerPose(
-                floorPose,
-                deviceId,
-                stats.lastTrackingSystem);
-            s_floorWindow.Reset();
-            return applied;
-        }
-
-        const bool haveStandingPose =
-            CalCtx.validProfile
-            && !CalCtx.targetTrackingSystem.empty()
-            && stats.lastTrackingSystem == CalCtx.targetTrackingSystem;
-        Eigen::Affine3d standingPose = rawPose;
-        if (haveStandingPose) {
-            standingPose = wkopenvr::boundary::TransformPoseToStandingUniverse(
-                rawPose,
-                wkopenvr::boundary::ProfileTransformFromCalibration(
-                    CalCtx.calibratedRotation,
-                    CalCtx.calibratedTranslation));
-        }
-        Eigen::Affine3d tipPose = Eigen::Affine3d::Identity();
-        std::string renderModel;
-        const bool haveTipPose = TryGetControllerTipPose(
-            vrs,
-            deviceId,
-            st,
-            rawPose,
-            tipPose,
-            renderModel);
-        const bool accepted = haveTipPose
-            ? s_capture.TickPointerPose(tipPose, true, CalCtx.boundary.floorY)
-            : s_capture.Tick(rawPose, true, CalCtx.boundary.floorY);
-        if (accepted) {
-            char cbuf[760];
-            snprintf(cbuf, sizeof cbuf,
-                "[boundary-capture] accepted controller input: session=%llu device=%d system='%s' raw=%zu button=%d legacy=%d axis=%d value=%.3f fallback_any=%d standing_pose=%d aim=%s render_model='%s' raw_pos=(%.3f,%.3f,%.3f) standing_pos=(%.3f,%.3f,%.3f)",
-                static_cast<unsigned long long>(sessionId),
-                static_cast<int>(deviceId),
-                stats.lastTrackingSystem.c_str(),
-                s_capture.rawVertexCount(),
-                trigger.buttonPressed ? 1 : 0,
-                trigger.legacyFallbackUsed ? 1 : 0,
-                trigger.analogAxis,
-                trigger.analogValue,
-                stats.fallbackAnySystem,
-                haveStandingPose ? 1 : 0,
-                haveTipPose ? "tip" : "axis_fallback",
-                renderModel.c_str(),
-                rawPose.translation().x(),
-                rawPose.translation().y(),
-                rawPose.translation().z(),
-                standingPose.translation().x(),
-                standingPose.translation().y(),
-                standingPose.translation().z());
-            Metrics::WriteLogAnnotation(cbuf);
-            openvr_pair::common::DiagnosticLog("boundary-capture", "%s", cbuf);
-        }
-        return accepted;
-    };
-
-    bool captured = false;
-    for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
-        if (tryController(deviceId, true, true)) {
-            captured = true;
-            break;
-        }
+        candidates.push_back({ deviceId, stats.lastTrackingSystem, rawPose });
     }
 
-    if (!captured
-        && stats.trackedControllers > 0
-        && stats.matchingControllers == 0
-        && !CalCtx.targetTrackingSystem.empty())
-    {
-        stats.fallbackAnySystem = 1;
-        for (vr::TrackedDeviceIndex_t deviceId = 0; deviceId < vr::k_unMaxTrackedDeviceCount; ++deviceId) {
-            if (tryController(deviceId, false, false)) {
-                captured = true;
-                break;
-            }
+    if (candidates.empty()) {
+        tickPreview();
+        ++s_waitTicks;
+        if (s_waitTicks == 1 || (s_waitTicks % 120) == 0) {
+            WriteBoundaryInputSummary(stats, sessionId, s_capture.rawVertexCount());
         }
+        return;
     }
 
-    if (captured) {
+    const auto chosenIt = std::min_element(
+        candidates.begin(),
+        candidates.end(),
+        [](const ControllerCandidate& a, const ControllerCandidate& b) {
+            return a.rawPose.translation().y() < b.rawPose.translation().y();
+        });
+    const ControllerCandidate& chosen = *chosenIt;
+    stats.chosenDeviceId = static_cast<int>(chosen.deviceId);
+    stats.chosenTrackingSystem = chosen.trackingSystem;
+    stats.chosenY = chosen.rawPose.translation().y();
+
+    if (s_floorCaptureActive) {
+        double floorY = 0.0;
+        size_t floorSamples = 0;
+        int floorDeviceId = -1;
+        std::string floorSystem;
+        const bool stable = s_floorWindow.Add(
+            chosen.rawPose,
+            chosen.deviceId,
+            chosen.trackingSystem,
+            Metrics::timestamp(),
+            floorY,
+            floorSamples,
+            floorDeviceId,
+            floorSystem);
+        if (!stable) {
+            if (floorSamples == 1 || (floorSamples % 30) == 0) {
+                char fbuf[240];
+                snprintf(fbuf, sizeof fbuf,
+                    "[boundary-floor] sampling: samples=%zu best_device=%d best_system='%s' best_y=%.3f current_y=%.3f",
+                    floorSamples,
+                    floorDeviceId,
+                    floorSystem.c_str(),
+                    floorY,
+                    chosen.rawPose.translation().y());
+                Metrics::WriteLogAnnotation(fbuf);
+            }
+            tickPreview();
+            return;
+        }
+
+        Eigen::Affine3d floorPose = chosen.rawPose;
+        floorPose.translation().y() = floorY;
+        ApplyFloorFromControllerPose(
+            floorPose,
+            static_cast<vr::TrackedDeviceIndex_t>(floorDeviceId >= 0 ? floorDeviceId : static_cast<int>(chosen.deviceId)),
+            floorSystem.empty() ? chosen.trackingSystem : floorSystem);
+        s_floorWindow.Reset();
         tickPreview();
         return;
     }
 
-    tickPreview();
-    ++s_waitTicks;
-    if (s_waitTicks == 1 || (s_waitTicks % 120) == 0) {
-        WriteBoundaryInputSummary(stats, sessionId, s_capture.rawVertexCount());
+    const bool accepted = s_capture.TickProjectedPosition(
+        chosen.rawPose,
+        true,
+        CalCtx.boundary.floorY);
+    if (accepted) {
+        Eigen::Affine3d standingPose = chosen.rawPose;
+        if (CalCtx.validProfile) {
+            standingPose = wkopenvr::boundary::TransformPoseToStandingUniverse(
+                chosen.rawPose,
+                BoundaryTargetToStandingTransform());
+        }
+        char cbuf[640];
+        snprintf(cbuf, sizeof cbuf,
+            "[boundary-capture] accepted controller position: session=%llu device=%d system='%s' raw=%zu floor_y=%.3f raw_pos=(%.3f,%.3f,%.3f) standing_pos=(%.3f,%.3f,%.3f)",
+            static_cast<unsigned long long>(sessionId),
+            static_cast<int>(chosen.deviceId),
+            chosen.trackingSystem.c_str(),
+            s_capture.rawVertexCount(),
+            CalCtx.boundary.floorY,
+            chosen.rawPose.translation().x(),
+            chosen.rawPose.translation().y(),
+            chosen.rawPose.translation().z(),
+            standingPose.translation().x(),
+            standingPose.translation().y(),
+            standingPose.translation().z());
+        Metrics::WriteLogAnnotation(cbuf);
+        openvr_pair::common::DiagnosticLog("boundary-capture", "%s", cbuf);
     }
+    tickPreview();
 }
 
 // ---------------------------------------------------------------------------

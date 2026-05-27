@@ -40,6 +40,14 @@ double TransformHeightToStandingUniverse(
     double targetY,
     const Eigen::AffineCompact3d& targetToStanding);
 
+// Return the target-space horizontal Y value that maps to standing-space floor
+// height at the polygon center. This keeps saved target-space boundaries and
+// SteamVR standing-space floor output aligned.
+double TargetFloorYForStandingFloor(
+    const std::vector<BoundaryVertex>& targetSpace,
+    const Eigen::AffineCompact3d& targetToStanding,
+    double standingFloorY = 0.0);
+
 // Build/apply the same profile transform sent to the driver for the calibrated
 // target tracking system. Boundary drawing stores raw target-space points and
 // applies this transform only for preview and chaperone push.
