@@ -295,6 +295,23 @@ static void LoadHeadMount(HeadMountConfig& hm, picojson::value& value) {
 		hm.hideTracker = obj["hide_tracker"].get<bool>();
 	if (obj["offset_calibrated"].is<bool>())
 		hm.offsetCalibrated = obj["offset_calibrated"].get<bool>();
+	if (obj["driver_synth_stale_limit_ms"].is<double>())
+		hm.driverSynthTiming.staleLimitMs =
+			(int)obj["driver_synth_stale_limit_ms"].get<double>();
+	if (obj["driver_synth_grace_hold_ms"].is<double>())
+		hm.driverSynthTiming.graceHoldMs =
+			(int)obj["driver_synth_grace_hold_ms"].get<double>();
+	if (obj["driver_synth_blend_to_fallback_ms"].is<double>())
+		hm.driverSynthTiming.blendToFallbackMs =
+			(int)obj["driver_synth_blend_to_fallback_ms"].get<double>();
+	if (obj["driver_synth_stable_before_synth_ms"].is<double>())
+		hm.driverSynthTiming.stableBeforeSynthMs =
+			(int)obj["driver_synth_stable_before_synth_ms"].get<double>();
+	if (obj["driver_synth_blend_to_synth_ms"].is<double>())
+		hm.driverSynthTiming.blendToSynthMs =
+			(int)obj["driver_synth_blend_to_synth_ms"].get<double>();
+	hm.driverSynthTiming =
+		wkopenvr::headmount::ClampDriverSynthTimingConfig(hm.driverSynthTiming);
 
 	// head_from_tracker: quaternion + translation, same pattern as relative_transform.
 	if (obj["head_from_tracker"].is<picojson::object>()) {
@@ -336,6 +353,18 @@ static picojson::object SaveHeadMount(const HeadMountConfig& hm) {
 	bool offcal = hm.offsetCalibrated;
 	obj["hide_tracker"].set<bool>(hide);
 	obj["offset_calibrated"].set<bool>(offcal);
+	const auto timing =
+		wkopenvr::headmount::ClampDriverSynthTimingConfig(hm.driverSynthTiming);
+	double staleMs = (double)timing.staleLimitMs;
+	double graceMs = (double)timing.graceHoldMs;
+	double blendFallbackMs = (double)timing.blendToFallbackMs;
+	double stableSynthMs = (double)timing.stableBeforeSynthMs;
+	double blendSynthMs = (double)timing.blendToSynthMs;
+	obj["driver_synth_stale_limit_ms"].set<double>(staleMs);
+	obj["driver_synth_grace_hold_ms"].set<double>(graceMs);
+	obj["driver_synth_blend_to_fallback_ms"].set<double>(blendFallbackMs);
+	obj["driver_synth_stable_before_synth_ms"].set<double>(stableSynthMs);
+	obj["driver_synth_blend_to_synth_ms"].set<double>(blendSynthMs);
 
 	Eigen::Quaterniond q(hm.headFromTracker.rotation());
 	q.normalize();
@@ -937,7 +966,9 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	// remain identical to v3 except for the schema_version bump.
 	if (ctx.headMount.mode != HeadMountMode::Off
 		|| !ctx.headMount.trackerSerial.empty()
-		|| ctx.headMount.offsetCalibrated) {
+		|| ctx.headMount.offsetCalibrated
+		|| !wkopenvr::headmount::DriverSynthTimingIsDefault(
+			ctx.headMount.driverSynthTiming)) {
 		profile["head_mount"].set<picojson::object>(SaveHeadMount(ctx.headMount));
 	}
 	if (ctx.boundary.enabled || ctx.boundary.priorChaperoneCaptured

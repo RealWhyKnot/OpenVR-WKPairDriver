@@ -550,6 +550,9 @@ TEST(ConfigurationTest, MigrateV3ProfileLoadsWithDisabledV4Sections) {
         << "v3 profile must default head_mount.trackerSerial to empty";
     EXPECT_FALSE(ctx.headMount.offsetCalibrated)
         << "v3 profile must default head_mount.offsetCalibrated to false";
+    EXPECT_TRUE(wkopenvr::headmount::DriverSynthTimingIsDefault(
+        ctx.headMount.driverSynthTiming))
+        << "v3 profile must default DriverSynth timing";
     EXPECT_FALSE(ctx.boundary.enabled)
         << "v3 profile must default boundary.enabled to false";
 }
@@ -569,6 +572,11 @@ TEST(ConfigurationTest, V4SectionsRoundTrip) {
     src.headMount.trackerTrackingSystem = "lighthouse";
     src.headMount.hideTracker = false;
     src.headMount.offsetCalibrated = true;
+    src.headMount.driverSynthTiming.staleLimitMs = 120;
+    src.headMount.driverSynthTiming.graceHoldMs = 1400;
+    src.headMount.driverSynthTiming.blendToFallbackMs = 900;
+    src.headMount.driverSynthTiming.stableBeforeSynthMs = 650;
+    src.headMount.driverSynthTiming.blendToSynthMs = 700;
     // Set a non-identity headFromTracker.
     Eigen::Quaterniond q = Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitY())
                            * Eigen::AngleAxisd(0.05, Eigen::Vector3d::UnitX());
@@ -596,6 +604,11 @@ TEST(ConfigurationTest, V4SectionsRoundTrip) {
     EXPECT_EQ(dst.headMount.trackerTrackingSystem, "lighthouse");
     EXPECT_FALSE(dst.headMount.hideTracker);
     EXPECT_TRUE(dst.headMount.offsetCalibrated);
+    EXPECT_EQ(dst.headMount.driverSynthTiming.staleLimitMs, 120);
+    EXPECT_EQ(dst.headMount.driverSynthTiming.graceHoldMs, 1400);
+    EXPECT_EQ(dst.headMount.driverSynthTiming.blendToFallbackMs, 900);
+    EXPECT_EQ(dst.headMount.driverSynthTiming.stableBeforeSynthMs, 650);
+    EXPECT_EQ(dst.headMount.driverSynthTiming.blendToSynthMs, 700);
     // Translation must round-trip to within floating-point precision.
     EXPECT_NEAR(dst.headMount.headFromTracker.translation()(0), 0.01,  1e-9);
     EXPECT_NEAR(dst.headMount.headFromTracker.translation()(1), -0.02, 1e-9);

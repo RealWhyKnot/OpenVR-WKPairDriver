@@ -12,6 +12,7 @@
 #include <unordered_map>
 
 #include "Protocol.h"
+#include "HeadMountDriverSynthConfig.h"
 #include "WarmRestart.h"  // ValidationOutcome enum
 // We hold a unique_ptr<CalibrationCalc> in AdditionalCalibration. unique_ptr's
 // implicit destructor needs the pointee type complete at the destructor's
@@ -156,6 +157,7 @@ struct HeadMountConfig {
 	Eigen::AffineCompact3d headFromTracker = Eigen::AffineCompact3d::Identity();
 	bool hideTracker = true;
 	bool offsetCalibrated = false;
+	wkopenvr::headmount::DriverSynthTimingConfig driverSynthTiming;
 	// Runtime-resolved OpenVR device ID; not persisted. -1 means unresolved.
 	// Set each AssignTargets() call by matching trackerSerial + trackerTrackingSystem.
 	int32_t deviceID = -1;

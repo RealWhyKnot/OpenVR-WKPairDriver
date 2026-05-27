@@ -289,6 +289,7 @@ private:
 		double  headFromTrackerRot[4]   = {0.0, 0.0, 0.0, 1.0};  // xyzw
 		bool    hideTracker       = true;
 		bool    offsetCalibrated  = false;
+		wkopenvr::headmount::DriverSynthTimingConfig driverSynthTiming;
 	};
 	mutable std::mutex        m_headMountStateMutex;
 	HeadMountDriverState      m_headMountState;

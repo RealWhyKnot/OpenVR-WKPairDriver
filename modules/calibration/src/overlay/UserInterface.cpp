@@ -81,6 +81,13 @@ static void SendHeadMountConfigFromCalCtx()
 	p.deviceId         = hm.deviceID;
 	p.hideTracker      = hm.hideTracker;
 	p.offsetCalibrated = hm.offsetCalibrated;
+	const auto timing =
+		wkopenvr::headmount::ClampDriverSynthTimingConfig(hm.driverSynthTiming);
+	p.driverSynthStaleLimitMs         = static_cast<uint16_t>(timing.staleLimitMs);
+	p.driverSynthGraceHoldMs          = static_cast<uint16_t>(timing.graceHoldMs);
+	p.driverSynthBlendToFallbackMs    = static_cast<uint16_t>(timing.blendToFallbackMs);
+	p.driverSynthStableBeforeSynthMs  = static_cast<uint16_t>(timing.stableBeforeSynthMs);
+	p.driverSynthBlendToSynthMs       = static_cast<uint16_t>(timing.blendToSynthMs);
 	{
 		size_t len = hm.trackerSerial.size();
 		if (len >= sizeof p.trackerSerial) len = sizeof p.trackerSerial - 1;

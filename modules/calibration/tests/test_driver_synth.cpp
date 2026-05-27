@@ -133,6 +133,21 @@ TEST(DriverSynth, Tracker_stale)
     EXPECT_FALSE(Compose(state, staleTracker, now, out));
 }
 
+TEST(DriverSynth, CustomStaleLimitAcceptsLongerTrackerGap)
+{
+    using ms = std::chrono::milliseconds;
+    const auto now = clk::now();
+    const SynthState state = MakeState();
+    TrackerSnapshot trackerSnap = FreshSnap(MakePose(0.0, 1.7, 0.0), now);
+    trackerSnap.capturedAt = now - ms(kStaleLimitMs + 20);
+
+    SourceBlendConfig cfg{};
+    cfg.staleLimitMs = static_cast<int>(kStaleLimitMs + 50);
+
+    vr::DriverPose_t out{};
+    EXPECT_TRUE(Compose(state, trackerSnap, now, out, cfg));
+}
+
 TEST(DriverSynth, Upstream_hmd_staleness_does_not_block_tracker_synth)
 {
     const auto now = clk::now();
@@ -272,6 +287,26 @@ TEST(DriverSynthBlend, BriefStaleTrackerHoldsLastSynthPose)
     EXPECT_NEAR(out.vecPosition[0], 0.0, 1e-9);
 }
 
+TEST(DriverSynthBlend, CustomGraceHoldMasksLongerTrackerDropout)
+{
+    using ms = std::chrono::milliseconds;
+    const auto t0 = clk::now();
+    SourceBlendState blend{};
+    SourceBlendConfig cfg{};
+    cfg.graceHoldMs = static_cast<int>(kGraceHoldMs + 500);
+    vr::DriverPose_t out{};
+
+    const vr::DriverPose_t fallback = MakePose(10.0, 1.7, 0.0);
+    const vr::DriverPose_t synth = MakePose(0.0, 1.7, 0.0);
+
+    StepSourceBlend(blend, fallback, &synth, true, t0, out, cfg);
+    auto r = StepSourceBlend(blend, fallback, nullptr, false,
+                             t0 + ms(kGraceHoldMs + 250), out, cfg);
+
+    EXPECT_EQ(r.phase, SourceBlendPhase::GraceHold);
+    EXPECT_NEAR(out.vecPosition[0], 0.0, 1e-9);
+}
+
 TEST(DriverSynthBlend, PersistentTrackerLossBlendsTowardFallback)
 {
     using ms = std::chrono::milliseconds;
@@ -328,6 +363,37 @@ TEST(DriverSynthBlend, RecoveredTrackerWaitsThenBlendsBackToSynth)
     EXPECT_EQ(r.phase, SourceBlendPhase::BlendingToSynth);
     EXPECT_GT(out.vecPosition[0], 2.0);
     EXPECT_LT(out.vecPosition[0], 10.0);
+}
+
+TEST(DriverSynthBlend, CustomStableBeforeSynthDelaysReturn)
+{
+    using ms = std::chrono::milliseconds;
+    const auto t0 = clk::now();
+    SourceBlendState blend{};
+    SourceBlendConfig cfg{};
+    cfg.stableBeforeSynthMs = static_cast<int>(kStableBeforeSynthMs + 500);
+    vr::DriverPose_t out{};
+
+    const vr::DriverPose_t fallback = MakePose(10.0, 1.7, 0.0);
+    const vr::DriverPose_t synthA = MakePose(0.0, 1.7, 0.0);
+    const vr::DriverPose_t synthB = MakePose(2.0, 1.7, 0.0);
+
+    StepSourceBlend(blend, fallback, &synthA, true, t0, out, cfg);
+    StepSourceBlend(blend, fallback, nullptr, false, t0 + ms(1), out, cfg);
+    StepSourceBlend(blend, fallback, nullptr, false,
+                    t0 + ms(kGraceHoldMs + 2), out, cfg);
+    StepSourceBlend(blend, fallback, nullptr, false,
+                    t0 + ms(kGraceHoldMs + kBlendToFallbackMs + 4), out, cfg);
+    ASSERT_EQ(blend.phase, SourceBlendPhase::FallbackStable);
+
+    const auto recovered = t0 + ms(kGraceHoldMs + kBlendToFallbackMs + 20);
+    StepSourceBlend(blend, fallback, &synthB, true, recovered, out, cfg);
+    auto r = StepSourceBlend(blend, fallback, &synthB, true,
+                             recovered + ms(kStableBeforeSynthMs + 250),
+                             out, cfg);
+
+    EXPECT_EQ(r.phase, SourceBlendPhase::WaitingForStableSynth);
+    EXPECT_NEAR(out.vecPosition[0], 10.0, 1e-9);
 }
 
 TEST(DriverSynthBlend, BlendPoseNormalizesRotations)

@@ -20,6 +20,8 @@
 
 #include <openvr_driver.h>
 
+#include "HeadMountDriverSynthConfig.h"
+
 namespace driver_synth {
 
 // Parameters captured from the cached HeadMountDriverState. Plain POD so the
@@ -45,23 +47,24 @@ struct TrackerSnapshot {
 };
 
 // Freshness limit. Any tracker snapshot older than this is treated as stale.
-constexpr int64_t kStaleLimitMs = 30;
+constexpr int64_t kStaleLimitMs = wkopenvr::headmount::kDriverSynthStaleLimitMsDefault;
 
-constexpr int64_t kGraceHoldMs = 150;
-constexpr int64_t kBlendToFallbackMs = 350;
-constexpr int64_t kStableBeforeSynthMs = 200;
-constexpr int64_t kBlendToSynthMs = 350;
+constexpr int64_t kGraceHoldMs = wkopenvr::headmount::kDriverSynthGraceHoldMsDefault;
+constexpr int64_t kBlendToFallbackMs = wkopenvr::headmount::kDriverSynthBlendToFallbackMsDefault;
+constexpr int64_t kStableBeforeSynthMs = wkopenvr::headmount::kDriverSynthStableBeforeSynthMsDefault;
+constexpr int64_t kBlendToSynthMs = wkopenvr::headmount::kDriverSynthBlendToSynthMsDefault;
 
 // Returns true when the snapshot is present, valid, and not older than
 // kStaleLimitMs relative to `now`.
 inline bool IsTrackerFresh(const TrackerSnapshot& snap,
-                            std::chrono::steady_clock::time_point now)
+                            std::chrono::steady_clock::time_point now,
+                            int64_t staleLimitMs = kStaleLimitMs)
 {
     if (!snap.valid) return false;
     if (!snap.pose.poseIsValid) return false;
     using ms = std::chrono::milliseconds;
     return std::chrono::duration_cast<ms>(now - snap.capturedAt).count()
-           <= kStaleLimitMs;
+           <= staleLimitMs;
 }
 
 inline int64_t SnapshotAgeMs(const TrackerSnapshot& snap,
@@ -85,7 +88,8 @@ inline int64_t SnapshotAgeMs(const TrackerSnapshot& snap,
 inline bool Compose(const SynthState& state,
                     const TrackerSnapshot& trackerSnap,
                     std::chrono::steady_clock::time_point now,
-                    vr::DriverPose_t& out)
+                    vr::DriverPose_t& out,
+                    const wkopenvr::headmount::DriverSynthTimingConfig& config = {})
 {
     // Mode and resolver gate.
     if (state.mode != 3 /*DriverSynth*/) return false;
@@ -93,7 +97,8 @@ inline bool Compose(const SynthState& state,
     if (!state.offsetCalibrated) return false;
 
     // Tracker freshness.
-    if (!IsTrackerFresh(trackerSnap, now)) return false;
+    const auto timing = wkopenvr::headmount::ClampDriverSynthTimingConfig(config);
+    if (!IsTrackerFresh(trackerSnap, now, timing.staleLimitMs)) return false;
 
     // Reject snapshots captured for a different device. If the user switched
     // which tracker drives the head-mount between snapshot write and synth
@@ -149,12 +154,7 @@ inline const char* PhaseName(SourceBlendPhase phase)
     return "unknown";
 }
 
-struct SourceBlendConfig {
-    int64_t graceHoldMs         = kGraceHoldMs;
-    int64_t blendToFallbackMs   = kBlendToFallbackMs;
-    int64_t stableBeforeSynthMs = kStableBeforeSynthMs;
-    int64_t blendToSynthMs      = kBlendToSynthMs;
-};
+using SourceBlendConfig = wkopenvr::headmount::DriverSynthTimingConfig;
 
 struct SourceBlendState {
     SourceBlendPhase phase = SourceBlendPhase::Uninitialized;
@@ -292,6 +292,8 @@ inline SourceBlendResult StepSourceBlend(
     vr::DriverPose_t& out,
     const SourceBlendConfig& config = {})
 {
+    const SourceBlendConfig timing =
+        wkopenvr::headmount::ClampDriverSynthTimingConfig(config);
     const SourceBlendPhase previous = state.phase;
     auto finish = [&](SourceBlendPhase phase, double alpha) {
         state.currentPose = out;
@@ -339,12 +341,12 @@ inline SourceBlendResult StepSourceBlend(
         }
 
         const double stableAlpha =
-            DurationAlpha(state.stableSynthSince, now, config.stableBeforeSynthMs);
+            DurationAlpha(state.stableSynthSince, now, timing.stableBeforeSynthMs);
         if (stableAlpha < 1.0 &&
             state.phase != SourceBlendPhase::BlendingToSynth) {
             if (state.phase == SourceBlendPhase::BlendingToFallback) {
                 const double fallbackAlpha =
-                    DurationAlpha(state.phaseStartedAt, now, config.blendToFallbackMs);
+                    DurationAlpha(state.phaseStartedAt, now, timing.blendToFallbackMs);
                 if (fallbackAlpha >= 1.0) {
                     out = fallbackPose;
                     SetPhase(state, SourceBlendPhase::FallbackStable, now);
@@ -364,7 +366,7 @@ inline SourceBlendResult StepSourceBlend(
         }
 
         const double alpha =
-            DurationAlpha(state.phaseStartedAt, now, config.blendToSynthMs);
+            DurationAlpha(state.phaseStartedAt, now, timing.blendToSynthMs);
         if (alpha >= 1.0) {
             out = *synthPose;
             SetPhase(state, SourceBlendPhase::SynthStable, now);
@@ -384,7 +386,7 @@ inline SourceBlendResult StepSourceBlend(
 
     if (state.phase == SourceBlendPhase::GraceHold) {
         const double alpha =
-            DurationAlpha(state.phaseStartedAt, now, config.graceHoldMs);
+            DurationAlpha(state.phaseStartedAt, now, timing.graceHoldMs);
         if (alpha < 1.0) {
             out = state.blendStartPose;
             return finish(state.phase, alpha);
@@ -398,7 +400,7 @@ inline SourceBlendResult StepSourceBlend(
 
     if (state.phase == SourceBlendPhase::BlendingToFallback) {
         const double alpha =
-            DurationAlpha(state.phaseStartedAt, now, config.blendToFallbackMs);
+            DurationAlpha(state.phaseStartedAt, now, timing.blendToFallbackMs);
         if (alpha >= 1.0) {
             out = fallbackPose;
             SetPhase(state, SourceBlendPhase::FallbackStable, now);

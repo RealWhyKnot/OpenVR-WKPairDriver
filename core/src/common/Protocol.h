@@ -233,7 +233,12 @@ namespace protocol
 	// bump forces a paired overlay+driver reinstall so a stale driver
 	// rejects the handshake rather than dispatching into a mismatched
 	// union layout.
-	const uint32_t Version = 25;
+	//
+	// v26 (2026-05-27): SetHeadMountConfig gains dev DriverSynth timing
+	// fields for tracker stale detection, grace hold, fallback blend,
+	// stable-return hold, and synth blend. The payload grows, so paired
+	// overlay+driver install is required.
+	const uint32_t Version = 26;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps

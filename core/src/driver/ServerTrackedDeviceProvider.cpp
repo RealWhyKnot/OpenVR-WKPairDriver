@@ -771,6 +771,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	const char* driverSynthFallbackReason = "inactive";
 	int64_t driverSynthTrackerAgeMs = -1;
 	auto driverSynthNow = std::chrono::steady_clock::now();
+	wkopenvr::headmount::DriverSynthTimingConfig driverSynthTiming{};
 	vr::DriverPose_t driverSynthPose{};
 	{
 		std::lock_guard<std::mutex> hmLk(m_headMountStateMutex);
@@ -814,12 +815,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			       sizeof synthState.headFromTrackerTrans);
 			memcpy(synthState.headFromTrackerRot, hmState.headFromTrackerRot,
 			       sizeof synthState.headFromTrackerRot);
+			driverSynthTiming = hmState.driverSynthTiming;
 
 			driverSynthNow = std::chrono::steady_clock::now();
 			driverSynthTrackerAgeMs =
 				driver_synth::SnapshotAgeMs(trackerCopy, driverSynthNow);
 			driverSynthComposeOk = driver_synth::Compose(
-				synthState, trackerCopy, driverSynthNow, driverSynthPose);
+				synthState, trackerCopy, driverSynthNow, driverSynthPose,
+				driverSynthTiming);
 
 			// Synthesis failure no longer hard-switches the HMD pose source here.
 			// The normal HMD path below first builds the Quest fallback pose, then
@@ -1081,7 +1084,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			driverSynthComposeOk ? &driverSynthPose : nullptr,
 			driverSynthComposeOk,
 			driverSynthNow,
-			blendedPose);
+			blendedPose,
+			driverSynthTiming);
 		pose = blendedPose;
 		if (blendResult.phaseChanged) {
 			LOG("[driver-synth] source_blend phase=%s prev=%s reason='%s' alpha=%.3f tracker_age_ms=%lld",
@@ -1148,6 +1152,13 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 	next.deviceId         = cfg.deviceId;
 	next.hideTracker      = cfg.hideTracker;
 	next.offsetCalibrated = cfg.offsetCalibrated;
+	next.driverSynthTiming = wkopenvr::headmount::ClampDriverSynthTimingConfig({
+		(int)cfg.driverSynthStaleLimitMs,
+		(int)cfg.driverSynthGraceHoldMs,
+		(int)cfg.driverSynthBlendToFallbackMs,
+		(int)cfg.driverSynthStableBeforeSynthMs,
+		(int)cfg.driverSynthBlendToSynthMs,
+	});
 
 	// NUL-safe copy of the fixed-size name buffers.
 	{
@@ -1164,12 +1175,13 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 	       sizeof cfg.headFromTrackerRot);
 
 	bool stateChanged = false;
+	bool sourceChanged = false;
 	{
 		HeadMountDriverState prev{};
 		std::lock_guard<std::mutex> lk(m_headMountStateMutex);
 		prev = m_headMountState;
 		m_headMountState = next;
-		stateChanged =
+		sourceChanged =
 			next.mode != prev.mode
 			|| next.deviceId != prev.deviceId
 			|| next.hideTracker != prev.hideTracker
@@ -1181,14 +1193,27 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 			          sizeof next.headFromTrackerTrans) != 0
 			|| memcmp(next.headFromTrackerRot, prev.headFromTrackerRot,
 			          sizeof next.headFromTrackerRot) != 0;
+		stateChanged = sourceChanged
+			|| next.driverSynthTiming.staleLimitMs != prev.driverSynthTiming.staleLimitMs
+			|| next.driverSynthTiming.graceHoldMs != prev.driverSynthTiming.graceHoldMs
+			|| next.driverSynthTiming.blendToFallbackMs != prev.driverSynthTiming.blendToFallbackMs
+			|| next.driverSynthTiming.stableBeforeSynthMs != prev.driverSynthTiming.stableBeforeSynthMs
+			|| next.driverSynthTiming.blendToSynthMs != prev.driverSynthTiming.blendToSynthMs;
 		// Log on change only to avoid flooding when the overlay re-sends
 		// the same config on every AssignTargets scan.
 		if (stateChanged) {
-			LOG("[driver-head-mount] config: mode=%d deviceID=%d offsetCalibrated=%d",
-			    next.mode, next.deviceId, (int)next.offsetCalibrated);
+			LOG("[driver-head-mount] config: mode=%d deviceID=%d offsetCalibrated=%d"
+				" synth_stale_ms=%d grace_ms=%d blend_fallback_ms=%d"
+				" stable_synth_ms=%d blend_synth_ms=%d",
+			    next.mode, next.deviceId, (int)next.offsetCalibrated,
+			    next.driverSynthTiming.staleLimitMs,
+			    next.driverSynthTiming.graceHoldMs,
+			    next.driverSynthTiming.blendToFallbackMs,
+			    next.driverSynthTiming.stableBeforeSynthMs,
+			    next.driverSynthTiming.blendToSynthMs);
 		}
 	}
-	if (stateChanged) {
+	if (sourceChanged) {
 		std::lock_guard<std::mutex> snapLk(m_trackerSnapMutex);
 		m_trackerSnap = driver_synth::TrackerSnapshot{};
 		m_driverSynthBlendReset.store(true, std::memory_order_relaxed);
