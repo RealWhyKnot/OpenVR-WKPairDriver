@@ -1,6 +1,6 @@
 # WKOpenVR
 
-Umbrella SteamVR overlay + driver. One binary (`WKOpenVR.exe`) and one driver DLL (`driver_wkopenvr.dll`) host every feature module under `modules/`. Each module is toggled on or off via a marker flag file the overlay's Modules tab manages.
+Umbrella SteamVR overlay + driver. One binary (`WKOpenVR.exe`) and one driver DLL (`driver_wkopenvr.dll`) host the release modules under `modules/`. Each module is toggled on or off via a marker flag file the overlay's Modules tab manages.
 
 ## Modules in release
 
@@ -12,7 +12,6 @@ Umbrella SteamVR overlay + driver. One binary (`WKOpenVR.exe`) and one driver DL
 
 These modules live under `modules/` and build in dev (`./build.ps1` with no `-Release` flag), but are excluded from published release artifacts via `modules/<slug>/disabled-in-release.flag` until they stabilise.
 
-- **FaceTracking** -- face and eye tracking integration with a C# .NET 10 host sidecar. ([deep-dive](Module-FaceTracking))
 - **OSCRouter** -- OSC fan-out of pose / tracker / chatbox data to multiple downstream consumers.
 - **Captions** -- on-device speech recognition and translation via a whisper.cpp + CTranslate2 host sidecar.
 - **Phantom** -- tracker dropout dead-reckoning, IK fallback, and virtual-tracker placeholders, with an out-of-process ML pose-completion sidecar.

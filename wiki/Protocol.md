@@ -2,7 +2,7 @@
 
 ## Version
 
-`protocol::Version = 15`, defined in [core/src/common/Protocol.h](https://github.com/RealWhyKnot/WKOpenVR/blob/main/core/src/common/Protocol.h). The handshake fails closed on mismatch -- a paired install where overlay and driver are different versions is rejected at connect time rather than silently misrouting request bytes.
+`protocol::Version = 25`, defined in [core/src/common/Protocol.h](https://github.com/RealWhyKnot/WKOpenVR/blob/main/core/src/common/Protocol.h). The handshake fails closed on mismatch -- a paired install where overlay and driver are different versions is rejected at connect time rather than silently misrouting request bytes.
 
 ### Bump discipline
 
@@ -21,7 +21,6 @@ Each bump is documented in a comment above the `const uint32_t Version = N;` lin
 | `\\.\pipe\OpenVR-Calibration` | overlay <-> driver | calibration |
 | `\\.\pipe\WKOpenVR-Smoothing` | overlay <-> driver | smoothing |
 | `\\.\pipe\WKOpenVR-InputHealth` | overlay <-> driver | inputhealth |
-| `\\.\pipe\WKOpenVR-FaceTracking` | overlay <-> driver | facetracking |
 
 Each overlay sends only its own request types. The driver routes by request type and rejects messages on the wrong pipe. Pipe names are exposed in `Protocol.h` as `OPENVR_PAIRDRIVER_*_PIPE_NAME` macros so both sides resolve them through a single source of truth.
 
@@ -31,7 +30,6 @@ Each overlay sends only its own request types. The driver routes by request type
 |---|---|---|
 | `WKOpenVRPoseMemoryV2` | driver -> overlay | calibration pose telemetry |
 | `WKOpenVRInputHealthMemoryV1` | driver -> overlay | 10 Hz input-health snapshot ring |
-| `WKOpenVRFaceTrackingFrameRingV2` | host -> driver | 32-slot seqlock ring, ~120 Hz face/eye samples |
 
 The seqlock discipline used by the shmem classes:
 
@@ -55,9 +53,6 @@ The seqlock discipline used by the shmem classes:
 | `RequestResetInputHealthStats` | v10 | inputhealth: clear stats for a device |
 | `RequestSetInputHealthCompensation` | v11 | inputhealth: push learned compensation curves |
 | `RequestSetDevicePrediction` | v12 | smoothing: per-device pose-prediction strength |
-| `RequestSetFaceTrackingConfig` | v15 | facetracking: master config + module uuid |
-| `RequestSetFaceCalibrationCommand` | v15 | facetracking: begin/end/save/reset learned bounds |
-| `RequestSetFaceActiveModule` | v15 | facetracking: control-channel module switch |
 
 Responses are limited to `ResponseHandshake` and `ResponseSuccess`; failure paths use named-pipe error codes so the driver doesn't have to invent its own.
 

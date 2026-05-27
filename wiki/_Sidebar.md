@@ -12,7 +12,6 @@
 - [Calibration](Module-Calibration)
 - [Smoothing](Module-Smoothing)
 - [InputHealth](Module-InputHealth)
-- [FaceTracking](Module-FaceTracking)
 
 **Issues**
 

@@ -1,10 +1,10 @@
 # WKOpenVR
 
-Umbrella SteamVR overlay + driver. One binary (`WKOpenVR.exe`) and one driver DLL (`driver_wkopenvr.dll`) host every feature module under `modules/`.
+Umbrella SteamVR overlay + driver. One binary (`WKOpenVR.exe`) and one driver DLL (`driver_wkopenvr.dll`) host the release modules under `modules/`.
 
 ## Built on top of
 
-Two of the released feature modules build on existing open-source projects; the others were written from scratch in this repository.
+The calibration module builds on an existing open-source project; the other release modules were written in this repository.
 
 **Calibration** descends from [pushrax/OpenVR-SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) by Justin Li (MIT). The fork chain that reached here:
 
@@ -15,8 +15,6 @@ Two of the released feature modules build on existing open-source projects; the 
 - this repository's `modules/calibration/`
 
 Calibration code that traces back to any of those forks remains available under MIT terms from each origin repo; the combined work in this repository is GPL-3.0.
-
-**Face tracking** descends from [benaclejames/VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) by Benjamin Clarke and contributors (Apache-2.0). The C# host sidecar, reflection bridge for upstream VRCFT modules, and the legacy module registry are derived from that project. The driver-side integration, shmem ring protocol, and overlay UI are new here.
 
 Third-party libraries linked into the binary (OpenVR SDK, MinHook, ImGui, ImPlot, GLFW, Eigen, picojson, stb_image, gl3w, whisper.cpp, CTranslate2, ONNX Runtime, .NET runtime libraries) carry their own licenses; the full texts are reproduced in [NOTICE](NOTICE).
 
@@ -34,7 +32,7 @@ A SteamVR driver hooks into `vrserver.exe` via MinHook. MinHook is process-globa
 
 ## Build
 
-Requires CMake 3.15+, Visual Studio Build Tools 2022 (or the VS 2022 IDE), and submodules initialised. The .NET 10 SDK is needed for the in-development face-tracking host; the build skips that target when the SDK is missing or when `-DOPENVR_PAIR_BUILD_FACE_HOST=OFF` is passed.
+Requires CMake 3.15+, Visual Studio Build Tools 2022 (or the VS 2022 IDE), and submodules initialised.
 
 ```
 git clone --recursive https://github.com/RealWhyKnot/WKOpenVR
@@ -48,6 +46,10 @@ Output:
 - `build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll`
 
 For local SteamVR iteration, run `./quick.ps1`. It builds, closes SteamVR and Steam for the deploy copy, installs the overlay files plus the full driver tree into the local SteamVR install, verifies deployed hashes, then launches SteamVR through Steam. Run `./test.ps1` when you only need a build plus the local test suite.
+
+## Diagnostics
+
+Debug logging is controlled from the Logs tab. When enabled, logs are written under `%LocalAppDataLow%\WKOpenVR\Logs\`; calibration also writes a replayable `spacecal_log.<ts>.txt` CSV that opens as soon as logging is enabled and flushes every row to disk. The Logs tab shows the active SpaceCal file path, size, row count, annotation count, open status, and a flush button.
 
 ## Pipes and shared memory
 

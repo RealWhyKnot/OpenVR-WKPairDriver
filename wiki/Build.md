@@ -4,7 +4,6 @@
 
 - **Visual Studio Build Tools 2022** (or the VS 2022 IDE) with the C++ workload installed, plus the Windows 10 SDK component.
 - **CMake 4.x** -- the build wraps `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` because the `minhook` submodule pins `cmake_minimum_required(2.8.12)` which CMake 4 rejects.
-- **.NET 10 SDK** -- needed by the face-tracking host (`WKOpenVR.FaceModuleHost`). The build is gated by the `OPENVR_PAIR_BUILD_FACE_HOST` CMake option (default `ON`); pass `-DOPENVR_PAIR_BUILD_FACE_HOST=OFF` to skip if the SDK is unavailable. With the host disabled the driver still loads, but the FaceTracking feature stays inert (the supervisor logs once that the host exe is missing).
 - **NSIS** -- only needed when building the installer; release CI does this step. Local dev builds skip the installer unless `-Release` is passed.
 
 ## One-shot build
@@ -15,11 +14,10 @@ cd WKOpenVR
 ./build.ps1
 ```
 
-`build.ps1` activates `.githooks/` via `core.hooksPath` on first run, stamps `version.txt` and `modules/calibration/src/overlay/BuildStamp.h`, configures via CMake (`-G "Visual Studio 17 2022" -A x64`), runs MSBuild, then stages the C# face-tracking host into the driver tree at `build/driver_wkopenvr/resources/facetracking/host/`. Output:
+`build.ps1` activates `.githooks/` via `core.hooksPath` on first run, stamps `version.txt` and `modules/calibration/src/overlay/BuildStamp.h`, configures via CMake (`-G "Visual Studio 17 2022" -A x64`), and runs MSBuild. Output:
 
 - `build/artifacts/Release/WKOpenVR.exe` -- umbrella overlay
 - `build/driver_wkopenvr/bin/win64/driver_wkopenvr.dll` -- shared driver
-- `build/driver_wkopenvr/resources/facetracking/host/WKOpenVR.FaceModuleHost.exe` -- face-tracking sidecar (when the host build is enabled)
 
 ## Incremental builds
 
@@ -44,7 +42,7 @@ The default Windows shell is PowerShell 5.1, which wraps every stderr line from 
 
 ## Tests
 
-The gtest suite covers calibration, inputhealth, facetracking, OSC routing, and captions logic. Run:
+The gtest suite covers calibration, inputhealth, smoothing, and the disabled-in-release development modules. Run:
 
 ```
 ./test.ps1
