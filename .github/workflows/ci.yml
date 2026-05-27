@@ -191,6 +191,13 @@ jobs:
           if ($exitUmbrella -ne 0) { throw "makensis (umbrella) exited $exitUmbrella" }
           if ($exitFeature  -ne 0) { throw "makensis (Calibration) exited $exitFeature" }
 
+      - name: Test installer uninstall/reinstall
+        shell: pwsh
+        run: |
+          ./.github/scripts/Test-InstallerRoundTrip.ps1 `
+            -InstallerPath 'build/artifacts/Release/WKOpenVR-Installer.exe' `
+            -AllowUserDataRemoval
+
       - name: Stage artifacts
         shell: pwsh
         run: |

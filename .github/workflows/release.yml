@@ -474,6 +474,13 @@ jobs:
           "sha256=$hash"                           >> $env:GITHUB_OUTPUT
           Write-Host "Installer: $versioned ($size bytes) sha256=$hash"
 
+      - name: Test installer uninstall/reinstall
+        shell: pwsh
+        run: |
+          ./.github/scripts/Test-InstallerRoundTrip.ps1 `
+            -InstallerPath '${{ steps.installer.outputs.path }}' `
+            -AllowUserDataRemoval
+
       - name: Build per-feature NSIS installers
         id: feature_installers
         shell: pwsh
