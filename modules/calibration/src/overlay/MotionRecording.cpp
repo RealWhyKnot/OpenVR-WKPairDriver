@@ -230,17 +230,36 @@ ReplayResult RunReplay(const LoadedRecording& rec, const ReplayOptions& opts) {
 	CalibrationCalc calc;
 	calc.enableStaticRecalibration = false;
 	calc.lockRelativePosition = false;
+	const bool boundedContinuous =
+		opts.continuous && opts.maxContinuousSamples > 0;
+	const std::size_t continuousWindow =
+		boundedContinuous ? opts.maxContinuousSamples : 0;
+	const std::size_t continuousDrop =
+		boundedContinuous ? std::max<std::size_t>(1, continuousWindow / 10) : 0;
 
 	res.trace.reserve(rec.rows.size());
 
 	for (const auto& row : rec.rows) {
 		Sample s(row.ref, row.target, row.timestamp);
 		calc.PushSample(s);
+		if (boundedContinuous) {
+			while (calc.SampleCount() > continuousWindow) {
+				calc.ShiftSample();
+			}
+		}
+		res.maxSamplesInWindow = std::max(res.maxSamplesInWindow,
+			static_cast<int>(calc.SampleCount()));
 
 		ReplayTickResult tick;
 		tick.timestamp = row.timestamp;
 
 		if (opts.continuous) {
+			if (boundedContinuous && calc.SampleCount() < continuousWindow) {
+				tick.rejectReason = "waiting_for_samples";
+				res.trace.push_back(std::move(tick));
+				continue;
+			}
+
 			bool lerp = false;
 			const bool ok = calc.ComputeIncremental(lerp, opts.threshold,
 				opts.maxRelError, opts.ignoreOutliers);
@@ -258,6 +277,12 @@ ReplayResult RunReplay(const LoadedRecording& rec, const ReplayOptions& opts) {
 				}
 			}
 			if (!ok) tick.rejectReason = "rejected";
+
+			if (boundedContinuous) {
+				for (std::size_t i = 0; i < continuousDrop; ++i) {
+					calc.ShiftSample();
+				}
+			}
 		} else {
 			// Oneshot mode just keeps appending samples. The single Compute below
 			// runs after the loop. Per-tick trace stays as samples-only.

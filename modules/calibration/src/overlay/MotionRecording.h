@@ -82,6 +82,7 @@ struct ReplayOptions {
 	double threshold = 1.5;       // continuousCalibrationThreshold
 	double maxRelError = 0.005;
 	bool   ignoreOutliers = true;
+	std::size_t maxContinuousSamples = 200; // 0 keeps every sample; live continuous mode uses a bounded window.
 };
 
 // Result summary. Aggregates whatever is useful at a glance — counts and the
@@ -92,6 +93,7 @@ struct ReplayResult {
 	int    accepts = 0;
 	int    rejects = 0;
 	int    watchdogResets = 0;
+	int    maxSamplesInWindow = 0;
 	double finalErrorMm = 0.0;    // NaN if calc never produced a valid result
 	Eigen::AffineCompact3d finalTransform = Eigen::AffineCompact3d::Identity();
 	bool   finalTransformValid = false;
@@ -99,9 +101,9 @@ struct ReplayResult {
 	std::string error;            // populated on failure
 };
 
-// Run the replay synchronously. Cheap enough for in-frame execution: a
-// 60-second recording at 60Hz is ~3600 ticks and the math is well under a
-// millisecond per tick.
+// Run the replay synchronously. Continuous replay uses a bounded sample window
+// so long captures exercise the same solver shape as the live refiner instead
+// of growing an unbounded history.
 ReplayResult RunReplay(const LoadedRecording& rec, const ReplayOptions& opts);
 
 // List recent v2 log files in the user's logs directory, newest first. Used
