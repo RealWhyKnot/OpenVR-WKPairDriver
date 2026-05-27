@@ -7,6 +7,7 @@
 #include "CalibrationProfileApply.h"
 #include "CalibrationRecoveryTick.h"
 #include "CalibrationMetrics.h"
+#include "BuildChannel.h"
 #include "Configuration.h"
 #include "IPCClient.h"
 #include "CalibrationCalc.h"
@@ -30,6 +31,7 @@
 #include "BoundaryRePush.h"   // TickBoundaryRePush -- safety boundary chaperone re-push.
 #include "ControllerInput.h"
 #include "HeadMountOffsetModal.h" // wkopenvr::headmount::FeedSolverTick -- offset modal solver feed.
+#include "HeadMountPoseSampling.h"
 #include "HeadMountTargetBinding.h"
 
 // Boundary capture session tick (defined in UserInterfaceTabsBoundary.cpp).
@@ -2334,6 +2336,67 @@ void CalibrationTick(double time)
 			}
 		}
 	}
+
+#if WKOPENVR_BUILD_IS_DEV
+	if (ctx.state == CalibrationState::Continuous
+		&& ctx.headMount.mode == HeadMountMode::DriverSynth)
+	{
+		const bool targetMatches =
+			wkopenvr::headmount::HeadMountMatchesContinuousTarget(ctx);
+		const auto synthDecision =
+			spacecal::headmount::EvaluateDriverSynthContinuousSuspend(
+				ctx.headMount,
+				/*inContinuous=*/true,
+				targetMatches,
+				ctx.devicePoses,
+				vr::k_unMaxTrackedDeviceCount);
+
+		static bool s_driverSynthSolveSuspended = false;
+		static double s_lastDriverSynthSuspendLog = -1e9;
+		static std::string s_lastDriverSynthReason;
+		const bool reasonChanged =
+			s_lastDriverSynthReason != synthDecision.reason;
+		const bool shouldLog =
+			reasonChanged
+			|| synthDecision.suspend != s_driverSynthSolveSuspended
+			|| (time - s_lastDriverSynthSuspendLog) >= 5.0;
+
+		if (synthDecision.suspend) {
+			if (shouldLog) {
+				char sbuf[320];
+				snprintf(sbuf, sizeof sbuf,
+					"continuous_solve_suspended: reason=head_mount_driver_synth"
+					" target_matches=%d deviceID=%d hmd_proxy_delta_cm=%.2f",
+					(int)targetMatches,
+					(int)ctx.headMount.deviceID,
+					synthDecision.hmdProxyDeltaM * 100.0);
+				Metrics::WriteLogAnnotation(sbuf);
+				s_lastDriverSynthSuspendLog = time;
+				s_lastDriverSynthReason = synthDecision.reason;
+			}
+			s_driverSynthSolveSuspended = true;
+			ctx.wantedUpdateInterval = 0.1;
+			return;
+		}
+
+		if (shouldLog) {
+			char sbuf[360];
+			snprintf(sbuf, sizeof sbuf,
+				"continuous_solve_not_suspended: mode=driver_synth reason=%s"
+				" target_matches=%d deviceID=%d hmd_proxy_delta_cm=%.2f",
+				synthDecision.reason,
+				(int)targetMatches,
+				(int)ctx.headMount.deviceID,
+				synthDecision.hmdProxyDeltaM >= 0.0
+					? synthDecision.hmdProxyDeltaM * 100.0
+					: -1.0);
+			Metrics::WriteLogAnnotation(sbuf);
+			s_lastDriverSynthSuspendLog = time;
+			s_lastDriverSynthReason = synthDecision.reason;
+		}
+		s_driverSynthSolveSuspended = false;
+	}
+#endif
 
 	if (!CollectSample(ctx))
 	{
