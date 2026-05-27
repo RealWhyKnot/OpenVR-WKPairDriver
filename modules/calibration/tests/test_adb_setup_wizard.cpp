@@ -260,6 +260,32 @@ TEST(AdbSetupWizardTest, RetryUsbPrompt_reports_final_state_when_still_unauthori
     EXPECT_EQ(wiz.currentStep(), WizardStep::Start);
 }
 
+TEST(AdbSetupWizardTest, RetryUsbPrompt_from_usb_pair_returns_to_authorization_on_failure)
+{
+    SequenceAdb adb;
+    adb.results = {
+        AdbResult("List of devices attached\nABCD1234\tdevice product:hollywood model:Quest_3\n"),
+        AdbResult(""),
+        AdbResult("* daemon started successfully *\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n"),
+        AdbResult("List of devices attached\nABCD1234\tunauthorized\n")
+    };
+
+    SetupWizard wiz(adb);
+    ASSERT_EQ(wiz.RunCheckDevMode().status, StepStatus::Passed);
+    ASSERT_EQ(wiz.currentStep(), WizardStep::UsbPair);
+
+    const StepResult r = wiz.RunRetryUsbPrompt();
+
+    EXPECT_EQ(r.status, StepStatus::Failed);
+    EXPECT_NE(r.detail.find("unauthorized"), std::string::npos);
+    EXPECT_EQ(wiz.currentStep(), WizardStep::CheckDevMode);
+    EXPECT_NE(wiz.stepResult(WizardStep::CheckDevMode).detail.find("unauthorized"),
+              std::string::npos);
+}
+
 TEST(AdbSetupWizardTest, UseWirelessFallback_jumps_to_wifi_pair)
 {
     StubAdb adb;

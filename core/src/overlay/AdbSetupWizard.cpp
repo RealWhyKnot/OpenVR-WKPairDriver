@@ -275,19 +275,27 @@ StepResult SetupWizard::RunRetryUsbPrompt()
 {
     StepResult r;
     r.status = StepStatus::InProgress;
+    const WizardStep origin = m_step;
+    const auto commitFailure = [&](StepResult result) {
+        StepResult committed = Commit(WizardStep::CheckDevMode, result);
+        if (origin == WizardStep::UsbPair) {
+            m_step = WizardStep::CheckDevMode;
+        }
+        return committed;
+    };
 
     const auto kill = m_adb.Run({"kill-server"}, std::chrono::seconds(3));
     if (kill.timedOut) {
         r.status = StepStatus::Failed;
         r.detail = "adb kill-server timed out. Unplug USB, reconnect it, then retry.";
-        return Commit(WizardStep::CheckDevMode, r);
+        return commitFailure(r);
     }
 
     const auto start = m_adb.Run({"start-server"}, std::chrono::seconds(5));
     if (start.timedOut || start.exitCode != 0) {
         r.status = StepStatus::Failed;
         r.detail = "adb start-server failed. Replug USB or restart WKOpenVR, then retry.";
-        return Commit(WizardStep::CheckDevMode, r);
+        return commitFailure(r);
     }
 
     UsbDeviceState lastState = UsbDeviceState::NoDevice;
@@ -310,7 +318,7 @@ StepResult SetupWizard::RunRetryUsbPrompt()
     r.status = StepStatus::Failed;
     r.detail = std::string("USB prompt retry finished; state is ") +
                UsbStateLabel(lastState) + ". " + UsbStateHelp(lastState);
-    return Commit(WizardStep::CheckDevMode, r);
+    return commitFailure(r);
 }
 
 // ---------------------------------------------------------------------------
