@@ -1802,11 +1802,7 @@ void RecoverFromWedgedCalibration(const char* userFacingMessage,
 	}
 
 	calibration.Clear();
-	CalCtx.refToTargetPose             = Eigen::AffineCompact3d::Identity();
-	CalCtx.relativePosCalibrated       = false;
-	CalCtx.hasAppliedCalibrationResult = false;
-	CalCtx.calibratedTranslation       = Eigen::Vector3d::Zero();
-	CalCtx.calibratedRotation          = Eigen::Vector3d::Zero();
+	CalCtx.ClearRuntimeCalibrationForRecovery();
 
 	// Snap the next ScanAndApplyProfile send (one-shot). The driver's
 	// SetDeviceTransform handler will see payload.lerp=false and assign

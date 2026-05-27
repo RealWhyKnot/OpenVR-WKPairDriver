@@ -878,6 +878,16 @@ struct CalibrationContext
 		lastAcceptedContinuousSnapshot = {};
 	}
 
+	void ClearRuntimeCalibrationForRecovery()
+	{
+		validProfile = false;
+		refToTargetPose = Eigen::AffineCompact3d::Identity();
+		relativePosCalibrated = false;
+		hasAppliedCalibrationResult = false;
+		calibratedTranslation = Eigen::Vector3d::Zero();
+		calibratedRotation = Eigen::Vector3d::Zero();
+	}
+
 	CalibrationProfileSnapshot CaptureProfileSnapshot() const
 	{
 		CalibrationProfileSnapshot snap;

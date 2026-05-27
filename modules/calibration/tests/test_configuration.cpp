@@ -318,6 +318,55 @@ TEST(ConfigurationTest, PublishCandidateGuardRejectsExactNoopCandidate) {
     EXPECT_STREQ(result.reason, "identity_candidate");
 }
 
+TEST(ConfigurationTest, RelPoseTrustRequiresLockedCalibratedPose) {
+    {
+        const auto result = spacecal::continuous::EvaluateRelPoseTrust(
+            /*lockRelativePosition=*/false,
+            /*relativePosCalibrated=*/true);
+
+        EXPECT_FALSE(result.accepted);
+        EXPECT_STREQ(result.reason, "relpose_unlocked");
+    }
+
+    {
+        const auto result = spacecal::continuous::EvaluateRelPoseTrust(
+            /*lockRelativePosition=*/true,
+            /*relativePosCalibrated=*/false);
+
+        EXPECT_FALSE(result.accepted);
+        EXPECT_STREQ(result.reason, "relpose_uncalibrated");
+    }
+
+    {
+        const auto result = spacecal::continuous::EvaluateRelPoseTrust(
+            /*lockRelativePosition=*/true,
+            /*relativePosCalibrated=*/true);
+
+        EXPECT_TRUE(result.accepted);
+        EXPECT_STREQ(result.reason, "accepted");
+    }
+}
+
+TEST(ConfigurationTest, RuntimeRecoveryClearDoesNotLeaveIdentityProfileValid) {
+    CalibrationContext ctx;
+    ctx.validProfile = true;
+    ctx.calibratedTranslation = Eigen::Vector3d(120.0, 30.0, -45.0);
+    ctx.calibratedRotation = Eigen::Vector3d(1.0, 2.0, 3.0);
+    ctx.refToTargetPose.translation() = Eigen::Vector3d(0.1, 0.2, 0.3);
+    ctx.relativePosCalibrated = true;
+    ctx.hasAppliedCalibrationResult = true;
+
+    ctx.ClearRuntimeCalibrationForRecovery();
+
+    EXPECT_FALSE(ctx.validProfile);
+    EXPECT_FALSE(ctx.relativePosCalibrated);
+    EXPECT_FALSE(ctx.hasAppliedCalibrationResult);
+    EXPECT_TRUE(ctx.calibratedTranslation.isApprox(Eigen::Vector3d::Zero()));
+    EXPECT_TRUE(ctx.calibratedRotation.isApprox(Eigen::Vector3d::Zero()));
+    EXPECT_TRUE(ctx.refToTargetPose.matrix().isApprox(Eigen::AffineCompact3d::Identity().matrix()));
+    EXPECT_FALSE(ctx.CaptureProfileSnapshot().validProfile);
+}
+
 TEST(ConfigurationTest, LegacyMathMasterDisablesEffectiveValidatedFeatures) {
     CalibrationContext ctx;
     ctx.useUpstreamMath = true;

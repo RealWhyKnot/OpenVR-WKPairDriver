@@ -28,6 +28,26 @@ struct PublishCandidateGuardResult {
 	bool finiteTranslation = true;
 };
 
+struct RelPoseTrustResult {
+	bool accepted = true;
+	const char* reason = "accepted";
+};
+
+inline RelPoseTrustResult EvaluateRelPoseTrust(
+	bool lockRelativePosition,
+	bool relativePosCalibrated)
+{
+	if (!lockRelativePosition) {
+		return { false, "relpose_unlocked" };
+	}
+
+	if (!relativePosCalibrated) {
+		return { false, "relpose_uncalibrated" };
+	}
+
+	return {};
+}
+
 inline CandidateGuardResult EvaluateCandidate(
 	bool inContinuous,
 	bool hasBaseline,

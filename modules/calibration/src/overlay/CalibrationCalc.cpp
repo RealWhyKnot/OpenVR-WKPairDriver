@@ -7,6 +7,7 @@
 #include "BlendFilter.h"        // Kalman-filter blend (opt-in publish path)
 #include "TranslationSolveDirect.h"
 #include "RotationMatrix3.h"    // AngleFromRotationMatrix3 / AxisFromRotationMatrix3 (clamped).
+#include "ContinuousCalibrationGuard.h"
 
 #include <chrono>  // steady_clock for throttled diagnostic logs in
                    // CalibrateRotation / CalibrateTranslation. The throttle
@@ -1398,7 +1399,11 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		return false;
 	}
 
-	if (lockRelativePosition) {
+	const auto relPoseTrust = spacecal::continuous::EvaluateRelPoseTrust(
+		lockRelativePosition,
+		m_relativePosCalibrated);
+
+	if (relPoseTrust.accepted) {
 		Eigen::AffineCompact3d byRelPose;
 		double relPoseError = INFINITY;
 		Eigen::Vector3d relPosOffset;
@@ -1440,7 +1445,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	bool usingRelPose = false;
 	double relPoseError = INFINITY;
 
-	if (enableStaticRecalibration && CalibrateByRelPose(byRelPose)) {
+	if (enableStaticRecalibration && relPoseTrust.accepted && CalibrateByRelPose(byRelPose)) {
 		Eigen::Vector3d relPosOffset;
 		if (ValidateCalibration(byRelPose, &relPoseError, &relPosOffset)) {
 			Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
@@ -1628,7 +1633,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 	if (newCalibrationValid) {
 		lerp = m_isValid;
-		m_relativePosCalibrated = m_relativePosCalibrated || newError < 0.005;
+		m_relativePosCalibrated = m_relativePosCalibrated || (!usingRelPose && newError < 0.005);
 		if (!m_isValid) {
 			CalCtx.Log("Applying initial transformation...");
 		}
