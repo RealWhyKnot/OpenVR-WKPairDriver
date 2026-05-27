@@ -1,5 +1,7 @@
 #include "AdbSetupWizard.h"
 
+#include "DiagnosticsLog.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -84,6 +86,17 @@ const char* UsbStateLabel(UsbDeviceState state)
     return "unknown";
 }
 
+const char* StepStatusLabel(StepStatus status)
+{
+    switch (status) {
+    case StepStatus::NotStarted: return "not_started";
+    case StepStatus::InProgress: return "in_progress";
+    case StepStatus::Passed:     return "passed";
+    case StepStatus::Failed:     return "failed";
+    }
+    return "unknown";
+}
+
 std::string UsbStateHelp(UsbDeviceState state)
 {
     switch (state) {
@@ -143,6 +156,7 @@ void SetupWizard::Reset()
     m_discoveredEndpoint.clear();
     m_manualWirelessPairing = false;
     fprintf(stderr, "[adb-wizard] reset to Start\n");
+    openvr_pair::common::DiagnosticLog("adb-wizard", "reset step=start");
 }
 
 StepResult SetupWizard::Commit(WizardStep step, StepResult result)
@@ -161,6 +175,12 @@ StepResult SetupWizard::Commit(WizardStep step, StepResult result)
         fprintf(stderr, "[adb-wizard] step %d failed: %s\n",
                 idx, result.detail.c_str());
     }
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "step_result step=%d status=%s next_step=%d detail='%s'",
+        idx,
+        StepStatusLabel(result.status),
+        static_cast<int>(m_step),
+        result.detail.c_str());
     return result;
 }
 
@@ -170,6 +190,9 @@ void SetupWizard::UseWirelessFallback()
     m_manualWirelessPairing = true;
     m_step = WizardStep::WifiPair;
     fprintf(stderr, "[adb-wizard] USB authorization bypassed -> manual wireless pairing fallback\n");
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "manual_wireless_pairing selected step=%d",
+        static_cast<int>(m_step));
 }
 
 void SetupWizard::UseCurrentAdbConnection()
@@ -186,6 +209,9 @@ void SetupWizard::UseCurrentAdbConnection()
     m_step = WizardStep::WifiTcpip;
     fprintf(stderr, "[adb-wizard] current ADB connection accepted -> step %d\n",
             static_cast<int>(m_step));
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "current_adb_connection accepted step=%d",
+        static_cast<int>(m_step));
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +222,7 @@ StepResult SetupWizard::RunCheckBinary()
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_check_binary");
     if (!m_adb.BinaryAvailable()) {
         r.status = StepStatus::Failed;
         r.detail = "adb.exe not found -- reinstall WKOpenVR.";
@@ -227,6 +254,7 @@ StepResult SetupWizard::RunCheckDevAccount()
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_check_dev_account");
     const auto result = m_adb.Run({"devices"}, std::chrono::seconds(5));
     if (result.timedOut) {
         r.status = StepStatus::Failed;
@@ -248,6 +276,9 @@ StepResult SetupWizard::RunCheckDevAccount()
     r.status = StepStatus::Passed;
     r.detail = std::string("Device visible to adb (state: ") +
                UsbStateLabel(ClassifyDevices(result.out)) + ").";
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "dev_account_device_state state=%s",
+        UsbStateLabel(ClassifyDevices(result.out)));
     return Commit(WizardStep::CheckDevAccount, r);
 }
 
@@ -259,6 +290,7 @@ StepResult SetupWizard::RunCheckDevMode()
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_check_dev_mode");
     const auto result = m_adb.Run({"devices"}, std::chrono::seconds(5));
     if (result.timedOut) {
         r.status = StepStatus::Failed;
@@ -272,6 +304,9 @@ StepResult SetupWizard::RunCheckDevMode()
     }
 
     const UsbDeviceState state = ClassifyDevices(result.out);
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "dev_mode_device_state state=%s",
+        UsbStateLabel(state));
     if (state == UsbDeviceState::Unauthorized) {
         r.status = StepStatus::Failed;
         r.detail = UsbStateHelp(state);
@@ -294,6 +329,9 @@ StepResult SetupWizard::RunRetryUsbPrompt()
     StepResult r;
     r.status = StepStatus::InProgress;
     const WizardStep origin = m_step;
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "retry_usb_prompt origin_step=%d",
+        static_cast<int>(origin));
     const auto commitFailure = [&](StepResult result) {
         StepResult committed = Commit(WizardStep::CheckDevMode, result);
         if (origin == WizardStep::UsbPair) {
@@ -324,6 +362,9 @@ StepResult SetupWizard::RunRetryUsbPrompt()
             if (lastState == UsbDeviceState::Authorized) {
                 r.status = StepStatus::Passed;
                 r.detail = "USB debugging authorized. Continuing setup.";
+                openvr_pair::common::DiagnosticLog("adb-wizard",
+                    "retry_usb_prompt authorized attempt=%d",
+                    attempt + 1);
                 return Commit(WizardStep::CheckDevMode, r);
             }
         }
@@ -347,6 +388,7 @@ StepResult SetupWizard::RunUsbPair()
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_usb_pair");
     const auto result = m_adb.Run({"devices"}, std::chrono::seconds(5));
     if (result.timedOut) {
         r.status = StepStatus::Failed;
@@ -355,6 +397,9 @@ StepResult SetupWizard::RunUsbPair()
     }
 
     const UsbDeviceState state = ClassifyDevices(result.out);
+    openvr_pair::common::DiagnosticLog("adb-wizard",
+        "usb_pair_device_state state=%s",
+        UsbStateLabel(state));
     if (state != UsbDeviceState::Authorized) {
         r.status = StepStatus::Failed;
         r.detail = std::string("Quest not paired over USB (state: ") +
@@ -375,6 +420,7 @@ StepResult SetupWizard::RunWifiTcpip()
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_wifi_tcpip");
     const auto result = m_adb.Run({"tcpip", "5555"}, std::chrono::seconds(5));
     if (result.timedOut) {
         r.status = StepStatus::Failed;
@@ -496,6 +542,7 @@ StepResult SetupWizard::RunWifiDiscover()
     StepResult r;
     r.status = StepStatus::InProgress;
     m_discoveredEndpoint.clear();
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_wifi_discover");
 
     // Try `ip route` first.
     auto result = m_adb.Shell("ip route", std::chrono::seconds(5));
@@ -529,6 +576,9 @@ StepResult SetupWizard::RunWifiDiscover()
         m_step = WizardStep::WifiVerify;
         fprintf(stderr, "[adb-wizard] skipping manual wireless pair -> now at step %d\n",
                 static_cast<int>(m_step));
+        openvr_pair::common::DiagnosticLog("adb-wizard",
+            "manual_wireless_pair skipped reason=usb_authorized_tcpip step=%d",
+            static_cast<int>(m_step));
     }
     return committed;
 }
@@ -542,6 +592,7 @@ StepResult SetupWizard::RunWifiPair(const std::string& pairingHostPort,
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_wifi_pair");
     if (pairingHostPort.empty() || pairingCode.empty()) {
         r.status = StepStatus::Failed;
         r.detail = "Pairing host:port and 6-digit code are required.";
@@ -590,6 +641,7 @@ StepResult SetupWizard::RunWifiVerify(const std::string& endpointOverride)
     StepResult r;
     r.status = StepStatus::InProgress;
 
+    openvr_pair::common::DiagnosticLog("adb-wizard", "run_wifi_verify");
     std::string endpoint = endpointOverride.empty() ? m_discoveredEndpoint : endpointOverride;
     if (endpoint.empty()) {
         r.status = StepStatus::Failed;

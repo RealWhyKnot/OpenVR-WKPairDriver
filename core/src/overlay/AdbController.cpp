@@ -1,6 +1,8 @@
 #define _CRT_SECURE_NO_DEPRECATE
 #include "AdbController.h"
 
+#include "DiagnosticsLog.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,7 +12,9 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <regex>
 #include <string>
+#include <utility>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -55,6 +59,59 @@ std::string ToNarrow(const std::wstring& w)
     return out;
 }
 
+std::string RedactAdbText(std::string text)
+{
+    if (text.empty()) return text;
+    text = std::regex_replace(
+        text,
+        std::regex(R"(([^\s]+)\s+(device|unauthorized|offline)(\s|$))"),
+        "<device> $2$3");
+    text = std::regex_replace(
+        text,
+        std::regex(R"(\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b)"),
+        "<ip>");
+    text = std::regex_replace(
+        text,
+        std::regex(R"(\b\d{6}\b)"),
+        "<code>");
+    return text;
+}
+
+std::string TrimAsciiForLog(std::string s)
+{
+    while (!s.empty() && static_cast<unsigned char>(s.back()) <= ' ') {
+        s.pop_back();
+    }
+    size_t start = 0;
+    while (start < s.size() && static_cast<unsigned char>(s[start]) <= ' ') {
+        ++start;
+    }
+    return s.substr(start);
+}
+
+std::string TruncateForLog(std::string text, size_t limit = 420)
+{
+    text = TrimAsciiForLog(RedactAdbText(std::move(text)));
+    if (text.size() <= limit) return text;
+    text.resize(limit);
+    text += "...";
+    return text;
+}
+
+std::string ArgsForLog(const std::vector<std::string>& args)
+{
+    std::string out;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (!out.empty()) out += ' ';
+        if (i == 2 && args.size() >= 3 && args[0] == "pair") {
+            out += "<pairing-code>";
+        } else {
+            out += RedactAdbText(args[i]);
+        }
+    }
+    return out;
+}
+
 // Drain a read-end pipe handle into a std::string until EOF or the write end
 // closes. Non-blocking: reads whatever is available, returns immediately when
 // there is nothing more (handle should be drained after the process exits).
@@ -90,8 +147,10 @@ AdbController::AdbController()
 {
     if (m_adbPath.empty()) {
         fprintf(stderr, "[adb] failed to resolve adb.exe path from module location\n");
+        openvr_pair::common::DiagnosticLog("adb", "resolve_binary failed");
     } else {
         fprintf(stderr, "[adb] resolved binary: %s\n", m_adbPath.c_str());
+        openvr_pair::common::DiagnosticLog("adb", "resolve_binary ok");
     }
 }
 
@@ -154,6 +213,8 @@ AdbController::Result AdbController::Run(
 
     if (m_adbPath.empty()) {
         result.err = "adb path not resolved";
+        openvr_pair::common::DiagnosticLog("adb", "run skipped command='%s' reason=path_not_resolved",
+                                           ArgsForLog(args).c_str());
         return result;
     }
 
@@ -163,6 +224,10 @@ AdbController::Result AdbController::Run(
         cmdNarrow += ' ';
         cmdNarrow += QuoteArg(arg);
     }
+    const std::string commandForLog = ArgsForLog(args);
+    openvr_pair::common::DiagnosticLog("adb", "run_start command='%s' timeout_ms=%lld",
+                                       commandForLog.c_str(),
+                                       static_cast<long long>(timeout.count()));
     std::wstring cmdLine = ToWide(cmdNarrow);
     std::wstring exePath = ToWide(m_adbPath);
 
@@ -178,7 +243,10 @@ AdbController::Result AdbController::Run(
 
     if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0) ||
         !CreatePipe(&hStderrRead, &hStderrWrite, &sa, 0)) {
-        fprintf(stderr, "[adb] CreatePipe failed err=%lu\n", GetLastError());
+        const DWORD pipeErr = GetLastError();
+        fprintf(stderr, "[adb] CreatePipe failed err=%lu\n", pipeErr);
+        openvr_pair::common::DiagnosticLog("adb", "run_pipe_failed command='%s' winerr=%lu",
+                                           commandForLog.c_str(), pipeErr);
         if (hStdoutRead)  CloseHandle(hStdoutRead);
         if (hStdoutWrite) CloseHandle(hStdoutWrite);
         if (hStderrRead)  CloseHandle(hStderrRead);
@@ -217,6 +285,8 @@ AdbController::Result AdbController::Run(
         DWORD err = GetLastError();
         fprintf(stderr, "[adb] CreateProcessW failed err=%lu cmd='%s'\n",
                 err, cmdNarrow.c_str());
+        openvr_pair::common::DiagnosticLog("adb", "run_spawn_failed command='%s' winerr=%lu",
+                                           commandForLog.c_str(), err);
         CloseHandle(hStdoutRead);
         CloseHandle(hStderrRead);
         result.err = "CreateProcessW failed";
@@ -226,6 +296,8 @@ AdbController::Result AdbController::Run(
 
     fprintf(stderr, "[adb] spawned pid=%lu cmd='%s'\n",
             pi.dwProcessId, cmdNarrow.c_str());
+    openvr_pair::common::DiagnosticLog("adb", "run_spawned command='%s' pid=%lu",
+                                       commandForLog.c_str(), pi.dwProcessId);
 
     // Wait up to `timeout` for the process to finish, then terminate.
     const DWORD waitMs = static_cast<DWORD>(timeout.count() > 0 ? timeout.count() : 1);
@@ -237,6 +309,9 @@ AdbController::Result AdbController::Run(
         result.timedOut = true;
         fprintf(stderr, "[adb] process timed out after %lldms; terminated\n",
                 static_cast<long long>(timeout.count()));
+        openvr_pair::common::DiagnosticLog("adb", "run_timeout command='%s' timeout_ms=%lld",
+                                           commandForLog.c_str(),
+                                           static_cast<long long>(timeout.count()));
     }
 
     // Drain pipes after the process has exited (or been terminated).
@@ -254,6 +329,13 @@ AdbController::Result AdbController::Run(
     if (!result.timedOut) {
         fprintf(stderr, "[adb] pid exited code=%d\n", result.exitCode);
     }
+    openvr_pair::common::DiagnosticLog("adb",
+        "run_exit command='%s' exit=%d timed_out=%d stdout='%s' stderr='%s'",
+        commandForLog.c_str(),
+        result.exitCode,
+        result.timedOut ? 1 : 0,
+        TruncateForLog(result.out).c_str(),
+        TruncateForLog(result.err).c_str());
     return result;
 }
 

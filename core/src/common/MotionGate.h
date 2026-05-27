@@ -17,6 +17,8 @@
 
 namespace spacecal::motiongate {
 
+constexpr double kFirstContinuousSnapJumpCm = 3.0;
+
 // Returns false (i.e. SNAP -- driver assigns transform := target without
 // blending) in three cases:
 //   1. We're not in continuous state -- only continuous mode lerps; one-
@@ -32,6 +34,20 @@ constexpr bool ShouldBlendCycle(bool inContinuousState,
                                 bool isFreshlyAdopted,
                                 bool snapThisCycle) {
     return inContinuousState && !isFreshlyAdopted && !snapThisCycle;
+}
+
+// First accepted continuous candidate after entering continuous mode gets
+// special handling: if it differs enough from the profile that was just
+// loaded/applied, snap so the user sees the calibration take effect instead
+// of waiting for motion-gated slew to catch up.
+constexpr bool ShouldSnapFirstContinuousCandidate(bool inContinuousState,
+                                                  bool hasAcceptedSnapshot,
+                                                  bool hasGuardBaseline,
+                                                  double jumpCm) {
+    return inContinuousState
+        && !hasAcceptedSnapshot
+        && hasGuardBaseline
+        && jumpCm >= kFirstContinuousSnapJumpCm;
 }
 
 }  // namespace spacecal::motiongate

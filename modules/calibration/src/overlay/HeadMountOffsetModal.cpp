@@ -1,6 +1,7 @@
 #include "HeadMountOffsetModal.h"
 
 #include "Calibration.h"
+#include "CalibrationInternal.h"
 #include "CalibrationMetrics.h"
 #include "HeadFromTrackerSolve.h"
 #include "HeadMountPreview.h"
@@ -295,6 +296,11 @@ bool DrawOffsetModal() {
                     CalCtx.headMount.headFromTracker = s.lastResult.headFromTracker;
                     CalCtx.headMount.offsetCalibrated = true;
                     SaveProfile(CalCtx);
+                    if (CalCtx.state == CalibrationState::Continuous) {
+                        g_snapNextProfileApply = true;
+                        Metrics::WriteLogAnnotation(
+                            "[head-mount-modal] next profile apply will snap after offset save");
+                    }
                     {
                         const Eigen::Vector3d tcm = s.lastResult.headFromTracker.translation() * 100.0;
                         const Eigen::Vector3d rpy = s.lastResult.headFromTracker.rotation()

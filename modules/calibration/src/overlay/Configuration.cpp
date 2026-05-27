@@ -1253,7 +1253,7 @@ void SaveProfile(CalibrationContext &ctx)
 	const double transMagCm =
 		std::sqrt(ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
 		        + ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()
-		        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z()) * 100.0;
+		        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z());
 	char saveBuf[256];
 	snprintf(saveBuf, sizeof saveBuf,
 		"profile_saved: bytes=%zu valid=%d trans_mag_cm=%.2f hash=0x%016llx",

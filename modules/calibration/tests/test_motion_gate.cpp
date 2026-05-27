@@ -16,6 +16,7 @@
 #include "MotionGate.h"
 
 using spacecal::motiongate::ShouldBlendCycle;
+using spacecal::motiongate::ShouldSnapFirstContinuousCandidate;
 
 // ---------------------------------------------------------------------------
 // Auto-recovery snap (option-3 bundle, 2026-05-04). After
@@ -77,9 +78,44 @@ TEST(AutoRecoverySnapTest, FlagIsOneShot_NextCycleResumesBlend) {
         << "Cycle N+1: blending resumes";
 }
 
+TEST(AutoRecoverySnapTest, FirstMeaningfulContinuousCandidateSnaps) {
+    EXPECT_TRUE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/true,
+        /*hasAcceptedSnapshot=*/false,
+        /*hasGuardBaseline=*/true,
+        /*jumpCm=*/3.0));
+
+    EXPECT_TRUE(ShouldSnapFirstContinuousCandidate(true, false, true, 12.5));
+}
+
+TEST(AutoRecoverySnapTest, FirstContinuousCandidateDoesNotSnapForSmallOrUnsafeDeltas) {
+    EXPECT_FALSE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/true,
+        /*hasAcceptedSnapshot=*/false,
+        /*hasGuardBaseline=*/true,
+        /*jumpCm=*/2.99));
+    EXPECT_FALSE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/false,
+        /*hasAcceptedSnapshot=*/false,
+        /*hasGuardBaseline=*/true,
+        /*jumpCm=*/12.0));
+    EXPECT_FALSE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/true,
+        /*hasAcceptedSnapshot=*/true,
+        /*hasGuardBaseline=*/true,
+        /*jumpCm=*/12.0));
+    EXPECT_FALSE(ShouldSnapFirstContinuousCandidate(
+        /*continuous=*/true,
+        /*hasAcceptedSnapshot=*/false,
+        /*hasGuardBaseline=*/false,
+        /*jumpCm=*/12.0));
+}
+
 static_assert(!ShouldBlendCycle(true, false, true),
     "snap flag must override continuous-mode blend");
 static_assert(ShouldBlendCycle(true, false, false),
     "the only blend-true case is continuous + established + no snap");
 static_assert(!ShouldBlendCycle(false, false, false),
     "non-continuous state must snap");
+static_assert(ShouldSnapFirstContinuousCandidate(true, false, true, 3.0),
+    "first meaningful continuous correction must snap");

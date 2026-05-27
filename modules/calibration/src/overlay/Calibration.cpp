@@ -2472,12 +2472,18 @@ void CalibrationTick(double time)
 				static double s_lastContinuousSolveAnnotation = -1e9;
 				if (solveProducedCandidate || time - s_lastContinuousSolveAnnotation >= 1.0) {
 					s_lastContinuousSolveAnnotation = time;
-					const char* rejectReason = Metrics::lastRejectReason.empty()
+					const bool producedValidCandidate =
+						solveProducedCandidate && calibration.isValid();
+					const char* rejectReason = producedValidCandidate
 						? "none"
-						: Metrics::lastRejectReason.c_str();
-					const char* calcRejectReason = calibration.m_rejectReasonTag.empty()
+						: (Metrics::lastRejectReason.empty()
+							? "none"
+							: Metrics::lastRejectReason.c_str());
+					const char* calcRejectReason = producedValidCandidate
 						? "none"
-						: calibration.m_rejectReasonTag.c_str();
+						: (calibration.m_rejectReasonTag.empty()
+							? "none"
+							: calibration.m_rejectReasonTag.c_str());
 					const Eigen::Vector3d candidateCm =
 						calibration.Transformation().translation() * 100.0;
 					char solveBuf[768];
@@ -2891,6 +2897,25 @@ void CalibrationTick(double time)
 			Metrics::WriteLogAnnotation(rejBuf);
 			CalCtx.Log("Calibration candidate rejected; keeping previous profile.\n");
 		} else {
+			const double candidateJumpCm = guard.jumpM * 100.0;
+			const bool snapFirstContinuousCandidate =
+				spacecal::motiongate::ShouldSnapFirstContinuousCandidate(
+					inContinuousState,
+					hasAcceptedSnapshot,
+					hasGuardBaseline,
+					candidateJumpCm);
+			if (snapFirstContinuousCandidate) {
+				g_snapNextProfileApply = true;
+				char snapBuf[240];
+				std::snprintf(snapBuf, sizeof snapBuf,
+					"continuous_first_candidate_snap: jump_cm=%.2f threshold_cm=%.2f"
+					" baseline=%s",
+					candidateJumpCm,
+					spacecal::motiongate::kFirstContinuousSnapJumpCm,
+					hasAcceptedSnapshot ? "last_accepted" : "profile");
+				Metrics::WriteLogAnnotation(snapBuf);
+			}
+
 			ctx.calibratedRotation = calibration.EulerRotation();
 			ctx.calibratedTranslation = candidateTranslationCm; // convert to cm units for profile storage
 			ctx.refToTargetPose = calibration.RelativeTransformation();
