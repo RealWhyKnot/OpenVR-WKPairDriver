@@ -98,7 +98,8 @@ ChaperoneWorkingSet BuildChaperoneWorkingSet(
 
 // Push the polygon to SteamVR chaperone. Returns false if VRChaperoneSetup
 // is unavailable or any call fails. Builds vertical wall quads from floorY
-// to ceilingY, pushes a bounding-rect play area size, and commits to Live.
+// to ceilingY, pushes a conservative centered play area size, and commits
+// to Live.
 bool PushToChaperone(const std::vector<BoundaryVertex>& standingUniverseVertices,
                      double floorY, double ceilingY);
 

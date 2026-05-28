@@ -445,47 +445,184 @@ static std::vector<vr::HmdQuad_t> BuildWallQuads(
     return quads;
 }
 
+static double SignedAreaVerticesXZ(const std::vector<BoundaryVertex>& vertices)
+{
+    if (vertices.size() < 3) return 0.0;
+    double twiceArea = 0.0;
+    for (size_t i = 0, j = vertices.size() - 1; i < vertices.size(); j = i++) {
+        twiceArea += vertices[j].x * vertices[i].z - vertices[i].x * vertices[j].z;
+    }
+    return twiceArea * 0.5;
+}
+
+static bool SamePointXZ(
+    const BoundaryVertex& a,
+    const BoundaryVertex& b,
+    double toleranceMeters)
+{
+    const double dx = a.x - b.x;
+    const double dz = a.z - b.z;
+    return (dx * dx + dz * dz) <= toleranceMeters * toleranceMeters;
+}
+
+static std::vector<BoundaryVertex> NormalizeWorkingSetVertices(
+    const std::vector<BoundaryVertex>& vertices)
+{
+    constexpr double kDuplicateToleranceMeters = 0.005;
+
+    std::vector<BoundaryVertex> out;
+    out.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
+            return {};
+        }
+        if (!out.empty() && SamePointXZ(out.back(), v, kDuplicateToleranceMeters)) {
+            continue;
+        }
+        out.push_back(v);
+    }
+
+    while (out.size() > 3 && SamePointXZ(out.front(), out.back(), kDuplicateToleranceMeters)) {
+        out.pop_back();
+    }
+    return out;
+}
+
+static bool PointOnSegmentXZ(
+    double px,
+    double pz,
+    const BoundaryVertex& a,
+    const BoundaryVertex& b)
+{
+    const double abx = b.x - a.x;
+    const double abz = b.z - a.z;
+    const double apx = px - a.x;
+    const double apz = pz - a.z;
+    const double cross = abx * apz - abz * apx;
+    if (std::fabs(cross) > 1e-8) return false;
+
+    const double dot = apx * abx + apz * abz;
+    if (dot < -1e-8) return false;
+
+    const double lenSq = abx * abx + abz * abz;
+    return dot <= lenSq + 1e-8;
+}
+
+static bool PointInsideOrOnPolygonXZ(
+    const std::vector<BoundaryVertex>& vertices,
+    double x,
+    double z)
+{
+    bool inside = false;
+    for (size_t i = 0, j = vertices.size() - 1; i < vertices.size(); j = i++) {
+        const auto& a = vertices[j];
+        const auto& b = vertices[i];
+        if (PointOnSegmentXZ(x, z, a, b)) {
+            return true;
+        }
+
+        const bool crosses = ((a.z > z) != (b.z > z));
+        if (crosses) {
+            const double xAtZ = (b.x - a.x) * (z - a.z) / (b.z - a.z) + a.x;
+            if (x < xAtZ) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+static bool CenteredRectangleInsidePolygonXZ(
+    const std::vector<BoundaryVertex>& vertices,
+    double sizeX,
+    double sizeZ)
+{
+    if (sizeX <= 0.0 || sizeZ <= 0.0) return false;
+
+    const double hx = sizeX * 0.5;
+    const double hz = sizeZ * 0.5;
+    const double corners[4][2] = {
+        { -hx, -hz },
+        {  hx, -hz },
+        {  hx,  hz },
+        { -hx,  hz },
+    };
+    for (const auto& corner : corners) {
+        if (!PointInsideOrOnPolygonXZ(vertices, corner[0], corner[1])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool ComputeCenteredPlayAreaSize(
+    const std::vector<BoundaryVertex>& vertices,
+    const PolygonBounds& bounds,
+    float& playAreaX,
+    float& playAreaZ)
+{
+    if (!PointInsideOrOnPolygonXZ(vertices, 0.0, 0.0)) {
+        return false;
+    }
+
+    const double maxCenteredX = 2.0 * std::min(std::fabs(bounds.xMin), std::fabs(bounds.xMax));
+    const double maxCenteredZ = 2.0 * std::min(std::fabs(bounds.zMin), std::fabs(bounds.zMax));
+    if (!std::isfinite(maxCenteredX) || !std::isfinite(maxCenteredZ) ||
+        maxCenteredX <= 0.0 || maxCenteredZ <= 0.0) {
+        return false;
+    }
+
+    double candidateX = maxCenteredX;
+    double candidateZ = maxCenteredZ;
+    for (int i = 0; i < 48; ++i) {
+        if (CenteredRectangleInsidePolygonXZ(vertices, candidateX, candidateZ)) {
+            playAreaX = static_cast<float>(candidateX);
+            playAreaZ = static_cast<float>(candidateZ);
+            return playAreaX > 0.0f && playAreaZ > 0.0f;
+        }
+        candidateX *= 0.95;
+        candidateZ *= 0.95;
+    }
+    return false;
+}
+
 ChaperoneWorkingSet BuildChaperoneWorkingSet(
     const std::vector<BoundaryVertex>& standingUniverseVertices,
     double floorY,
     double ceilingY)
 {
     ChaperoneWorkingSet out;
-    if (standingUniverseVertices.size() < 3 ||
+    std::vector<BoundaryVertex> vertices =
+        NormalizeWorkingSetVertices(standingUniverseVertices);
+    if (vertices.size() < 3 ||
         !std::isfinite(floorY) ||
         !std::isfinite(ceilingY) ||
         ceilingY <= floorY) {
         return out;
     }
 
-    double minX = standingUniverseVertices[0].x, maxX = minX;
-    double minZ = standingUniverseVertices[0].z, maxZ = minZ;
-    for (const auto& v : standingUniverseVertices) {
-        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
-            return ChaperoneWorkingSet{};
-        }
-        if (v.x < minX) minX = v.x;
-        if (v.x > maxX) maxX = v.x;
-        if (v.z < minZ) minZ = v.z;
-        if (v.z > maxZ) maxZ = v.z;
-    }
-
-    const double spanX = maxX - minX;
-    const double spanZ = maxZ - minZ;
-    if (!std::isfinite(spanX) || !std::isfinite(spanZ) || spanX <= 0.0 || spanZ <= 0.0) {
+    if (std::fabs(SignedAreaVerticesXZ(vertices)) < 0.05) {
         return ChaperoneWorkingSet{};
     }
 
-    out.playAreaX = static_cast<float>(spanX);
-    out.playAreaZ = static_cast<float>(spanZ);
-    out.perimeter.reserve(standingUniverseVertices.size());
-    for (const auto& v : standingUniverseVertices) {
+    const PolygonBounds bounds = ComputePolygonBoundsXZ(vertices);
+    const double spanX = bounds.xMax - bounds.xMin;
+    const double spanZ = bounds.zMax - bounds.zMin;
+    if (!std::isfinite(spanX) || !std::isfinite(spanZ) ||
+        spanX <= 0.0 || spanZ <= 0.0 ||
+        !ComputeCenteredPlayAreaSize(vertices, bounds, out.playAreaX, out.playAreaZ)) {
+        return ChaperoneWorkingSet{};
+    }
+
+    out.perimeter.reserve(vertices.size());
+    for (const auto& v : vertices) {
         vr::HmdVector2_t p{};
         p.v[0] = static_cast<float>(v.x);
         p.v[1] = static_cast<float>(v.z);
         out.perimeter.push_back(p);
     }
-    out.collisionBounds = BuildWallQuads(standingUniverseVertices, floorY, ceilingY);
+    out.collisionBounds = BuildWallQuads(vertices, floorY, ceilingY);
     out.valid = out.perimeter.size() >= 3 && out.collisionBounds.size() >= 3;
     return out;
 }
