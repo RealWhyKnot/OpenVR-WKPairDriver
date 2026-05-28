@@ -219,6 +219,10 @@ TEST(CalibrationCalcTest, QualityReportPassesWellCoveredLegacyFit) {
     EXPECT_TRUE(report.robustResidualPass);
     EXPECT_TRUE(report.holdoutPass);
     EXPECT_TRUE(report.shadowDynamicPass);
+    const CalibrationQualityVerdict verdict =
+        EvaluateCalibrationQualityVerdict(report);
+    EXPECT_TRUE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "pass");
     EXPECT_GT(report.validRotationPairCount, 10);
     EXPECT_GE(report.translationRank, 2);
     EXPECT_TRUE(std::isfinite(report.dynamicLimitM));
@@ -239,8 +243,50 @@ TEST(CalibrationCalcTest, QualityReportRejectsLowGeometryEvenWhenRmsIsSmall) {
     EXPECT_TRUE(report.legacyRmsPass);
     EXPECT_FALSE(report.geometryPass);
     EXPECT_FALSE(report.shadowDynamicPass);
+    const CalibrationQualityVerdict verdict =
+        EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "geometry");
     EXPECT_EQ(report.validRotationPairCount, 0);
     EXPECT_LT(report.residuals.rmsM, 1e-6);
+}
+
+TEST(CalibrationCalcTest, QualityVerdictReportsFirstFailedGate) {
+    CalibrationQualityReport report;
+
+    CalibrationQualityVerdict verdict =
+        EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "no_valid_samples");
+
+    report.validSampleCount = 30;
+    report.legacyRmsPass = false;
+    report.geometryPass = false;
+    report.robustResidualPass = false;
+    report.holdoutPass = false;
+    verdict = EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "legacy_rms");
+
+    report.legacyRmsPass = true;
+    verdict = EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "geometry");
+
+    report.geometryPass = true;
+    verdict = EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "robust_residual");
+
+    report.robustResidualPass = true;
+    verdict = EvaluateCalibrationQualityVerdict(report);
+    EXPECT_FALSE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "holdout");
+
+    report.holdoutPass = true;
+    verdict = EvaluateCalibrationQualityVerdict(report);
+    EXPECT_TRUE(verdict.wouldAccept);
+    EXPECT_STREQ(verdict.reason, "pass");
 }
 
 TEST(CalibrationCalcTest, DoesNotCrashOnSmallSampleBuffer) {

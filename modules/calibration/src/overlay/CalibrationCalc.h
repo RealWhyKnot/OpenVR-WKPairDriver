@@ -103,6 +103,14 @@ struct CalibrationQualityReport {
 	CalibrationResidualStats holdoutResiduals;
 };
 
+struct CalibrationQualityVerdict {
+	bool wouldAccept = false;
+	const char* reason = "unknown";
+};
+
+CalibrationQualityVerdict EvaluateCalibrationQualityVerdict(
+	const CalibrationQualityReport& report);
+
 class CalibrationCalc {
 public:
 	static const double AxisVarianceThreshold;

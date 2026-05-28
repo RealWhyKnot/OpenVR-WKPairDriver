@@ -723,6 +723,27 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 	return ok;
 }
 
+CalibrationQualityVerdict EvaluateCalibrationQualityVerdict(
+	const CalibrationQualityReport& report)
+{
+	if (report.validSampleCount <= 0) {
+		return { false, "no_valid_samples" };
+	}
+	if (!report.legacyRmsPass) {
+		return { false, "legacy_rms" };
+	}
+	if (!report.geometryPass) {
+		return { false, "geometry" };
+	}
+	if (!report.robustResidualPass) {
+		return { false, "robust_residual" };
+	}
+	if (!report.holdoutPass) {
+		return { false, "holdout" };
+	}
+	return { true, "pass" };
+}
+
 CalibrationQualityReport CalibrationCalc::EvaluateCalibrationQuality(
 	const Eigen::AffineCompact3d& calibration,
 	bool includeHoldout,
@@ -1001,6 +1022,21 @@ void CalibrationCalc::LogCalibrationQualitySnapshot(
 		q.holdoutResiduals.p95M * 1000.0,
 		q.holdoutResiduals.rmsM * 1000.0);
 	Metrics::WriteLogAnnotation(line2);
+
+	const CalibrationQualityVerdict verdict =
+		EvaluateCalibrationQualityVerdict(q);
+	char line3[360];
+	snprintf(line3, sizeof line3,
+		"[cal-quality-verdict][%s] would_accept=%s reason=%s"
+		" legacy_pass=%s geometry_pass=%s robust_pass=%s holdout_pass=%s",
+		label ? label : "candidate",
+		Bool01(verdict.wouldAccept),
+		verdict.reason,
+		Bool01(q.legacyRmsPass),
+		Bool01(q.geometryPass),
+		Bool01(q.robustResidualPass),
+		Bool01(q.holdoutPass));
+	Metrics::WriteLogAnnotation(line3);
 }
 
 
