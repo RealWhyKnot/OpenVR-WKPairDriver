@@ -74,6 +74,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **boundary:** Show live draw cursor (1d3b145)
 - **boundary:** Draw from controller pointer (c0e8ead)
 - **boundary:** Preview floor from lowest controller (81f0c01)
+- **boundary:** Center chaperone play area (ccdcf20)
 
 ---
 
