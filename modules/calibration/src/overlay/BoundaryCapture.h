@@ -11,6 +11,12 @@ namespace wkopenvr::boundary {
 
 enum class CaptureState { Idle, Active, Finished };
 
+struct FloorHitPreview {
+    bool valid = false;
+    BoundaryVertex hit = {};
+    const char* rayName = "";
+};
+
 // Streams controller aim rays while the trigger is held and builds a boundary
 // polygon in lighthouse (pre-transform) space. Call Finish() to clean the raw
 // painted loop down to edge vertices. Cancel() discards the buffer and resets
@@ -28,6 +34,13 @@ public:
     bool Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
     bool TickPointerPose(const Eigen::Affine3d& pointerPose, bool triggerHeld, double floorY = 0.0);
     bool TickProjectedPosition(const Eigen::Affine3d& controllerPose, bool active, double floorY = 0.0);
+
+    FloorHitPreview PreviewControllerFloorHit(
+        const Eigen::Affine3d& controllerPose,
+        double floorY = 0.0) const;
+    FloorHitPreview PreviewPointerFloorHit(
+        const Eigen::Affine3d& pointerPose,
+        double floorY = 0.0) const;
 
     CaptureState state() const { return m_state; }
     uint64_t sessionId() const { return m_sessionId; }

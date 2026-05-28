@@ -295,6 +295,15 @@ FloorProjectionAttempt ProjectPointerPoseToFloor(
         floorY);
 }
 
+FloorHitPreview ToFloorHitPreview(const FloorProjectionAttempt& attempt)
+{
+    FloorHitPreview preview;
+    preview.valid = attempt.status == FloorProjectionStatus::Ok;
+    preview.hit = attempt.hit;
+    preview.rayName = attempt.rayName;
+    return preview;
+}
+
 std::vector<BoundaryVertex> RemoveNearDuplicates(
     const std::vector<BoundaryVertex>& raw,
     double minDistanceMeters)
@@ -428,6 +437,20 @@ bool CaptureSession::TickProjectedPosition(const Eigen::Affine3d& controllerPose
                                            bool active,
                                            double floorY) {
     return AppendProjectedPosition(controllerPose, active, floorY);
+}
+
+FloorHitPreview CaptureSession::PreviewControllerFloorHit(
+    const Eigen::Affine3d& controllerPose,
+    double floorY) const
+{
+    return ToFloorHitPreview(ProjectAimToFloor(controllerPose, floorY));
+}
+
+FloorHitPreview CaptureSession::PreviewPointerFloorHit(
+    const Eigen::Affine3d& pointerPose,
+    double floorY) const
+{
+    return ToFloorHitPreview(ProjectPointerPoseToFloor(pointerPose, floorY));
 }
 
 bool CaptureSession::AppendProjectedPosition(const Eigen::Affine3d& controllerPose,

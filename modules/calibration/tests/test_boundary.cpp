@@ -390,6 +390,28 @@ TEST(CaptureSessionTest, PointerPoseUsesTipMinusZOnly) {
     EXPECT_NEAR(verts[0].z, expected.z(), 1e-9);
 }
 
+TEST(CaptureSessionTest, PreviewPointerHitDoesNotAppend) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pointerPose = Eigen::Affine3d::Identity();
+    pointerPose.translation() = Eigen::Vector3d(0.50, 1.00, -0.25);
+    pointerPose.linear() = Eigen::AngleAxisd(
+        -45.0 * EIGEN_PI / 180.0,
+        Eigen::Vector3d::UnitX()).toRotationMatrix();
+
+    const auto preview = session.PreviewPointerFloorHit(pointerPose, 0.0);
+    ASSERT_TRUE(preview.valid);
+    EXPECT_STREQ(preview.rayName, "tip:-Z");
+    EXPECT_EQ(session.rawVertexCount(), 0u);
+
+    ASSERT_TRUE(session.TickPointerPose(pointerPose, true, 0.0));
+    EXPECT_EQ(session.rawVertexCount(), 1u);
+    EXPECT_NEAR(session.vertices()[0].x, preview.hit.x, 1e-9);
+    EXPECT_NEAR(session.vertices()[0].y, preview.hit.y, 1e-9);
+    EXPECT_NEAR(session.vertices()[0].z, preview.hit.z, 1e-9);
+}
+
 TEST(CaptureSessionTest, ProjectedPositionUsesControllerXZAndFloorY) {
     CaptureSession session;
     session.Start();

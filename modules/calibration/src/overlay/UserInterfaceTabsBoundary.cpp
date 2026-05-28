@@ -219,6 +219,39 @@ bool BoundaryLoopNearlyClosed(const std::vector<BoundaryVertex>& verts)
     return (dx * dx + dz * dz) <= (0.25 * 0.25);
 }
 
+double BoundaryDistanceSq(const BoundaryVertex& a, const BoundaryVertex& b)
+{
+    const double dx = a.x - b.x;
+    const double dy = a.y - b.y;
+    const double dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+std::vector<BoundaryVertex> BoundaryPreviewPathWithCursor(
+    const std::vector<BoundaryVertex>& rawVertices,
+    const wkopenvr::boundary::FloorHitPreview* cursor)
+{
+    std::vector<BoundaryVertex> preview = rawVertices;
+    if (cursor && cursor->valid) {
+        if (preview.empty() ||
+            BoundaryDistanceSq(preview.back(), cursor->hit) > (0.01 * 0.01))
+        {
+            preview.push_back(cursor->hit);
+        }
+    }
+    return preview;
+}
+
+void TickBoundaryPreviewForCapture(
+    const wkopenvr::boundary::FloorHitPreview* cursor = nullptr)
+{
+    const auto preview = BoundaryPreviewPathWithCursor(s_capture.vertices(), cursor);
+    TickBoundaryPreviewForTargetVertices(
+        true,
+        preview,
+        BoundaryLoopNearlyClosed(preview));
+}
+
 bool ApplyFloorFromControllerPose(
     const Eigen::Affine3d& rawPose,
     vr::TrackedDeviceIndex_t deviceId,
@@ -495,15 +528,20 @@ void DrawBoundarySection(ImVec2 panelSize) {
         }
     } else if (state == wkopenvr::boundary::CaptureState::Active) {
         const bool closePreview = BoundaryLoopNearlyClosed(s_capture.vertices());
+        const bool enoughPoints = s_capture.rawVertexCount() >= 3;
         ImGui::TextColored(pal.statusWarn,
-            "Recording. Point at the floor and hold the trigger while tracing the edge.");
-        ImGui::TextDisabled("Raw vertices: %d", (int)s_capture.rawVertexCount());
+            "Recording. Aim at the floor and hold the trigger to paint the edge.");
+        if (closePreview && enoughPoints) {
+            ImGui::TextDisabled("Loop is close to the start point. Finish when it looks right.");
+        } else if (enoughPoints) {
+            ImGui::TextDisabled("Raw vertices: %d", (int)s_capture.rawVertexCount());
+        } else {
+            ImGui::TextDisabled("Need at least three floor points. Raw vertices: %d",
+                (int)s_capture.rawVertexCount());
+        }
         DrawPolygonPreview(s_capture.vertices(), closePreview, true);
-        TickBoundaryPreviewForTargetVertices(
-            true,
-            s_capture.vertices(),
-            closePreview);
         ImGui::Spacing();
+        if (!enoughPoints) ImGui::BeginDisabled();
         if (ImGui::Button("Done##bnd_done")) {
             s_capture.Finish();
             TickBoundaryPreviewForTargetVertices(
@@ -511,6 +549,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 s_capture.vertices(),
                 true);
         }
+        if (!enoughPoints) ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Cancel##bnd_cancel")) {
             s_capture.Cancel();
@@ -747,10 +786,7 @@ void CCal_TickBoundaryCapture() {
         return;
 
     auto tickPreview = []() {
-        TickBoundaryPreviewForTargetVertices(
-            true,
-            s_capture.vertices(),
-            BoundaryLoopNearlyClosed(s_capture.vertices()));
+        TickBoundaryPreviewForCapture();
     };
 
     auto* vrs = vr::VRSystem();
@@ -823,15 +859,15 @@ void CCal_TickBoundaryCapture() {
                     stats.lastTriggerAxis = candidate.trigger.analogAxis;
                     stats.lastTriggerValue = candidate.trigger.analogValue;
                 }
+                candidate.haveTipPose = TryGetControllerTipPose(
+                    vrs,
+                    deviceId,
+                    st,
+                    rawPose,
+                    candidate.tipPose,
+                    candidate.renderModel);
                 if (candidate.triggerHeld) {
                     ++stats.triggerHeld;
-                    candidate.haveTipPose = TryGetControllerTipPose(
-                        vrs,
-                        deviceId,
-                        st,
-                        rawPose,
-                        candidate.tipPose,
-                        candidate.renderModel);
                     drawingCandidates.push_back(candidate);
                 }
             }
@@ -892,8 +928,27 @@ void CCal_TickBoundaryCapture() {
         return;
     }
 
+    wkopenvr::boundary::FloorHitPreview previewCursor;
+    auto previewForCandidate = [&](const ControllerCandidate& candidate) {
+        return candidate.haveTipPose
+            ? s_capture.PreviewPointerFloorHit(candidate.tipPose, CalCtx.boundary.floorY)
+            : s_capture.PreviewControllerFloorHit(candidate.rawPose, CalCtx.boundary.floorY);
+    };
+    auto choosePreviewCursor = [&](const std::vector<ControllerCandidate>& source) {
+        for (const auto& candidate : source) {
+            const auto hit = previewForCandidate(candidate);
+            if (hit.valid) {
+                previewCursor = hit;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    bool havePreviewCursor = choosePreviewCursor(candidates);
+
     if (drawingCandidates.empty()) {
-        tickPreview();
+        TickBoundaryPreviewForCapture(havePreviewCursor ? &previewCursor : nullptr);
         ++s_waitTicks;
         if (s_waitTicks == 1 || (s_waitTicks % 120) == 0) {
             WriteBoundaryInputSummary(stats, sessionId, s_capture.rawVertexCount());
@@ -914,6 +969,11 @@ void CCal_TickBoundaryCapture() {
     stats.chosenDeviceId = static_cast<int>(drawing.deviceId);
     stats.chosenTrackingSystem = drawing.trackingSystem;
     stats.chosenY = drawing.rawPose.translation().y();
+    previewCursor = previewForCandidate(drawing);
+    havePreviewCursor = previewCursor.valid;
+    if (!havePreviewCursor) {
+        havePreviewCursor = choosePreviewCursor(candidates);
+    }
 
     const bool accepted = drawing.haveTipPose
         ? s_capture.TickPointerPose(drawing.tipPose, true, CalCtx.boundary.floorY)
@@ -947,7 +1007,7 @@ void CCal_TickBoundaryCapture() {
         Metrics::WriteLogAnnotation(cbuf);
         openvr_pair::common::DiagnosticLog("boundary-capture", "%s", cbuf);
     }
-    tickPreview();
+    TickBoundaryPreviewForCapture(havePreviewCursor ? &previewCursor : nullptr);
 }
 
 // ---------------------------------------------------------------------------

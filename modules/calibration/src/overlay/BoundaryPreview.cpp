@@ -134,7 +134,7 @@ void FillPolygon(std::vector<uint8_t>& pixels, const std::vector<std::pair<int, 
                 0,
                 size - 1);
             for (int x = xStart; x <= xEnd; ++x) {
-                BlendPixel(pixels, x, y, 0, 190, 220, 58);
+                BlendPixel(pixels, x, y, 0, 190, 220, 72);
             }
         }
     }
@@ -244,18 +244,18 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     for (size_t i = 1; i < vertices.size(); ++i) {
         const auto a = pixelPoints[i - 1];
         const auto b = pixelPoints[i];
-        DrawLine(raster.rgba, a.first, a.second, b.first, b.second, 4, 0, 255, 190, 245);
+        DrawLine(raster.rgba, a.first, a.second, b.first, b.second, 5, 0, 255, 190, 245);
     }
     if (closeLoop && vertices.size() >= 3) {
         const auto a = pixelPoints.back();
         const auto b = pixelPoints.front();
-        DrawLine(raster.rgba, a.first, a.second, b.first, b.second, 3, 0, 210, 255, 220);
+        DrawLine(raster.rgba, a.first, a.second, b.first, b.second, 4, 0, 210, 255, 225);
     }
 
     for (size_t i = 0; i < vertices.size(); ++i) {
         const auto p = pixelPoints[i];
         const bool last = i + 1 == vertices.size();
-        DrawDot(raster.rgba, p.first, p.second, last ? 5 : 3,
+        DrawDot(raster.rgba, p.first, p.second, last ? 8 : 5,
             last ? 255 : 0,
             last ? 245 : 220,
             last ? 90 : 160,
