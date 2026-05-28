@@ -486,15 +486,9 @@ CalibrationCalc calibration;
 		Metrics::translationAxisRangesCm.Push(calibration.TranslationAxisRangesCm());
 		Metrics::pairedMotionWarningCount.Push((double)ctx.pairedMotionMismatchCount);
 
-		// Push observed jitter every tick so the AUTO calibration-speed selector
-		// in ResolvedCalibrationSpeed sees a fresh value -- the previous push
-		// site lived in the Begin state branch alone, where the buffer is still
-		// empty (just-cleared) and so always pushed 0. AUTO would then read 0
-		// from Metrics::jitterRef.last() and lock on FAST forever, regardless of
-		// the user's actual tracker quality. Recomputing here is cheap (Welford
-		// over the deque); skipping early ticks before two valid samples exist
-		// keeps the reading honest -- WelfordStdMagnitude returns 0 on n<2 and
-		// we don't want to advertise that as a meaningful "jitter".
+		// Push raw position spread every tick for debug plots. This is not used
+		// by AUTO speed selection because normal calibration movement makes world
+		// position spread large even when tracking quality is good.
 		if (calibration.SampleCount() >= 2) {
 			Metrics::jitterRef.Push(calibration.ReferenceJitter());
 			Metrics::jitterTarget.Push(calibration.TargetJitter());

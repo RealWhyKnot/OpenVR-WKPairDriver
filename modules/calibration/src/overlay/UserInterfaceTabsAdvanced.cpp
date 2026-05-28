@@ -1,4 +1,5 @@
 #include "Calibration.h"
+#include "CalibrationAutoSpeed.h"
 #include "Configuration.h"
 #include "CalibrationMetrics.h"
 #include "HeadMountTargetBinding.h"
@@ -233,7 +234,7 @@ void CCal_DrawSettings() {
 					SaveProfile(CalCtx);
 				}
 				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip("Pick the speed automatically based on observed tracker jitter.\n"
+					ImGui::SetTooltip("Pick the speed automatically based on calibration fit RMS.\n"
 					                  "<5mm -> Fast.  5-10mm -> Slow.  >10mm -> Very Slow.\n"
 					                  "Re-evaluates while continuous calibration runs; sticky so it doesn't oscillate.\n"
 					                  "Recommended for continuous mode. (One-shot mode hides Auto because\n"
@@ -276,11 +277,21 @@ void CCal_DrawSettings() {
 						resolved == CalibrationContext::FAST ? "Fast" :
 						resolved == CalibrationContext::SLOW ? "Slow" :
 						resolved == CalibrationContext::VERY_SLOW ? "Very Slow" : "?";
+					const double fitRmsMm = spacecal::calibration_speed::SelectObservedFitRmsMm(
+						Metrics::error_rawComputed.last(),
+						Metrics::error_currentCal.last());
+					const bool haveFitRms =
+						Metrics::error_rawComputed.size() > 0 ||
+						Metrics::error_currentCal.size() > 0;
 					ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-					ImGui::Text("    Currently resolved to: %s  (jitter ref %.2f mm, target %.2f mm)",
-					            resolvedName,
-					            Metrics::jitterRef.last() * 1000.0,
-					            Metrics::jitterTarget.last() * 1000.0);
+					if (haveFitRms) {
+						ImGui::Text("    Currently resolved to: %s  (fit RMS %.2f mm)",
+						            resolvedName,
+						            fitRmsMm);
+					} else {
+						ImGui::Text("    Currently resolved to: %s  (waiting for first fit)",
+						            resolvedName);
+					}
 					ImGui::PopStyleColor();
 				}
 

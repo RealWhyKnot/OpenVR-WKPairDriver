@@ -894,16 +894,13 @@ CalibrationQualityReport CalibrationCalc::EvaluateCalibrationQuality(
 		report.holdoutResiduals = ResidualStatsFor(std::move(heldoutResiduals));
 	}
 
-	const double jitterFloor = std::sqrt(
-		ReferenceJitter() * ReferenceJitter() +
-		TargetJitter() * TargetJitter());
 	const double residualNoise = std::isfinite(report.residuals.madSigmaM)
 		? report.residuals.madSigmaM
 		: 0.0;
 	const double motionSpanTerm = report.targetSpanM > 0.0
 		? (0.04 * report.targetSpanM) / std::sqrt(std::max(1, report.validSampleCount))
 		: 0.0;
-	const double noiseTerm = 5.0 * std::max(jitterFloor, residualNoise);
+	const double noiseTerm = 5.0 * residualNoise;
 	report.dynamicLimitM = std::min(0.100, std::max(0.025, std::max(noiseTerm, motionSpanTerm)));
 
 	report.geometryPass =

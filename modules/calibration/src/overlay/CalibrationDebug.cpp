@@ -231,7 +231,7 @@ namespace {
 
 			AddApplyTicks();
 
-			PlotLineG("Reference Jitter", Metrics::jitterRef);
+			PlotLineG("Reference Position Spread", Metrics::jitterRef);
 			ImPlot::EndPlot();
 		}
 	}
@@ -244,7 +244,7 @@ namespace {
 
 			AddApplyTicks();
 
-			PlotLineG("Target Jitter", Metrics::jitterTarget);
+			PlotLineG("Target Position Spread", Metrics::jitterTarget);
 			ImPlot::EndPlot();
 		}
 	}
@@ -403,14 +403,12 @@ namespace {
 		{ "Processing time", G_ComputationTime,
 			"Per-tick math computation time (ms). Useful for performance debugging on slower\n"
 			"machines or after large profile changes -- normal values are well under 5 ms." },
-		{ "Reference Jitter", G_JitterReference,
+		{ "Reference Position Spread", G_JitterReference,
 			"Welford std-dev of the reference HMD's translation over the sample buffer (mm).\n"
-			"High values indicate unstable tracking on the reference (e.g. lighthouse occlusion,\n"
-			"wireless dropout) and feed AUTO calibration speed's bucketing." },
-		{ "Target Jitter", G_JitterTarget,
+			"This mostly shows how much the reference moved while collecting samples." },
+		{ "Target Position Spread", G_JitterTarget,
 			"Welford std-dev of the target tracker's translation over the sample buffer (mm).\n"
-			"Same shape as Reference Jitter, for the target side. Big differences between the\n"
-			"two suggest one tracking system is noisier than the other." },
+			"This mostly shows how much the target moved while collecting samples." },
 		{ "Rotation Condition Ratio", G_RotationConditionRatio,
 			"2D Kabsch min/max singular-value ratio. A measure of how varied the rotation samples\n"
 			"are -- drops toward zero when motion is single-axis. The math gates on this; values\n"

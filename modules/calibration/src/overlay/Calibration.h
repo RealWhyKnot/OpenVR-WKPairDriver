@@ -757,12 +757,12 @@ struct CalibrationContext
 	}
 
 	// Resolve the user's selected speed to a concrete FAST/SLOW/VERY_SLOW. When
-	// the user picks AUTO, we look at the recent observed jitter on both
-	// reference and target trackers and pick the buffer size that matches:
-	//   - clean to typical setups (sub-5mm jitter) get FAST so calibration
-	//     converges quickly. Covers tracker-on-HMD and most lighthouse setups.
-	//   - moderately noisy (5-10mm) get SLOW
-	//   - genuinely noisy / reflective rooms / drifty IMU (>10mm) get VERY_SLOW
+	// the user picks AUTO, use the recent calibration fit RMS as the buffer-size
+	// hint:
+	//   - clean to typical fits (<5mm RMS) get FAST so calibration converges
+	//     quickly. Covers tracker-on-HMD and most lighthouse setups.
+	//   - moderately noisy fits (5-10mm RMS) get SLOW
+	//   - genuinely noisy / reflective rooms / drifty IMU (>10mm RMS) get VERY_SLOW
 	// This is sticky-by-default: we only re-evaluate every few seconds and
 	// require the new bucket to have been right for a while before switching,
 	// so the buffer size doesn't oscillate during transient noise.

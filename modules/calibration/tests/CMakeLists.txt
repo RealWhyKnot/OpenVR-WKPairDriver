@@ -29,6 +29,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_boundary.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_controller_input.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_calibration_calc.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_calibration_auto_speed.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_protocol.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_configuration.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_wedge_detector.cpp

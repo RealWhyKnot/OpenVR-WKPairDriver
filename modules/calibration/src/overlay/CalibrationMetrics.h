@@ -123,11 +123,10 @@ namespace Metrics {
 	// that look puzzling against the raw prior error.
 	extern TimeSeries<double> effectivePriorMm;
 
-	// Adaptive RMS threshold (millimetres) computed by ValidateCalibration each
-	// tick: max(5 mm, 3 * sqrt(jitterRef² + jitterTarget²)). Without logging
-	// this, "validate_failed" rejections look opaque — was the candidate's RMS
-	// honestly above the noise floor or did the floor jitter up this tick and
-	// trip an otherwise-good candidate?
+	// Adaptive RMS threshold (millimetres) reported by calibration-quality
+	// diagnostics. Without logging this, "validate_failed" rejections look
+	// opaque: was the candidate above the measured residual floor, or did a
+	// geometry term dominate the dynamic limit?
 	extern TimeSeries<double> validateRmsThresholdMm;
 
 	// Cumulative count of stuck-loop watchdog firings. Logged as a per-row

@@ -1,5 +1,6 @@
 #include "Calibration.h"
 #include "CalibrationProgress.h"
+#include "CalibrationAutoSpeed.h"
 #include "CalibrationOneShotDiagnostics.h"
 #include "CalibrationInternal.h"
 #include "CalibrationDevicePoseUtils.h"
@@ -526,12 +527,10 @@ void CalibrationContext::ResolveLockMode()
 	}
 }
 
-// Auto-speed resolver. Reads the recent jitter samples from Metrics:: and picks
-// the calibration speed that should give a stable result without bogging down
-// convergence. Sticky: requires the new bucket to be right for ~5 consecutive
-// evaluations before switching, so transient noise doesn't oscillate the
-// sample-buffer size. Hysteresis is baked in by separate up-shift / down-shift
-// thresholds (1mm / 5mm) so a marginal value doesn't flap between buckets.
+// Auto-speed resolver. Reads recent calibration fit error and picks the buffer
+// size that should give a stable result without bogging down convergence.
+// Sticky: requires the new bucket to be right for ~5 consecutive evaluations
+// before switching so transient noise doesn't oscillate the sample-buffer size.
 CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
 	const Speed requestedSpeed = ActiveCalibrationSpeed();
 	if (requestedSpeed != AUTO) {
@@ -541,7 +540,7 @@ CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
 	// AUTO only re-evaluates meaningfully during continuous calibration --
 	// it watches drift evidence and slows the buffer down when conditions
 	// degrade. Outside continuous mode there's no second chance to switch,
-	// so AUTO would just gamble on the first jitter sample. Default to FAST:
+	// so AUTO would just gamble on the first fit sample. Default to FAST:
 	// the user can pick SLOW or VERY_SLOW explicitly if they want a larger
 	// buffer.
 	if (state != CalibrationState::Continuous &&
@@ -554,29 +553,14 @@ CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
 	static Speed s_pendingResolved = SLOW;
 	static int s_pendingTicks = 0;
 	constexpr int kRequiredStableTicks = 5;      // ~5 samples of consistency
-	// Biased toward FAST: typical lighthouse and tracker-on-HMD setups show
-	// 2-5mm of measured jitter even when stationary (lighthouse interpolation
-	// + microvibration), but their data is still clean enough for the direct
-	// O(N) translation solve. Previously these landed in SLOW (250 samples,
-	// ~14s buffer fill) which was punitively slow. The diversity gate already
-	// rejects genuinely bad data; the speed selector is a buffer-size hint,
-	// not a quality gate.
-	constexpr double kFastThreshold = 0.005;     // 5 mm
-	constexpr double kSlowThreshold = 0.010;     // 10 mm
-
-	const double jRef = Metrics::jitterRef.last();
-	const double jTgt = Metrics::jitterTarget.last();
-	// Worst-of-the-two dominates: the noisiest tracker sets the cadence.
-	const double j = std::max(jRef, jTgt);
-
-	Speed candidate;
-	if (j <= 0.0 || j < kFastThreshold) {
-		candidate = FAST;
-	} else if (j < kSlowThreshold) {
-		candidate = SLOW;
-	} else {
-		candidate = VERY_SLOW;
-	}
+	const double observedFitRmsMm = spacecal::calibration_speed::SelectObservedFitRmsMm(
+		Metrics::error_rawComputed.last(),
+		Metrics::error_currentCal.last());
+	const auto bucket = spacecal::calibration_speed::BucketForObservedFitRmsMm(observedFitRmsMm);
+	const Speed candidate =
+		bucket == spacecal::calibration_speed::AutoSpeedBucket::Fast ? FAST :
+		bucket == spacecal::calibration_speed::AutoSpeedBucket::Slow ? SLOW :
+		VERY_SLOW;
 
 	if (candidate == s_lastResolved) {
 		s_pendingResolved = candidate;
@@ -660,6 +644,8 @@ void StartCalibration(const char* reason)
 	Metrics::error_currentCal.Clear();
 	Metrics::error_byRelPose.Clear();
 	Metrics::error_rawComputed.Clear();
+	Metrics::jitterRef.Clear();
+	Metrics::jitterTarget.Clear();
 	Metrics::posOffset_currentCal.Clear();
 	Metrics::posOffset_byRelPose.Clear();
 	Metrics::posOffset_rawComputed.Clear();
@@ -1897,13 +1883,10 @@ void CalibrationTick(double time)
 
 		ScanAndApplyProfile(ctx);
 
-		// (Removed: the original code pushed jitter here, in the Begin state,
-		// before CollectSample had ever populated calibration.m_samples. The
-		// pushed value was always 0.0 from an empty buffer, which then
-		// poisoned ResolvedCalibrationSpeed's read of Metrics::jitterRef.last()
-		// and locked AUTO onto FAST regardless of real tracker quality. The
-		// authoritative push now lives at the end of CollectSample, so jitter
-		// reflects the live buffer every active-calibration tick.)
+		// (Removed: the original code pushed position-spread metrics here,
+		// in the Begin state, before CollectSample had ever populated
+		// calibration.m_samples. The pushed value was always 0.0 from an
+		// empty buffer. Those metrics now live at the end of CollectSample.)
 
 		if (!CalCtx.ReferencePoseIsValidSimple())
 		{
