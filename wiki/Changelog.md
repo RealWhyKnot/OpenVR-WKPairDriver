@@ -65,6 +65,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **installer:** Verify WKOpenVR shortcut (87053d1)
 - **installer:** Escape SteamVR path lookup (a715cec)
 - **calibration:** Keep head tracker hidden by serial (850c924)
+- **installer:** Release install root before uninstall cleanup (2026.5.27.1-beta) (1f02233)
 
 ---
 
