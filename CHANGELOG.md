@@ -30,6 +30,7 @@ The `release.yml` body for each tag is composed mechanically from the slice betw
 - **overlay:** Split logs helpers (2026.5.27.0-beta) (075f03c)
 - diag(debug): improve runtime diagnostics (2026.5.27.0-beta) (148a650)
 - diag(calibration): log quality verdicts (5c88595)
+- diag(smoothing): add smart smoothing shadow metrics (c6316ee)
 
 ### Fixed
 - **calibration:** Gate head tracker offset solve (00d21bd)
