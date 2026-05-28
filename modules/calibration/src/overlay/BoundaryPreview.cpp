@@ -50,6 +50,24 @@ uint64_t HashVertex(uint64_t hash, const BoundaryVertex& v)
     return hash;
 }
 
+uint64_t HashRenderCommand(uint64_t hash, const SpatialRenderCommand& command)
+{
+    hash = HashU64(hash, static_cast<uint64_t>(command.kind));
+    hash = HashU64(hash, command.closeLoop ? 1u : 0u);
+    hash = HashU64(hash, static_cast<uint64_t>(command.layer));
+    hash = HashU64(hash, static_cast<uint64_t>(command.style.r));
+    hash = HashU64(hash, static_cast<uint64_t>(command.style.g));
+    hash = HashU64(hash, static_cast<uint64_t>(command.style.b));
+    hash = HashU64(hash, static_cast<uint64_t>(command.style.a));
+    hash = HashU64(hash, static_cast<uint64_t>(command.style.fillA));
+    hash = HashU64(hash, command.style.fill ? 1u : 0u);
+    hash = HashU64(hash, command.standingVertices.size());
+    for (const auto& v : command.standingVertices) {
+        hash = HashVertex(hash, v);
+    }
+    return hash;
+}
+
 int ClampPixel(double value)
 {
     const int rounded = static_cast<int>(std::lround(value));
@@ -335,21 +353,47 @@ BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
     return out;
 }
 
+BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
+    const std::vector<SpatialRenderCommand>& commands)
+{
+    std::vector<BoundaryVertex> allVertices;
+    for (const SpatialRenderCommand& command : commands) {
+        allVertices.insert(
+            allVertices.end(),
+            command.standingVertices.begin(),
+            command.standingVertices.end());
+    }
+    return ComputeBoundaryPreviewPlane(allVertices);
+}
+
 BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     const std::vector<BoundaryVertex>& vertices,
     bool closeLoop)
 {
+    SpatialSession session = BoundaryCaptureSessionDescriptor(
+        StandingSpace(),
+        -1,
+        {},
+        vertices.empty() ? 0.0 : vertices.front().y,
+        false,
+        0);
+    SpatialPrimitive primitive = BoundaryPathPrimitive(session, vertices, closeLoop);
+    return BuildBoundaryPreviewRaster(BuildSpatialRenderCommands({ primitive }));
+}
+
+BoundaryPreviewRaster BuildBoundaryPreviewRaster(
+    const std::vector<SpatialRenderCommand>& commands)
+{
     BoundaryPreviewRaster raster;
-    raster.plane = ComputeBoundaryPreviewPlane(vertices);
+    raster.plane = ComputeBoundaryPreviewPlane(commands);
     raster.rgba.assign(
         static_cast<size_t>(BoundaryPreviewRaster::kTextureSize) *
             static_cast<size_t>(BoundaryPreviewRaster::kTextureSize) * 4u,
         0u);
 
-    uint64_t hash = HashU64(kFnvOffset, vertices.size());
-    hash = HashU64(hash, closeLoop ? 1u : 0u);
-    for (const auto& v : vertices) {
-        hash = HashVertex(hash, v);
+    uint64_t hash = HashU64(kFnvOffset, commands.size());
+    for (const SpatialRenderCommand& command : commands) {
+        hash = HashRenderCommand(hash, command);
     }
     raster.hash = hash;
 
@@ -382,42 +426,49 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
         return std::pair<int, int>(x, y);
     };
 
-    std::vector<std::pair<int, int>> pixelPoints;
-    pixelPoints.reserve(vertices.size());
-    for (const auto& v : vertices) {
-        pixelPoints.push_back(toPixel(v));
-    }
+    for (const SpatialRenderCommand& command : commands) {
+        const auto& vertices = command.standingVertices;
+        if (vertices.empty()) {
+            continue;
+        }
 
-    if (closeLoop && vertices.size() >= 3) {
-        FillPolygon(raster.rgba, pixelPoints);
-    }
+        std::vector<std::pair<int, int>> pixelPoints;
+        pixelPoints.reserve(vertices.size());
+        for (const auto& v : vertices) {
+            pixelPoints.push_back(toPixel(v));
+        }
 
-    for (size_t i = 1; i < vertices.size(); ++i) {
-        DrawBoundarySegment(
-            raster.rgba,
-            pixelPoints[i - 1],
-            pixelPoints[i],
-            false,
-            strokeRadius,
-            strokeFeather);
-    }
-    if (closeLoop && vertices.size() >= 3) {
-        DrawBoundarySegment(
-            raster.rgba,
-            pixelPoints.back(),
-            pixelPoints.front(),
-            true,
-            strokeRadius,
-            strokeFeather);
-    }
+        if (command.closeLoop && command.style.fill && vertices.size() >= 3) {
+            FillPolygon(raster.rgba, pixelPoints);
+        }
 
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        DrawBoundaryVertex(
-            raster.rgba,
-            pixelPoints[i],
-            i == 0,
-            i + 1 == vertices.size(),
-            dotRadius);
+        for (size_t i = 1; i < vertices.size(); ++i) {
+            DrawBoundarySegment(
+                raster.rgba,
+                pixelPoints[i - 1],
+                pixelPoints[i],
+                false,
+                strokeRadius,
+                strokeFeather);
+        }
+        if (command.closeLoop && vertices.size() >= 3) {
+            DrawBoundarySegment(
+                raster.rgba,
+                pixelPoints.back(),
+                pixelPoints.front(),
+                true,
+                strokeRadius,
+                strokeFeather);
+        }
+
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            DrawBoundaryVertex(
+                raster.rgba,
+                pixelPoints[i],
+                i == 0,
+                i + 1 == vertices.size(),
+                dotRadius);
+        }
     }
     return raster;
 }
@@ -458,12 +509,31 @@ void TickBoundaryPreview(
     double floorY,
     bool closeLoop)
 {
-    if (!wantVisible || vertices.empty()) {
+    SpatialSession session = BoundaryCaptureSessionDescriptor(
+        StandingSpace(),
+        -1,
+        {},
+        floorY,
+        false,
+        0);
+    SpatialPrimitive primitive = BoundaryPathPrimitive(session, vertices, closeLoop);
+    TickBoundaryPreview(
+        wantVisible,
+        BuildSpatialRenderCommands({ primitive }),
+        floorY);
+}
+
+void TickBoundaryPreview(
+    bool wantVisible,
+    const std::vector<SpatialRenderCommand>& commands,
+    double floorY)
+{
+    if (!wantVisible || commands.empty()) {
         Destroy();
         return;
     }
 
-    BoundaryPreviewRaster raster = BuildBoundaryPreviewRaster(vertices, closeLoop);
+    BoundaryPreviewRaster raster = BuildBoundaryPreviewRaster(commands);
     if (!raster.plane.valid) {
         Destroy();
         return;

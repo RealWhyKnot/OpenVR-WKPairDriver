@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Calibration.h"
+#include "BoundarySpatial.h"
 
 #include <openvr.h>
 
@@ -27,9 +28,15 @@ struct BoundaryPreviewRaster {
 BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
     const std::vector<BoundaryVertex>& vertices);
 
+BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
+    const std::vector<SpatialRenderCommand>& commands);
+
 BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     const std::vector<BoundaryVertex>& vertices,
     bool closeLoop);
+
+BoundaryPreviewRaster BuildBoundaryPreviewRaster(
+    const std::vector<SpatialRenderCommand>& commands);
 
 vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin();
 
@@ -43,5 +50,10 @@ void TickBoundaryPreview(
     const std::vector<BoundaryVertex>& vertices,
     double floorY,
     bool closeLoop);
+
+void TickBoundaryPreview(
+    bool wantVisible,
+    const std::vector<SpatialRenderCommand>& commands,
+    double floorY);
 
 } // namespace wkopenvr::boundary

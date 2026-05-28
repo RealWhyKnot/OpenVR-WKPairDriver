@@ -63,6 +63,7 @@ add_executable(spacecal_tests
     ${SPACECAL_SRC}/overlay/BoundaryFloorCapture.cpp
     ${SPACECAL_SRC}/overlay/BoundaryPreview.cpp
     ${SPACECAL_SRC}/overlay/BoundaryRePush.cpp
+    ${SPACECAL_SRC}/overlay/BoundarySpatial.cpp
     ${SPACECAL_SRC}/overlay/ControllerInput.cpp
     ${SPACECAL_SRC}/overlay/DevFakeDevices.cpp
     ${SPACECAL_SRC}/overlay/CalibrationCalc.cpp

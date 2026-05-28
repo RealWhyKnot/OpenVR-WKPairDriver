@@ -87,6 +87,32 @@ double BoundaryFloorYAfterApply(
     double measuredFloorYStanding,
     bool moveSteamVrFloor);
 
+struct StandingYSample {
+    bool valid = false;
+    bool connected = false;
+    vr::ETrackingResult trackingResult = vr::TrackingResult_Uninitialized;
+    double y = 0.0;
+};
+
+struct SteamVrFloorVerification {
+    bool beforeValid = false;
+    bool afterValid = false;
+    bool verified = false;
+    double measuredFloorY = 0.0;
+    double beforeY = 0.0;
+    double afterY = 0.0;
+    double expectedAfterY = 0.0;
+    double residualY = 0.0;
+};
+
+StandingYSample SampleDeviceStandingY(vr::TrackedDeviceIndex_t deviceId);
+
+SteamVrFloorVerification EvaluateSteamVrFloorVerification(
+    const StandingYSample& before,
+    const StandingYSample& after,
+    double measuredFloorYStanding,
+    double toleranceMeters = 0.05);
+
 bool BoundaryControllerMatchesTargetTrackingSystem(
     const std::string& controllerTrackingSystem,
     const std::string& targetTrackingSystem);
@@ -99,7 +125,27 @@ struct ChaperoneWorkingSet {
     std::vector<vr::HmdQuad_t> collisionBounds;
 };
 
+enum class ChaperoneOutputStatus {
+    Ready,
+    Empty,
+    InvalidGeometry,
+    VisualOnlyNoStandingOrigin,
+};
+
+struct ChaperoneOutput {
+    ChaperoneOutputStatus status = ChaperoneOutputStatus::Empty;
+    ChaperoneWorkingSet workingSet;
+    const char* reason = "empty";
+
+    bool ready() const { return status == ChaperoneOutputStatus::Ready && workingSet.valid; }
+};
+
 ChaperoneWorkingSet BuildChaperoneWorkingSet(
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY);
+
+ChaperoneOutput BuildChaperoneOutput(
     const std::vector<BoundaryVertex>& standingUniverseVertices,
     double floorY,
     double ceilingY);
@@ -118,7 +164,28 @@ bool ShowWorkingChaperonePreview(
 
 void HideWorkingChaperonePreview();
 
-// Capture the live chaperone collision bounds for later restore.
+struct ChaperoneSnapshot {
+    bool legacyCollisionBoundsOnly = false;
+    bool hasPlayArea = false;
+    float playAreaX = 0.0f;
+    float playAreaZ = 0.0f;
+    bool hasStandingZero = false;
+    vr::HmdMatrix34_t standingZeroToRaw = {};
+    bool hasSeatedZero = false;
+    vr::HmdMatrix34_t seatedZeroToRaw = {};
+    std::vector<vr::HmdVector2_t> perimeter;
+    std::vector<vr::HmdQuad_t> collisionBounds;
+};
+
+std::vector<uint8_t> SerializeChaperoneSnapshot(
+    const ChaperoneSnapshot& snapshot);
+
+bool DeserializeChaperoneSnapshot(
+    const std::vector<uint8_t>& bytes,
+    ChaperoneSnapshot& snapshot,
+    std::string* error = nullptr);
+
+// Capture the live chaperone working-set fields for later restore.
 // Returns serialized bytes suitable for storage in BoundaryConfig::priorChaperone.
 std::vector<uint8_t> SnapshotCurrentChaperone();
 

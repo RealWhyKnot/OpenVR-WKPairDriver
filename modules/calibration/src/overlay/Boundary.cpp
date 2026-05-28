@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace wkopenvr::boundary {
@@ -412,6 +413,54 @@ double BoundaryFloorYAfterApply(
     return moveSteamVrFloor ? 0.0 : measuredFloorYStanding;
 }
 
+StandingYSample SampleDeviceStandingY(vr::TrackedDeviceIndex_t deviceId)
+{
+    StandingYSample sample;
+    auto* system = vr::VRSystem();
+    if (!system || deviceId >= vr::k_unMaxTrackedDeviceCount) {
+        return sample;
+    }
+
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+    system->GetDeviceToAbsoluteTrackingPose(
+        vr::TrackingUniverseStanding,
+        0.0f,
+        poses,
+        vr::k_unMaxTrackedDeviceCount);
+
+    const vr::TrackedDevicePose_t& pose = poses[deviceId];
+    sample.connected = pose.bDeviceIsConnected;
+    sample.trackingResult = pose.eTrackingResult;
+    sample.y = static_cast<double>(pose.mDeviceToAbsoluteTracking.m[1][3]);
+    sample.valid = pose.bDeviceIsConnected &&
+        pose.bPoseIsValid &&
+        pose.eTrackingResult == vr::TrackingResult_Running_OK &&
+        std::isfinite(sample.y);
+    return sample;
+}
+
+SteamVrFloorVerification EvaluateSteamVrFloorVerification(
+    const StandingYSample& before,
+    const StandingYSample& after,
+    double measuredFloorYStanding,
+    double toleranceMeters)
+{
+    SteamVrFloorVerification result;
+    result.beforeValid = before.valid;
+    result.afterValid = after.valid;
+    result.measuredFloorY = measuredFloorYStanding;
+    result.beforeY = before.y;
+    result.afterY = after.y;
+    result.expectedAfterY = before.y - measuredFloorYStanding;
+    result.residualY = after.y - result.expectedAfterY;
+    result.verified = before.valid &&
+        after.valid &&
+        std::isfinite(measuredFloorYStanding) &&
+        std::isfinite(result.residualY) &&
+        std::fabs(result.residualY) <= std::max(0.0, toleranceMeters);
+    return result;
+}
+
 bool BoundaryControllerMatchesTargetTrackingSystem(
     const std::string& controllerTrackingSystem,
     const std::string& targetTrackingSystem)
@@ -610,6 +659,17 @@ ChaperoneWorkingSet BuildChaperoneWorkingSet(
     double floorY,
     double ceilingY)
 {
+    return BuildChaperoneOutput(
+        standingUniverseVertices,
+        floorY,
+        ceilingY).workingSet;
+}
+
+ChaperoneOutput BuildChaperoneOutput(
+    const std::vector<BoundaryVertex>& standingUniverseVertices,
+    double floorY,
+    double ceilingY)
+{
     ChaperoneWorkingSet out;
     std::vector<BoundaryVertex> vertices =
         NormalizeWorkingSetVertices(standingUniverseVertices);
@@ -617,20 +677,25 @@ ChaperoneWorkingSet BuildChaperoneWorkingSet(
         !std::isfinite(floorY) ||
         !std::isfinite(ceilingY) ||
         ceilingY <= floorY) {
-        return out;
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_geometry" };
     }
 
     if (std::fabs(SignedAreaVerticesXZ(vertices)) < 0.05) {
-        return ChaperoneWorkingSet{};
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "small_or_degenerate_area" };
     }
 
     const PolygonBounds bounds = ComputePolygonBoundsXZ(vertices);
     const double spanX = bounds.xMax - bounds.xMin;
     const double spanZ = bounds.zMax - bounds.zMin;
     if (!std::isfinite(spanX) || !std::isfinite(spanZ) ||
-        spanX <= 0.0 || spanZ <= 0.0 ||
-        !ComputeCenteredPlayAreaSize(vertices, bounds, out.playAreaX, out.playAreaZ)) {
-        return ChaperoneWorkingSet{};
+        spanX <= 0.0 || spanZ <= 0.0) {
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_bounds" };
+    }
+    if (!PointInsideOrOnPolygonXZ(vertices, 0.0, 0.0)) {
+        return { ChaperoneOutputStatus::VisualOnlyNoStandingOrigin, out, "standing_origin_outside_polygon" };
+    }
+    if (!ComputeCenteredPlayAreaSize(vertices, bounds, out.playAreaX, out.playAreaZ)) {
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "centered_play_area_failed" };
     }
 
     out.perimeter.reserve(vertices.size());
@@ -642,7 +707,10 @@ ChaperoneWorkingSet BuildChaperoneWorkingSet(
     }
     out.collisionBounds = BuildWallQuads(vertices, floorY, ceilingY);
     out.valid = out.perimeter.size() >= 3 && out.collisionBounds.size() >= 3;
-    return out;
+    if (!out.valid) {
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "working_set_empty" };
+    }
+    return { ChaperoneOutputStatus::Ready, out, "ready" };
 }
 
 static bool SetWorkingBoundary(
@@ -651,20 +719,26 @@ static bool SetWorkingBoundary(
     double floorY,
     double ceilingY)
 {
-    ChaperoneWorkingSet workingSet =
-        BuildChaperoneWorkingSet(standingUniverseVertices, floorY, ceilingY);
-    if (!workingSet.valid) {
+    ChaperoneOutput output =
+        BuildChaperoneOutput(standingUniverseVertices, floorY, ceilingY);
+    if (!output.ready()) {
+        char lbuf[192];
+        snprintf(lbuf, sizeof lbuf,
+            "[boundary] chaperone output rejected: status=%d reason=%s",
+            static_cast<int>(output.status),
+            output.reason ? output.reason : "");
+        Metrics::WriteLogAnnotation(lbuf);
         return false;
     }
     setup->SetWorkingPlayAreaSize(
-        workingSet.playAreaX,
-        workingSet.playAreaZ);
+        output.workingSet.playAreaX,
+        output.workingSet.playAreaZ);
     setup->SetWorkingPerimeter(
-        workingSet.perimeter.data(),
-        static_cast<uint32_t>(workingSet.perimeter.size()));
+        output.workingSet.perimeter.data(),
+        static_cast<uint32_t>(output.workingSet.perimeter.size()));
     setup->SetWorkingCollisionBoundsInfo(
-        workingSet.collisionBounds.data(),
-        static_cast<uint32_t>(workingSet.collisionBounds.size()));
+        output.workingSet.collisionBounds.data(),
+        static_cast<uint32_t>(output.workingSet.collisionBounds.size()));
     return true;
 }
 
@@ -770,13 +844,20 @@ void HideWorkingChaperonePreview()
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot serialization
+// Snapshot serialization.
 //
-// Format: 4-byte little-endian quad count, then each HmdQuad_t verbatim
-// (48 bytes: 4 corners x 3 floats each).
+// v1 legacy format: 4-byte little-endian quad count, then each HmdQuad_t.
+// v2 format: magic/version/flags, then every chaperone field OpenVR exposes.
 // ---------------------------------------------------------------------------
 
 static constexpr size_t kQuadBytes = sizeof(vr::HmdQuad_t); // 48
+static constexpr size_t kVector2Bytes = sizeof(vr::HmdVector2_t); // 8
+static constexpr size_t kMatrix34Bytes = sizeof(vr::HmdMatrix34_t); // 48
+static constexpr uint32_t kSnapshotMagic = 0x43424B57u; // "WKBC"
+static constexpr uint32_t kSnapshotVersion = 2u;
+static constexpr uint32_t kSnapshotFlagPlayArea = 1u << 0;
+static constexpr uint32_t kSnapshotFlagStandingZero = 1u << 1;
+static constexpr uint32_t kSnapshotFlagSeatedZero = 1u << 2;
 
 static void Write32LE(std::vector<uint8_t>& buf, uint32_t v) {
     buf.push_back(static_cast<uint8_t>(v));
@@ -794,29 +875,255 @@ static bool Read32LE(const std::vector<uint8_t>& buf, size_t offset, uint32_t& o
     return true;
 }
 
+static void WriteBytes(
+    std::vector<uint8_t>& buf,
+    const void* data,
+    size_t size)
+{
+    const uint8_t* raw = static_cast<const uint8_t*>(data);
+    buf.insert(buf.end(), raw, raw + size);
+}
+
+static bool ReadBytes(
+    const std::vector<uint8_t>& buf,
+    size_t& offset,
+    void* data,
+    size_t size)
+{
+    if (offset + size > buf.size()) return false;
+    std::memcpy(data, buf.data() + offset, size);
+    offset += size;
+    return true;
+}
+
+static bool Read32LEAdvance(
+    const std::vector<uint8_t>& buf,
+    size_t& offset,
+    uint32_t& out)
+{
+    if (!Read32LE(buf, offset, out)) return false;
+    offset += 4;
+    return true;
+}
+
+static std::vector<vr::HmdVector2_t> DerivePerimeterFromCollisionBounds(
+    const std::vector<vr::HmdQuad_t>& quads)
+{
+    std::vector<vr::HmdVector2_t> perimeter;
+    perimeter.reserve(quads.size());
+    for (const auto& quad : quads) {
+        vr::HmdVector2_t p{};
+        p.v[0] = quad.vCorners[0].v[0];
+        p.v[1] = quad.vCorners[0].v[2];
+        perimeter.push_back(p);
+    }
+    return perimeter;
+}
+
+static std::vector<vr::HmdVector2_t> PerimeterFromPlayAreaRect(
+    const vr::HmdQuad_t& rect)
+{
+    std::vector<vr::HmdVector2_t> perimeter;
+    perimeter.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        vr::HmdVector2_t p{};
+        p.v[0] = rect.vCorners[i].v[0];
+        p.v[1] = rect.vCorners[i].v[2];
+        perimeter.push_back(p);
+    }
+    return perimeter;
+}
+
+std::vector<uint8_t> SerializeChaperoneSnapshot(
+    const ChaperoneSnapshot& snapshot)
+{
+    std::vector<uint8_t> buf;
+    uint32_t flags = 0;
+    if (snapshot.hasPlayArea) flags |= kSnapshotFlagPlayArea;
+    if (snapshot.hasStandingZero) flags |= kSnapshotFlagStandingZero;
+    if (snapshot.hasSeatedZero) flags |= kSnapshotFlagSeatedZero;
+
+    Write32LE(buf, kSnapshotMagic);
+    Write32LE(buf, kSnapshotVersion);
+    Write32LE(buf, flags);
+    if (snapshot.hasPlayArea) {
+        WriteBytes(buf, &snapshot.playAreaX, sizeof(snapshot.playAreaX));
+        WriteBytes(buf, &snapshot.playAreaZ, sizeof(snapshot.playAreaZ));
+    }
+    if (snapshot.hasStandingZero) {
+        WriteBytes(buf, &snapshot.standingZeroToRaw, kMatrix34Bytes);
+    }
+    if (snapshot.hasSeatedZero) {
+        WriteBytes(buf, &snapshot.seatedZeroToRaw, kMatrix34Bytes);
+    }
+
+    Write32LE(buf, static_cast<uint32_t>(snapshot.perimeter.size()));
+    for (const auto& p : snapshot.perimeter) {
+        WriteBytes(buf, &p, kVector2Bytes);
+    }
+    Write32LE(buf, static_cast<uint32_t>(snapshot.collisionBounds.size()));
+    for (const auto& q : snapshot.collisionBounds) {
+        WriteBytes(buf, &q, kQuadBytes);
+    }
+    return buf;
+}
+
+bool DeserializeChaperoneSnapshot(
+    const std::vector<uint8_t>& bytes,
+    ChaperoneSnapshot& snapshot,
+    std::string* error)
+{
+    snapshot = {};
+    auto fail = [&](const char* message) {
+        if (error) *error = message ? message : "";
+        return false;
+    };
+
+    if (bytes.empty()) {
+        return fail("empty");
+    }
+
+    uint32_t first = 0;
+    if (!Read32LE(bytes, 0, first)) {
+        return fail("truncated_header");
+    }
+    if (first != kSnapshotMagic) {
+        uint32_t count = first;
+        if (count == 0) {
+            return fail("legacy_empty");
+        }
+        const size_t expected = 4 + static_cast<size_t>(count) * kQuadBytes;
+        if (bytes.size() < expected) {
+            return fail("legacy_truncated");
+        }
+        snapshot.legacyCollisionBoundsOnly = true;
+        snapshot.collisionBounds.resize(count);
+        std::memcpy(
+            snapshot.collisionBounds.data(),
+            bytes.data() + 4,
+            static_cast<size_t>(count) * kQuadBytes);
+        snapshot.perimeter =
+            DerivePerimeterFromCollisionBounds(snapshot.collisionBounds);
+        return true;
+    }
+
+    size_t offset = 4;
+    uint32_t version = 0;
+    uint32_t flags = 0;
+    if (!Read32LEAdvance(bytes, offset, version) ||
+        !Read32LEAdvance(bytes, offset, flags)) {
+        return fail("truncated_v2_header");
+    }
+    if (version != kSnapshotVersion) {
+        return fail("unsupported_version");
+    }
+
+    snapshot.hasPlayArea = (flags & kSnapshotFlagPlayArea) != 0;
+    snapshot.hasStandingZero = (flags & kSnapshotFlagStandingZero) != 0;
+    snapshot.hasSeatedZero = (flags & kSnapshotFlagSeatedZero) != 0;
+
+    if (snapshot.hasPlayArea) {
+        if (!ReadBytes(bytes, offset, &snapshot.playAreaX, sizeof(snapshot.playAreaX)) ||
+            !ReadBytes(bytes, offset, &snapshot.playAreaZ, sizeof(snapshot.playAreaZ))) {
+            return fail("truncated_play_area");
+        }
+    }
+    if (snapshot.hasStandingZero &&
+        !ReadBytes(bytes, offset, &snapshot.standingZeroToRaw, kMatrix34Bytes)) {
+        return fail("truncated_standing_zero");
+    }
+    if (snapshot.hasSeatedZero &&
+        !ReadBytes(bytes, offset, &snapshot.seatedZeroToRaw, kMatrix34Bytes)) {
+        return fail("truncated_seated_zero");
+    }
+
+    uint32_t perimeterCount = 0;
+    if (!Read32LEAdvance(bytes, offset, perimeterCount)) {
+        return fail("truncated_perimeter_count");
+    }
+    snapshot.perimeter.resize(perimeterCount);
+    for (auto& p : snapshot.perimeter) {
+        if (!ReadBytes(bytes, offset, &p, kVector2Bytes)) {
+            return fail("truncated_perimeter");
+        }
+    }
+
+    uint32_t quadCount = 0;
+    if (!Read32LEAdvance(bytes, offset, quadCount)) {
+        return fail("truncated_collision_count");
+    }
+    snapshot.collisionBounds.resize(quadCount);
+    for (auto& q : snapshot.collisionBounds) {
+        if (!ReadBytes(bytes, offset, &q, kQuadBytes)) {
+            return fail("truncated_collision_bounds");
+        }
+    }
+    return true;
+}
+
 std::vector<uint8_t> SnapshotCurrentChaperone() {
     if (!ChaperoneSetupOk()) return {};
 
     auto* setup = vr::VRChaperoneSetup();
-    uint32_t count = 0;
-    setup->GetLiveCollisionBoundsInfo(nullptr, &count);
-    if (count == 0) return {};
+    setup->RevertWorkingCopy();
 
-    std::vector<vr::HmdQuad_t> quads(count);
-    setup->GetLiveCollisionBoundsInfo(quads.data(), &count);
-
-    std::vector<uint8_t> buf;
-    buf.reserve(4 + count * kQuadBytes);
-    Write32LE(buf, count);
-    for (const auto& q : quads) {
-        const uint8_t* raw = reinterpret_cast<const uint8_t*>(&q);
-        buf.insert(buf.end(), raw, raw + kQuadBytes);
+    ChaperoneSnapshot snapshot;
+    float playAreaX = 0.0f;
+    float playAreaZ = 0.0f;
+    if (setup->GetWorkingPlayAreaSize(&playAreaX, &playAreaZ)) {
+        snapshot.hasPlayArea = true;
+        snapshot.playAreaX = playAreaX;
+        snapshot.playAreaZ = playAreaZ;
+    }
+    if (setup->GetWorkingStandingZeroPoseToRawTrackingPose(
+            &snapshot.standingZeroToRaw)) {
+        snapshot.hasStandingZero = true;
+    }
+    if (setup->GetWorkingSeatedZeroPoseToRawTrackingPose(
+            &snapshot.seatedZeroToRaw)) {
+        snapshot.hasSeatedZero = true;
     }
 
+    uint32_t count = 0;
+    if (setup->GetWorkingCollisionBoundsInfo(nullptr, &count) && count > 0) {
+        snapshot.collisionBounds.resize(count);
+        if (setup->GetWorkingCollisionBoundsInfo(
+                snapshot.collisionBounds.data(),
+                &count)) {
+            snapshot.collisionBounds.resize(count);
+        } else {
+            snapshot.collisionBounds.clear();
+        }
+    }
+
+    snapshot.perimeter =
+        DerivePerimeterFromCollisionBounds(snapshot.collisionBounds);
+    if (snapshot.perimeter.empty()) {
+        vr::HmdQuad_t rect{};
+        if (setup->GetWorkingPlayAreaRect(&rect)) {
+            snapshot.perimeter = PerimeterFromPlayAreaRect(rect);
+        }
+    }
+
+    if (!snapshot.hasPlayArea &&
+        !snapshot.hasStandingZero &&
+        !snapshot.hasSeatedZero &&
+        snapshot.perimeter.empty() &&
+        snapshot.collisionBounds.empty()) {
+        return {};
+    }
+
+    std::vector<uint8_t> buf = SerializeChaperoneSnapshot(snapshot);
     {
-        char lbuf[96];
+        char lbuf[192];
         snprintf(lbuf, sizeof lbuf,
-            "[boundary] snapshotted prior chaperone: bytes=%zu", buf.size());
+            "[boundary] snapshotted prior chaperone: bytes=%zu play=%d standing=%d seated=%d perimeter=%zu quads=%zu",
+            buf.size(),
+            snapshot.hasPlayArea ? 1 : 0,
+            snapshot.hasStandingZero ? 1 : 0,
+            snapshot.hasSeatedZero ? 1 : 0,
+            snapshot.perimeter.size(),
+            snapshot.collisionBounds.size());
         Metrics::WriteLogAnnotation(lbuf);
     }
 
@@ -832,27 +1139,57 @@ bool RestoreChaperoneFromSnapshot(const std::vector<uint8_t>& snapshot) {
     }
     if (!ChaperoneSetupOk()) return false;
 
-    uint32_t count = 0;
-    if (!Read32LE(snapshot, 0, count)) return false;
-    if (count == 0) return false;
-    const size_t expected = 4 + static_cast<size_t>(count) * kQuadBytes;
-    if (snapshot.size() < expected) {
+    ChaperoneSnapshot parsed;
+    std::string parseError;
+    if (!DeserializeChaperoneSnapshot(snapshot, parsed, &parseError)) {
         char fbuf[128];
         snprintf(fbuf, sizeof fbuf,
-            "[boundary] restore failed: bytes=%zu (truncated; expected %zu)",
-            snapshot.size(), expected);
+            "[boundary] restore failed: bytes=%zu parse=%s",
+            snapshot.size(),
+            parseError.c_str());
         Metrics::WriteLogAnnotation(fbuf);
         return false;
     }
 
-    std::vector<vr::HmdQuad_t> quads(count);
-    std::memcpy(quads.data(), snapshot.data() + 4, count * kQuadBytes);
-
     auto* setup = vr::VRChaperoneSetup();
-    setup->SetWorkingCollisionBoundsInfo(quads.data(), count);
-    setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
-    Metrics::WriteLogAnnotation("[boundary] restored prior chaperone");
-    return true;
+    setup->RevertWorkingCopy();
+    if (parsed.hasPlayArea) {
+        setup->SetWorkingPlayAreaSize(parsed.playAreaX, parsed.playAreaZ);
+    }
+    if (!parsed.perimeter.empty()) {
+        setup->SetWorkingPerimeter(
+            parsed.perimeter.data(),
+            static_cast<uint32_t>(parsed.perimeter.size()));
+    }
+    if (!parsed.collisionBounds.empty()) {
+        setup->SetWorkingCollisionBoundsInfo(
+            parsed.collisionBounds.data(),
+            static_cast<uint32_t>(parsed.collisionBounds.size()));
+    }
+    if (parsed.hasSeatedZero) {
+        setup->SetWorkingSeatedZeroPoseToRawTrackingPose(&parsed.seatedZeroToRaw);
+    }
+    if (parsed.hasStandingZero) {
+        setup->SetWorkingStandingZeroPoseToRawTrackingPose(&parsed.standingZeroToRaw);
+    }
+
+    const bool committed = setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+    if (committed && vr::VRChaperone()) {
+        vr::VRChaperone()->ReloadInfo();
+    }
+    setup->RevertWorkingCopy();
+    char lbuf[224];
+    snprintf(lbuf, sizeof lbuf,
+        "[boundary] restore prior chaperone: commit=%d legacy=%d play=%d standing=%d seated=%d perimeter=%zu quads=%zu",
+        committed ? 1 : 0,
+        parsed.legacyCollisionBoundsOnly ? 1 : 0,
+        parsed.hasPlayArea ? 1 : 0,
+        parsed.hasStandingZero ? 1 : 0,
+        parsed.hasSeatedZero ? 1 : 0,
+        parsed.perimeter.size(),
+        parsed.collisionBounds.size());
+    Metrics::WriteLogAnnotation(lbuf);
+    return committed;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 #include "BoundaryCapture.h"
 #include "BoundaryFloorCapture.h"
 #include "BoundaryPreview.h"
+#include "BoundarySpatial.h"
 #include "ControllerInput.h"
 #include "boundary_test_helpers.h"
 
@@ -16,6 +17,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -100,6 +102,24 @@ std::vector<ControllerContactCase> ControllerContactCases()
         { "vive_face_down", "vive_controller", faceDown, 0.0060 },
         { "unknown_controller", "unknown_controller", faceUp, 0.0 },
     };
+}
+
+vr::HmdQuad_t MakeWallQuad(double ax, double az, double bx, double bz, double floorY, double ceilingY)
+{
+    vr::HmdQuad_t q{};
+    q.vCorners[0].v[0] = static_cast<float>(ax);
+    q.vCorners[0].v[1] = static_cast<float>(floorY);
+    q.vCorners[0].v[2] = static_cast<float>(az);
+    q.vCorners[1].v[0] = static_cast<float>(bx);
+    q.vCorners[1].v[1] = static_cast<float>(floorY);
+    q.vCorners[1].v[2] = static_cast<float>(bz);
+    q.vCorners[2].v[0] = static_cast<float>(bx);
+    q.vCorners[2].v[1] = static_cast<float>(ceilingY);
+    q.vCorners[2].v[2] = static_cast<float>(bz);
+    q.vCorners[3].v[0] = static_cast<float>(ax);
+    q.vCorners[3].v[1] = static_cast<float>(ceilingY);
+    q.vCorners[3].v[2] = static_cast<float>(az);
+    return q;
 }
 
 } // namespace
@@ -346,6 +366,43 @@ TEST(BoundaryTransformTest, FloorApplyDefaultsToBoundaryLocalHeight) {
     EXPECT_NEAR(BoundaryFloorYAfterApply(0.42, false), 0.42, 1e-9);
     EXPECT_NEAR(BoundaryFloorYAfterApply(-0.12, false), -0.12, 1e-9);
     EXPECT_NEAR(BoundaryFloorYAfterApply(0.42, true), 0.0, 1e-9);
+}
+
+TEST(BoundaryTransformTest, SteamVrFloorVerificationRequiresObservedPoseShift) {
+    StandingYSample before;
+    before.valid = true;
+    before.y = 0.53;
+    StandingYSample afterMoved;
+    afterMoved.valid = true;
+    afterMoved.y = 0.03;
+
+    const auto verified =
+        EvaluateSteamVrFloorVerification(before, afterMoved, 0.50);
+    EXPECT_TRUE(verified.verified);
+    EXPECT_NEAR(verified.expectedAfterY, 0.03, 1e-9);
+    EXPECT_NEAR(verified.residualY, 0.0, 1e-9);
+
+    StandingYSample afterUnchanged = afterMoved;
+    afterUnchanged.y = 0.53;
+    const auto stale =
+        EvaluateSteamVrFloorVerification(before, afterUnchanged, 0.50);
+    EXPECT_FALSE(stale.verified);
+    EXPECT_NEAR(stale.residualY, 0.50, 1e-9);
+}
+
+TEST(BoundaryTransformTest, SteamVrFloorVerificationFailsWithoutValidSamples) {
+    StandingYSample before;
+    before.valid = true;
+    before.y = 0.40;
+    StandingYSample after;
+    after.valid = false;
+    after.y = 0.0;
+
+    const auto result =
+        EvaluateSteamVrFloorVerification(before, after, 0.40);
+    EXPECT_FALSE(result.verified);
+    EXPECT_TRUE(result.beforeValid);
+    EXPECT_FALSE(result.afterValid);
 }
 
 TEST(BoundaryTransformTest, ControllerTargetMatchRequiresConfiguredTargetSystem) {
@@ -925,6 +982,61 @@ TEST(BoundaryPreviewTest, RasterMarksLivePathPixels) {
     EXPECT_GT(closedAlpha, openAlpha);
 }
 
+TEST(SpatialFrameworkTest, TargetPrimitiveBuildsStandingRenderCommand) {
+    Eigen::AffineCompact3d targetToStanding = Eigen::AffineCompact3d::Identity();
+    targetToStanding.translation() = Eigen::Vector3d(1.0, 0.25, -2.0);
+    const SpatialSpace target =
+        TargetSpace("lighthouse", targetToStanding, 17);
+    const SpatialSession session = BoundaryCaptureSessionDescriptor(
+        target,
+        4,
+        "lighthouse",
+        0.10,
+        true,
+        99);
+
+    const std::vector<BoundaryVertex> targetPath = {
+        { 0.0, 0.10, 0.0 },
+        { 1.0, 0.10, 0.0 },
+        { 1.0, 0.10, 1.0 },
+    };
+    const SpatialPrimitive primitive =
+        BoundaryPathPrimitive(session, targetPath, true);
+    const auto commands = BuildSpatialRenderCommands({ primitive });
+
+    ASSERT_EQ(commands.size(), 1u);
+    EXPECT_EQ(commands[0].kind, SpatialPrimitiveKind::PolygonFloorRegion);
+    EXPECT_TRUE(commands[0].closeLoop);
+    EXPECT_NEAR(commands[0].floorY, 0.35, 1e-9);
+    ASSERT_EQ(commands[0].standingVertices.size(), targetPath.size());
+    ExpectVertexNear(commands[0].standingVertices[0], 1.0, 0.35, -2.0);
+    ExpectVertexNear(commands[0].standingVertices[2], 2.0, 0.35, -1.0);
+}
+
+TEST(SpatialFrameworkTest, RasterCanRenderMultipleCommands) {
+    SpatialSession session = BoundaryCaptureSessionDescriptor(
+        StandingSpace("lighthouse"),
+        4,
+        "lighthouse",
+        0.0,
+        false,
+        1);
+    const auto boundary = BoundaryPathPrimitive(
+        session,
+        SquareBoundary(-1.0, -1.0, 1.0, 1.0),
+        true);
+    const auto marker = FloorMarkerPrimitive(
+        StandingSpace("lighthouse"),
+        SquareBoundary(-0.15, -0.15, 0.15, 0.15),
+        0.0);
+
+    const auto raster = BuildBoundaryPreviewRaster(
+        BuildSpatialRenderCommands({ boundary, marker }));
+
+    EXPECT_TRUE(raster.plane.valid);
+    EXPECT_GT(CountAlphaPixels(raster), 0u);
+}
+
 TEST(ControllerSelectionTest, DefaultsToRightControllerWithValidPose) {
     using wkopenvr::controller_input::ChoosePreferredController;
     using wkopenvr::controller_input::ControllerSelectionChoice;
@@ -1198,6 +1310,14 @@ TEST(ChaperoneWorkingSetTest, RejectsBoundaryThatDoesNotContainStandingOrigin) {
         2.4);
 
     EXPECT_FALSE(workingSet.valid);
+
+    const auto output = BuildChaperoneOutput(
+        SquareBoundary(1.0, 1.0, 3.0, 3.0),
+        0.0,
+        2.4);
+    EXPECT_FALSE(output.ready());
+    EXPECT_EQ(output.status, ChaperoneOutputStatus::VisualOnlyNoStandingOrigin);
+    ASSERT_STREQ(output.reason, "standing_origin_outside_polygon");
 }
 
 TEST(ChaperoneWorkingSetTest, RejectsDegenerateAndNonFiniteGeometry) {
@@ -1249,4 +1369,63 @@ TEST(ChaperoneWorkingSetTest, RejectsInvalidGeometry) {
         { 1.0, 0.0, 0.0 },
         { 1.0, 0.0, 1.0 },
     }, 2.4, 0.0).valid);
+}
+
+TEST(ChaperoneSnapshotTest, RoundTripsFullSnapshotFormat) {
+    ChaperoneSnapshot snapshot;
+    snapshot.hasPlayArea = true;
+    snapshot.playAreaX = 2.5f;
+    snapshot.playAreaZ = 3.5f;
+    snapshot.hasStandingZero = true;
+    snapshot.standingZeroToRaw = MakeIdentityMatrix34();
+    SetTranslation(snapshot.standingZeroToRaw, 0.1f, 0.2f, 0.3f);
+    snapshot.hasSeatedZero = true;
+    snapshot.seatedZeroToRaw = MakeIdentityMatrix34();
+    SetTranslation(snapshot.seatedZeroToRaw, -0.1f, -0.2f, -0.3f);
+    vr::HmdVector2_t p{};
+    p.v[0] = -1.0f;
+    p.v[1] = 2.0f;
+    snapshot.perimeter.push_back(p);
+    snapshot.collisionBounds.push_back(MakeWallQuad(-1.0, -1.0, 1.0, -1.0, 0.0, 2.4));
+
+    const auto bytes = SerializeChaperoneSnapshot(snapshot);
+    ChaperoneSnapshot parsed;
+    std::string error;
+
+    ASSERT_TRUE(DeserializeChaperoneSnapshot(bytes, parsed, &error)) << error;
+    EXPECT_FALSE(parsed.legacyCollisionBoundsOnly);
+    EXPECT_TRUE(parsed.hasPlayArea);
+    EXPECT_NEAR(parsed.playAreaX, 2.5f, 1e-6f);
+    EXPECT_NEAR(parsed.playAreaZ, 3.5f, 1e-6f);
+    EXPECT_TRUE(parsed.hasStandingZero);
+    ExpectMatrixTranslationNear(parsed.standingZeroToRaw, 0.1f, 0.2f, 0.3f);
+    EXPECT_TRUE(parsed.hasSeatedZero);
+    ExpectMatrixTranslationNear(parsed.seatedZeroToRaw, -0.1f, -0.2f, -0.3f);
+    ASSERT_EQ(parsed.perimeter.size(), 1u);
+    EXPECT_NEAR(parsed.perimeter[0].v[0], -1.0f, 1e-6f);
+    EXPECT_NEAR(parsed.perimeter[0].v[1], 2.0f, 1e-6f);
+    ASSERT_EQ(parsed.collisionBounds.size(), 1u);
+    EXPECT_NEAR(parsed.collisionBounds[0].vCorners[2].v[1], 2.4f, 1e-6f);
+}
+
+TEST(ChaperoneSnapshotTest, ReadsLegacyCollisionOnlySnapshot) {
+    const vr::HmdQuad_t quad = MakeWallQuad(-1.0, -2.0, 1.0, -2.0, 0.0, 2.4);
+    std::vector<uint8_t> bytes;
+    bytes.push_back(1u);
+    bytes.push_back(0u);
+    bytes.push_back(0u);
+    bytes.push_back(0u);
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(&quad);
+    bytes.insert(bytes.end(), raw, raw + sizeof(quad));
+
+    ChaperoneSnapshot parsed;
+    std::string error;
+    ASSERT_TRUE(DeserializeChaperoneSnapshot(bytes, parsed, &error)) << error;
+
+    EXPECT_TRUE(parsed.legacyCollisionBoundsOnly);
+    EXPECT_FALSE(parsed.hasPlayArea);
+    ASSERT_EQ(parsed.collisionBounds.size(), 1u);
+    ASSERT_EQ(parsed.perimeter.size(), 1u);
+    EXPECT_NEAR(parsed.perimeter[0].v[0], -1.0f, 1e-6f);
+    EXPECT_NEAR(parsed.perimeter[0].v[1], -2.0f, 1e-6f);
 }

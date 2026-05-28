@@ -40,6 +40,7 @@ namespace {
 
 wkopenvr::boundary::CaptureSession s_capture;
 wkopenvr::boundary::FloorCaptureSession s_floorCapture;
+wkopenvr::boundary::SpatialSession s_spatialSession;
 std::string s_boundaryError;
 uint64_t s_floorSessionId = 0;
 bool s_steamVrWorkingPreviewVisible = false;
@@ -238,6 +239,24 @@ bool PushTargetBoundaryToChaperoneWithTransform(
         openvr_pair::common::DiagnosticLog("boundary", "%s", lbuf);
     }
 
+    const auto output = wkopenvr::boundary::BuildChaperoneOutput(
+        standingVertices,
+        standingFloor,
+        standingCeiling);
+    if (!output.ready()) {
+        error = output.status == wkopenvr::boundary::ChaperoneOutputStatus::VisualOnlyNoStandingOrigin
+            ? "Boundary can be previewed, but SteamVR native chaperone requires the standing origin inside the polygon."
+            : "Boundary geometry is not valid for SteamVR native chaperone.";
+        char obuf[224];
+        snprintf(obuf, sizeof obuf,
+            "[boundary] target push rejected before commit: status=%d reason=%s",
+            static_cast<int>(output.status),
+            output.reason ? output.reason : "");
+        Metrics::WriteLogAnnotation(obuf);
+        openvr_pair::common::DiagnosticLog("boundary", "%s", obuf);
+        return false;
+    }
+
     const bool ok = wkopenvr::boundary::PushToChaperone(
         standingVertices,
         standingFloor,
@@ -334,6 +353,20 @@ void StartBoundaryCapture(const BoundaryControllerChoice* selectedController)
     s_captureLastTriggerReadable = false;
     s_captureLastTriggerReading = {};
     s_capture.Start();
+    s_spatialSession =
+        wkopenvr::boundary::BoundaryCaptureSessionDescriptor(
+            useTargetSpace
+                ? wkopenvr::boundary::TargetSpace(
+                    selectedController ? selectedController->trackingSystem : CalCtx.targetTrackingSystem,
+                    s_capturePreviewTransform,
+                    s_capture.sessionId())
+                : wkopenvr::boundary::StandingSpace(
+                    selectedController ? selectedController->trackingSystem : std::string()),
+            selectedController ? selectedController->deviceId : -1,
+            selectedController ? selectedController->trackingSystem : std::string(),
+            s_captureFloorY,
+            s_captureRequireTrigger,
+            s_capture.sessionId());
 
     char lbuf[256];
     snprintf(lbuf, sizeof lbuf,
@@ -349,6 +382,7 @@ void StartBoundaryCapture(const BoundaryControllerChoice* selectedController)
 
 void StopBoundaryCapturePreview()
 {
+    s_spatialSession = {};
     s_capturePreviewTransformValid = false;
     s_smoothedPreviewCursorValid = false;
     HideBoundaryPreviewOverlay();
@@ -629,32 +663,38 @@ void TickBoundaryPreviewForCapture(
     const wkopenvr::boundary::FloorHitPreview* cursor = nullptr)
 {
     const auto preview = BoundaryPreviewPathWithCursor(s_capture.vertices(), cursor);
-    if (s_captureUsesStandingSpace) {
-        TickBoundaryPreviewForStandingVerticesAtFloor(
-            true,
-            preview,
-            s_captureFloorY,
-            BoundaryLoopNearlyClosed(preview));
+    auto primitive = wkopenvr::boundary::BoundaryPathPrimitive(
+        s_spatialSession,
+        preview,
+        BoundaryLoopNearlyClosed(preview));
+    const auto commands =
+        wkopenvr::boundary::BuildSpatialRenderCommands({ primitive });
+    if (commands.empty()) {
+        HideBoundaryPreviewOverlay();
         return;
     }
-    TickBoundaryPreviewForTargetVerticesAtFloor(
+    wkopenvr::boundary::TickBoundaryPreview(
         true,
-        preview,
-        s_captureFloorY,
-        BoundaryLoopNearlyClosed(preview));
+        commands,
+        commands.front().floorY);
+
+    if (s_steamVrWorkingPreviewVisible) {
+        wkopenvr::boundary::HideWorkingChaperonePreview();
+        s_steamVrWorkingPreviewVisible = false;
+    }
 }
 
-bool ApplyFloorFromControllerPose(
-    const Eigen::Affine3d& rawPose,
+bool ApplyFloorFromStandingContactPose(
+    const Eigen::Affine3d& standingContactPose,
     vr::TrackedDeviceIndex_t deviceId,
     const std::string& trackingSystem)
 {
-    const double floorY = rawPose.translation().y();
+    const double floorY = standingContactPose.translation().y();
     if (!std::isfinite(floorY) || floorY < -5.0 || floorY > 5.0) {
         s_boundaryError = "Controller floor sample was outside the expected tracking range.";
         return false;
     }
-    const double measuredStandingY = rawPose.translation().y();
+    const double measuredStandingY = standingContactPose.translation().y();
     if (!std::isfinite(measuredStandingY) || measuredStandingY < -5.0 || measuredStandingY > 5.0) {
         s_boundaryError = "Mapped controller floor sample was outside the expected SteamVR range.";
         char fbuf[256];
@@ -671,6 +711,11 @@ bool ApplyFloorFromControllerPose(
 
     char floorError[192] = {};
     bool steamFloorApplied = false;
+    bool steamFloorVerified = false;
+    std::string steamFloorWarning;
+    const auto beforeFloorSample = s_moveSteamVrFloorOnApply
+        ? wkopenvr::boundary::SampleDeviceStandingY(deviceId)
+        : wkopenvr::boundary::StandingYSample{};
     if (s_moveSteamVrFloorOnApply) {
         steamFloorApplied =
             wkopenvr::boundary::ApplySteamVrFloorOffset(
@@ -678,15 +723,47 @@ bool ApplyFloorFromControllerPose(
                 floorError,
                 sizeof floorError);
     }
+    wkopenvr::boundary::SteamVrFloorVerification steamFloorVerification;
+    if (s_moveSteamVrFloorOnApply && steamFloorApplied) {
+        const auto afterFloorSample =
+            wkopenvr::boundary::SampleDeviceStandingY(deviceId);
+        steamFloorVerification =
+            wkopenvr::boundary::EvaluateSteamVrFloorVerification(
+                beforeFloorSample,
+                afterFloorSample,
+                measuredStandingY);
+        steamFloorVerified = steamFloorVerification.verified;
+
+        char vbuf[384];
+        snprintf(vbuf, sizeof vbuf,
+            "[boundary-floor] steamvr floor verify: device=%d before_valid=%d after_valid=%d before_y=%.4f after_y=%.4f expected_after_y=%.4f residual_y=%.4f verified=%d",
+            static_cast<int>(deviceId),
+            steamFloorVerification.beforeValid ? 1 : 0,
+            steamFloorVerification.afterValid ? 1 : 0,
+            steamFloorVerification.beforeY,
+            steamFloorVerification.afterY,
+            steamFloorVerification.expectedAfterY,
+            steamFloorVerification.residualY,
+            steamFloorVerified ? 1 : 0);
+        Metrics::WriteLogAnnotation(vbuf);
+        openvr_pair::common::DiagnosticLog("boundary-floor", "%s", vbuf);
+
+        if (!steamFloorVerified) {
+            steamFloorWarning =
+                "SteamVR accepted the floor change, but live poses did not move as expected. Boundary floor was applied locally.";
+            steamFloorApplied = false;
+        }
+    }
     {
         char lbuf[384];
         snprintf(lbuf, sizeof lbuf,
-            "[boundary-floor] apply requested: device=%d system='%s' standing_y=%.4f steamvr_apply=%d boundary_only=%d",
+            "[boundary-floor] apply requested: device=%d system='%s' standing_y=%.4f steamvr_apply=%d steamvr_verified=%d boundary_only=%d",
             static_cast<int>(deviceId),
             trackingSystem.c_str(),
             measuredStandingY,
             steamFloorApplied ? 1 : 0,
-            s_moveSteamVrFloorOnApply ? 0 : 1);
+            steamFloorVerified ? 1 : 0,
+            steamFloorApplied ? 0 : 1);
         Metrics::WriteLogAnnotation(lbuf);
         openvr_pair::common::DiagnosticLog("boundary-floor", "%s", lbuf);
     }
@@ -694,35 +771,10 @@ bool ApplyFloorFromControllerPose(
         s_boundaryError = floorError[0] ? floorError : "SteamVR floor apply failed.";
         return false;
     }
-    if (s_moveSteamVrFloorOnApply) {
-        auto* vrs = vr::VRSystem();
-        if (vrs) {
-            vr::TrackedDevicePose_t standingPoses[vr::k_unMaxTrackedDeviceCount]{};
-            vrs->GetDeviceToAbsoluteTrackingPose(
-                vr::TrackingUniverseStanding,
-                0.0f,
-                standingPoses,
-                vr::k_unMaxTrackedDeviceCount);
-            if (deviceId < vr::k_unMaxTrackedDeviceCount) {
-                const auto& pose = standingPoses[deviceId];
-                char pbuf[256];
-                snprintf(pbuf, sizeof pbuf,
-                    "[boundary-floor] post-apply device pose: device=%d connected=%d valid=%d result=%d standing_y=%.4f",
-                    static_cast<int>(deviceId),
-                    pose.bDeviceIsConnected ? 1 : 0,
-                    pose.bPoseIsValid ? 1 : 0,
-                    static_cast<int>(pose.eTrackingResult),
-                    static_cast<double>(pose.mDeviceToAbsoluteTracking.m[1][3]));
-                Metrics::WriteLogAnnotation(pbuf);
-                openvr_pair::common::DiagnosticLog("boundary-floor", "%s", pbuf);
-            }
-        }
-    }
-
     double boundaryFloorY =
         wkopenvr::boundary::BoundaryFloorYAfterApply(
             measuredStandingY,
-            s_moveSteamVrFloorOnApply);
+            steamFloorApplied);
     if (!CalCtx.boundary.standingSpace && BoundaryTransformReady()) {
         boundaryFloorY =
             wkopenvr::boundary::TargetFloorYForStandingFloor(
@@ -742,15 +794,19 @@ bool ApplyFloorFromControllerPose(
     }
 
     SaveProfile(CalCtx);
+    if (!steamFloorWarning.empty() && s_boundaryError.empty()) {
+        s_boundaryError = steamFloorWarning;
+    }
 
     char lbuf[224];
     snprintf(lbuf, sizeof lbuf,
-        "[boundary-floor] set from controller: device=%d system='%s' boundary_floor_y=%.3f measured_standing_y=%.3f move_steamvr_floor=%d vertices=%zu",
+        "[boundary-floor] set from controller: device=%d system='%s' boundary_floor_y=%.3f measured_standing_y=%.3f move_steamvr_floor=%d steamvr_verified=%d vertices=%zu",
         static_cast<int>(deviceId),
         trackingSystem.c_str(),
         CalCtx.boundary.floorY,
         measuredStandingY,
         s_moveSteamVrFloorOnApply ? 1 : 0,
+        steamFloorVerified ? 1 : 0,
         CalCtx.boundary.vertices.size());
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-floor", "%s", lbuf);
@@ -968,7 +1024,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
             if (ImGui::Button("Apply floor")) {
                 Eigen::Affine3d floorPose = floor.pose;
                 floorPose.translation().y() = floor.floorY;
-                const bool applied = ApplyFloorFromControllerPose(
+                const bool applied = ApplyFloorFromStandingContactPose(
                     floorPose,
                     static_cast<vr::TrackedDeviceIndex_t>(floor.deviceId),
                     floor.trackingSystem);
@@ -1144,6 +1200,7 @@ struct BoundaryInputStats {
     int controllerStateFailed = 0;
     int poseOk = 0;
     int poseInvalid = 0;
+    bool chosenRawPoseValid = false;
     int lastDeviceId = -1;
     int chosenDeviceId = -1;
     double chosenY = 0.0;
@@ -1206,12 +1263,13 @@ Eigen::Affine3d HmdMatrix34ToAffine(const vr::HmdMatrix34_t& m)
 }
 
 void WriteBoundaryInputSummary(const BoundaryInputStats& stats, uint64_t sessionId, size_t rawCount) {
-    char lbuf[640];
+    char lbuf[760];
     snprintf(lbuf, sizeof lbuf,
-        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' controllers=%d matching=%d skipped_system=%d state_failed=%d pose_ok=%d pose_invalid=%d last_device=%d last_system='%s' chosen_device=%d chosen_system='%s' chosen_y=%.3f",
+        "[boundary-capture] waiting: session=%llu raw=%zu target='%s' capture_space=%s controllers=%d matching=%d skipped_system=%d state_failed=%d pose_ok=%d pose_invalid=%d last_device=%d last_system='%s' chosen_device=%d chosen_system='%s' chosen_y=%.3f chosen_raw_pose=%d",
         static_cast<unsigned long long>(sessionId),
         rawCount,
         CalCtx.targetTrackingSystem.c_str(),
+        s_captureUsesStandingSpace ? "standing" : "target",
         stats.trackedControllers,
         stats.matchingControllers,
         stats.skippedTrackingSystem,
@@ -1222,7 +1280,8 @@ void WriteBoundaryInputSummary(const BoundaryInputStats& stats, uint64_t session
         stats.lastTrackingSystem.c_str(),
         stats.chosenDeviceId,
         stats.chosenTrackingSystem.c_str(),
-        stats.chosenY);
+        stats.chosenY,
+        stats.chosenRawPoseValid ? 1 : 0);
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-capture", "%s", lbuf);
 }
@@ -1278,7 +1337,11 @@ void CCal_TickBoundaryCapture() {
         stats.lastDeviceId = static_cast<int>(deviceId);
         stats.lastTrackingSystem = TrackingSystemName(vrs, deviceId);
 
-        ++stats.matchingControllers;
+        if (TrackingSystemMatchesBoundaryTarget(stats.lastTrackingSystem)) {
+            ++stats.matchingControllers;
+        } else {
+            ++stats.skippedTrackingSystem;
+        }
 
         const auto& standingTrackedPose = standingPoses[deviceId];
         if (!standingTrackedPose.bDeviceIsConnected ||
@@ -1333,6 +1396,7 @@ void CCal_TickBoundaryCapture() {
     stats.chosenDeviceId = static_cast<int>(chosen.deviceId);
     stats.chosenTrackingSystem = chosen.trackingSystem;
     stats.chosenY = chosen.standingPose.translation().y();
+    stats.chosenRawPoseValid = chosen.rawPoseValid;
 
     if (s_floorCapture.active()) {
         const std::string controllerType = DeviceStringProperty(
