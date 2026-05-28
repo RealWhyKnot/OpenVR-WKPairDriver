@@ -68,7 +68,9 @@ void RegisterBooleanComponent(
 void RegisterScalarComponent(
 	vr::VRInputComponentHandle_t handle,
 	vr::PropertyContainerHandle_t container,
-	const char *path)
+	const char *path,
+	vr::EVRScalarType scalar_type,
+	vr::EVRScalarUnits scalar_units)
 {
 	std::string componentPath = path;
 	std::string stem;
@@ -79,6 +81,8 @@ void RegisterScalarComponent(
 	stats.path             = std::move(componentPath);
 	stats.is_boolean       = false;
 	stats.is_scalar        = true;
+	stats.scalar_type      = static_cast<uint8_t>(scalar_type);
+	stats.scalar_units     = static_cast<uint8_t>(scalar_units);
 	stats.first_update_logged = false;
 	stats.axis_role        = role;
 	stats.partner_handle   = 0;

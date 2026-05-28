@@ -44,6 +44,8 @@ struct ComponentStats
 	std::string path;
 	bool        is_scalar  = false;
 	bool        is_boolean = false;
+	uint8_t     scalar_type  = 0; // vr::EVRScalarType for scalar components
+	uint8_t     scalar_units = 0; // vr::EVRScalarUnits for scalar components
 
 	// Property container the driver passed at Create{Boolean,Scalar}Component
 	// time. Stable for the lifetime of the underlying tracked device. Stored
@@ -132,6 +134,12 @@ struct ComponentStats
 	bool     last_boolean = false;
 	bool     pending_state = false;
 	uint64_t last_committed_us = 0;
+
+	// Raw boolean transition timing. Used to learn short mechanical bounce
+	// without waiting for hundreds of ordinary presses.
+	uint64_t last_raw_transition_us = 0;
+	uint64_t bounce_transition_count = 0;
+	uint32_t bounce_max_interval_us = 0;
 };
 
 // Reset everything except the path / role / partner pairing. Used by
@@ -152,6 +160,9 @@ inline void ComponentStatsResetPassive(ComponentStats &s)
 	s.last_boolean   = false;
 	s.pending_state  = false;
 	s.last_committed_us = 0;
+	s.last_raw_transition_us = 0;
+	s.bounce_transition_count = 0;
+	s.bounce_max_interval_us = 0;
 	s.first_update_logged = false;
 }
 

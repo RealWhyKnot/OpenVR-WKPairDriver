@@ -13,7 +13,9 @@ void RegisterBooleanComponent(
 void RegisterScalarComponent(
 	vr::VRInputComponentHandle_t handle,
 	vr::PropertyContainerHandle_t container,
-	const char *path);
+	const char *path,
+	vr::EVRScalarType scalar_type,
+	vr::EVRScalarUnits scalar_units);
 
 // FNV-1a 64-bit hash of the container's Prop_SerialNumber_String, or 0
 // when the container is invalid or the property system has not yet

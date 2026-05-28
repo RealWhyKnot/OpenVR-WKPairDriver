@@ -97,17 +97,17 @@ ScenarioResult RunScenario_inputhealth(ScenarioContext &ctx) {
 			"WKOpenVRInputHealthMemoryV1 magic=0x" + std::to_string(magic)
 			+ " (expected 0x494E4848)");
 	}
-	if (version != 2u) {
+	if (version != 3u) {
 		return Fail("inputhealth", duration_now(),
 			"WKOpenVRInputHealthMemoryV1 version=" + std::to_string(version)
-			+ " (expected 2)");
+			+ " (expected 3)");
 	}
 	if (slot_count != 256u) {
 		return Fail("inputhealth", duration_now(),
 			"WKOpenVRInputHealthMemoryV1 slot_count=" + std::to_string(slot_count)
 			+ " (expected 256)");
 	}
-	ctx.log.Info("inputhealth shmem header OK (magic=INHH, ver=2, slots=256)");
+	ctx.log.Info("inputhealth shmem header OK (magic=INHH, ver=3, slots=256)");
 
 	// Exercise the mock IVRDriverInput path: simulate a scalar update on a
 	// trigger-like path; the InputHealth MinHook detour observes it and

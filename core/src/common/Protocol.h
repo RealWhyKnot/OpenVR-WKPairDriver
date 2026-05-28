@@ -721,11 +721,14 @@ namespace protocol
 		uint8_t  is_scalar;
 		uint8_t  is_boolean;
 		uint8_t  axis_role;       // inputhealth::AxisRole
+		uint8_t  scalar_type;     // vr::EVRScalarType
+		uint8_t  scalar_units;    // vr::EVRScalarUnits
 		uint8_t  ph_initialized;
 		uint8_t  ph_triggered;
 		uint8_t  ph_triggered_positive;
 		uint8_t  rest_min_initialized;
 		uint8_t  last_boolean;
+		uint8_t  _pad_component_flags[6];
 
 		// Welford streaming mean / variance.
 		uint64_t welford_count;
@@ -748,6 +751,9 @@ namespace protocol
 
 		uint64_t last_update_us;
 		uint64_t press_count;
+		uint64_t bounce_transition_count;
+		uint32_t bounce_max_interval_us;
+		uint32_t _pad_bounce;
 
 		// Raw scalar range observed since last reset. Cheap O(1) driver-side
 		// bookkeeping used by the overlay to sanity-check trigger/stick
@@ -793,7 +799,7 @@ namespace protocol
 		// InputHealthSnapshotRecord or the header. Mismatched versions are
 		// rejected at Open() so the overlay never reads the wrong layout.
 		static const uint32_t SHMEM_MAGIC   = 0x494E4848; // 'INHH'
-		static const uint32_t SHMEM_VERSION = 2;
+		static const uint32_t SHMEM_VERSION = 3;
 
 	private:
 		struct ShmemData

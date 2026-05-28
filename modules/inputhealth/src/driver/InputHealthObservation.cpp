@@ -1,5 +1,9 @@
 #include "InputHealthObservation.h"
 
+#include "inputhealth/LearningRules.h"
+
+#include <algorithm>
+
 namespace {
 
 // Tunable Page-Hinkley parameters. Defaults from the research doc Q3:
@@ -33,9 +37,21 @@ constexpr float kRestThreshold = 0.1f;
 
 namespace inputhealth {
 
-void ObserveBooleanSample(ComponentStats &stats, bool newValue)
+void ObserveBooleanSample(ComponentStats &stats, bool newValue, uint64_t nowUs)
 {
 	if (newValue != stats.pending_state) {
+		if (stats.last_raw_transition_us != 0) {
+			const uint64_t interval = nowUs - stats.last_raw_transition_us;
+			if (inputhealth::IsLikelyButtonBounceInterval(interval)) {
+				++stats.bounce_transition_count;
+				const uint32_t clamped = static_cast<uint32_t>(
+					std::min<uint64_t>(interval, inputhealth::kButtonBounceMaxIntervalUs));
+				if (clamped > stats.bounce_max_interval_us) {
+					stats.bounce_max_interval_us = clamped;
+				}
+			}
+		}
+		stats.last_raw_transition_us = nowUs;
 		if (newValue) ++stats.press_count;
 		stats.pending_state = newValue;
 	}

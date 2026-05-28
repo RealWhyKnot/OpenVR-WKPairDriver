@@ -39,6 +39,8 @@ void FillSnapshotBody(
 	out.is_scalar              = s.is_scalar  ? 1 : 0;
 	out.is_boolean             = s.is_boolean ? 1 : 0;
 	out.axis_role              = static_cast<uint8_t>(s.axis_role);
+	out.scalar_type            = s.scalar_type;
+	out.scalar_units           = s.scalar_units;
 	out.ph_initialized         = s.ph_drift.initialized        ? 1 : 0;
 	out.ph_triggered           = s.ph_drift.triggered          ? 1 : 0;
 	out.ph_triggered_positive  = s.ph_drift.triggered_positive ? 1 : 0;
@@ -58,6 +60,8 @@ void FillSnapshotBody(
 	out.last_value     = s.last_value;
 	out.last_update_us = s.last_update_us;
 	out.press_count    = s.press_count;
+	out.bounce_transition_count = s.bounce_transition_count;
+	out.bounce_max_interval_us  = s.bounce_max_interval_us;
 	out.scalar_range_initialized = s.scalar_range_initialized ? 1 : 0;
 	out.observed_min   = s.observed_min;
 	out.observed_max   = s.observed_max;

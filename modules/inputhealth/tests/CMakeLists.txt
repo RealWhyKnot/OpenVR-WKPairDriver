@@ -23,12 +23,15 @@ add_executable(inputhealth_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_profile_prune.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_presence_counting.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_ui_logic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_learning_rules.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_button_bounce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp
     # Config round-trip tests compile Config.cpp directly to avoid pulling in the
     # full overlay (ImGui, OpenVR runtime, IPC) into the test binary.
     ${IH_OVERLAY_SRC}/Config.cpp
     # Profile prune tests compile Profiles.cpp directly.
     ${IH_OVERLAY_SRC}/Profiles.cpp
+    ${IH_DRIVER_SRC}/InputHealthObservation.cpp
 )
 
 target_include_directories(inputhealth_tests

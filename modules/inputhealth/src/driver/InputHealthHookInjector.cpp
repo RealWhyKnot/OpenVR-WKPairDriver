@@ -148,7 +148,7 @@ static vr::EVRInputError DetourUpdateBooleanComponent(
 					auto it = g_componentStats.find(ulComponent);
 					if (it != g_componentStats.end()) {
 						auto &s = it->second;
-						inputhealth::ObserveBooleanSample(s, bNewValue);
+						inputhealth::ObserveBooleanSample(s, bNewValue, now_us);
 						if (!cfg.diagnostics_only) {
 							if (s.device_serial_hash == 0
 								&& (now_us - s.last_serial_resolve_attempt_us) > 1000000ULL)
@@ -222,7 +222,7 @@ static vr::EVRInputError DetourCreateScalarComponent(
 		&& pchName)
 	{
 		try {
-			inputhealth::RegisterScalarComponent(*pHandle, ulContainer, pchName);
+			inputhealth::RegisterScalarComponent(*pHandle, ulContainer, pchName, eType, eUnits);
 		} catch (const std::exception &e) {
 			LogHotPathObservationError("scalar-create", e.what());
 		} catch (...) {

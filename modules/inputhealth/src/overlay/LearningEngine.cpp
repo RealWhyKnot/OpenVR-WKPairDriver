@@ -208,6 +208,25 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 
 		auto &state = StateFor(b.device_serial_hash, path);
 		state.kind = protocol::InputHealthCompBoolean;
+
+		if (!inputhealth::IsSystemButtonPath(path) &&
+			b.bounce_transition_count >= inputhealth::kButtonBounceReadyTransitions &&
+			b.bounce_max_interval_us > 0)
+		{
+			const uint32_t learned =
+				inputhealth::DebounceFromBounceInterval(b.bounce_max_interval_us);
+			if (!state.ready || learned > state.learned_debounce_us) {
+				state.learned_debounce_us = learned;
+				state.ready = true;
+				state.last_updated_unix = UnixSeconds();
+				state.sample_count = std::max<uint64_t>(
+					state.sample_count,
+					std::max<uint64_t>(b.press_count, b.bounce_transition_count));
+				SyncProfile(b.device_serial_hash, state, true);
+				PushCompensation(b.device_serial_hash, state, true);
+			}
+		}
+
 		if (b.press_count > state.last_press_count) {
 			if (state.last_press_time_us != 0) {
 				const uint64_t interval = now_us - state.last_press_time_us;
@@ -260,6 +279,10 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 		state.kind = KindForBody(b);
 		const bool isTrigger = IsTriggerKind(state.kind, path);
 		const bool isStick = IsStickKind(state.kind);
+		if (!inputhealth::ScalarMetadataAllowsLearning(
+				pathClass, path, state.kind, b.scalar_type, b.scalar_units)) {
+			continue;
+		}
 
 		if (isTrigger) {
 			state.trigger_peak = std::max<double>(state.trigger_peak, b.last_value);
@@ -275,12 +298,25 @@ void LearningEngine::Tick(const SnapshotReader &reader)
 		if (isStick) {
 			auto partnerIt = entries.find(b.partner_handle);
 			if (partnerIt != entries.end()) {
-				rest = std::fabs(b.last_value) < 0.05f &&
-					std::fabs(partnerIt->second.body.last_value) < 0.05f &&
-					buttonsQuiet;
+				const float partnerValue = partnerIt->second.body.last_value;
+				const bool strictRest = inputhealth::IsStrictStickRest(
+					b.last_value, partnerValue, buttonsQuiet);
+				const bool stableRest = inputhealth::UpdateStableRestWindow(
+					state.stable_rest,
+					inputhealth::IsStableStickRestCandidate(
+						b.last_value, partnerValue, buttonsQuiet),
+					b.last_value, partnerValue, now_us);
+				rest = strictRest || stableRest;
+			} else {
+				inputhealth::ResetStableRestWindow(state.stable_rest);
 			}
 		} else if (isTrigger) {
-			rest = b.last_value < 0.05f;
+			const bool strictRest = inputhealth::IsStrictTriggerRest(b.last_value);
+			const bool stableRest = inputhealth::UpdateStableRestWindow(
+				state.stable_rest,
+				inputhealth::IsStableTriggerRestCandidate(b.last_value, buttonsQuiet),
+				b.last_value, 0.0f, now_us);
+			rest = strictRest || stableRest;
 		} else {
 			rest = std::fabs(b.last_value) < 0.05f && buttonsQuiet;
 		}

@@ -1,6 +1,7 @@
 #include "InputHealthCompensation.h"
 
 #include "ServerTrackedDeviceProvider.h"
+#include "inputhealth/LearningRules.h"
 #include "inputhealth/PathClassifier.h"
 
 #include <algorithm>
@@ -29,6 +30,11 @@ float ApplyScalarCompensation(
 	const bool isStick = entry.kind == protocol::InputHealthCompStickX ||
 		entry.kind == protocol::InputHealthCompStickY;
 	const bool isTrigger = inputhealth::IsTriggerLikePath(stats.path);
+
+	if (!inputhealth::ScalarMetadataAllowsCompensation(
+			entry.kind, stats.path, stats.scalar_type, stats.scalar_units)) {
+		return rawValue;
+	}
 
 	if (isTrigger) {
 		// Trigger range remap: stretch [trigger_min, trigger_max] onto [0, 1].

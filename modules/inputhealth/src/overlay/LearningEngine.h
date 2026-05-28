@@ -2,6 +2,7 @@
 
 #include "Profiles.h"
 #include "Protocol.h"
+#include "inputhealth/LearningRules.h"
 #include "inputhealth/WelfordAccumulator.h"
 
 #include <cstdint>
@@ -57,6 +58,7 @@ private:
 		uint64_t last_press_count = 0;
 		uint64_t last_press_time_us = 0;
 		std::vector<uint64_t> inter_press_us;
+		inputhealth::StableRestWindow stable_rest;
 		uint64_t sample_count = 0;
 		bool ready = false;
 		bool drift_shift_pending = false;
