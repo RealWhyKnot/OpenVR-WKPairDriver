@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BuildChannel.h"
+
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -8,6 +10,10 @@
 
 namespace Metrics {
 	extern double TimeSpan, CurrentTime;
+	extern bool enableLogs;
+#if WKOPENVR_BUILD_IS_DEV
+	extern bool enableReplayCsv;
+#endif
 
 	double timestamp();
 	void RecordTimestamp();
@@ -170,14 +176,13 @@ namespace Metrics {
 	extern TimeSeries<bool>     boundaryActive;
 	extern TimeSeries<uint32_t> chaperoneRePushCount;
 
-	extern bool enableLogs;
-
 	struct LogHealth {
 		bool debugEnabled = false;
 		bool open = false;
 		bool failedToOpen = false;
 		bool writeFailed = false;
 		bool flushFailed = false;
+		bool replayCsvEnabled = false;
 		bool devAutoRecording = false;
 		std::wstring path;
 		long long sizeBytes = -1;

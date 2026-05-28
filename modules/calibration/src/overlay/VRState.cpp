@@ -1,7 +1,10 @@
 #include "VRState.h"
 
-#include "DevFakeDevices.h"
+#include "BuildChannel.h"
 #include "DeviceFilters.h"
+#if WKOPENVR_BUILD_IS_DEV
+#include "DevFakeDevices.h"
+#endif
 
 VRState VRState::Load()
 {
@@ -12,7 +15,9 @@ VRState VRState::Load()
 	// SteamVR having shut down between ticks; in both cases the right thing
 	// is an empty device list, not a crash.
 	if (!vr::VRSystem()) {
+#if WKOPENVR_BUILD_IS_DEV
 		spacecal::devfake::AppendDevices(state);
+#endif
 		return state;
 	}
 
@@ -104,7 +109,9 @@ VRState VRState::Load()
 		}
 	}
 
+#if WKOPENVR_BUILD_IS_DEV
 	spacecal::devfake::AppendDevices(state);
+#endif
 	return state;
 }
 

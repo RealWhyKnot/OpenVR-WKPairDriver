@@ -11,7 +11,9 @@
 #include "CalibrationMetrics.h"
 #include "BuildChannel.h"
 #include "Configuration.h"
+#if WKOPENVR_BUILD_IS_DEV
 #include "DevFakeDevices.h"
+#endif
 #include "IPCClient.h"
 #include "CalibrationCalc.h"
 #include "VRState.h"
@@ -787,7 +789,12 @@ void EndContinuousCalibration() {
 
 void CalibrationTick(double time)
 {
-	const bool fakeDevices = spacecal::devfake::IsEnabled();
+	const bool fakeDevices =
+#if WKOPENVR_BUILD_IS_DEV
+		spacecal::devfake::IsEnabled();
+#else
+		false;
+#endif
 	if (!vr::VRSystem() && !fakeDevices) {
 		static double s_lastNoVrSystemLog = -1e9;
 		if (time - s_lastNoVrSystemLog >= 5.0) {
@@ -801,7 +808,9 @@ void CalibrationTick(double time)
 	if ((time - ctx.timeLastTick) < 0.05)
 		return;
 	if (fakeDevices) {
+#if WKOPENVR_BUILD_IS_DEV
 		spacecal::devfake::TickPoses(ctx, time);
+#endif
 	}
 
 	// Resolve LockMode -> lockRelativePosition every tick before any code
@@ -1868,12 +1877,15 @@ void CalibrationTick(double time)
 		if (auto* vrSystem = vr::VRSystem()) {
 			vrSystem->GetStringTrackedDeviceProperty(ctx.referenceID, vr::Prop_SerialNumber_String, referenceSerial, 256);
 			vrSystem->GetStringTrackedDeviceProperty(ctx.targetID, vr::Prop_SerialNumber_String, targetSerial, 256);
-		} else if (fakeDevices) {
+		}
+#if WKOPENVR_BUILD_IS_DEV
+		else if (fakeDevices) {
 			snprintf(referenceSerial, sizeof referenceSerial, "%s",
 				spacecal::devfake::SerialForDeviceId(ctx.referenceID));
 			snprintf(targetSerial, sizeof targetSerial, "%s",
 				spacecal::devfake::SerialForDeviceId(ctx.targetID));
 		}
+#endif
 
 		char buf[256];
 		snprintf(buf, sizeof buf, "Reference device ID: %d, serial: %s\n", ctx.referenceID, referenceSerial);

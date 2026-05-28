@@ -1,14 +1,20 @@
 #pragma once
 
-#include "MotionRecording.h"
-
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace spacecal::ui_logs {
 
+struct LogFileEntry {
+	std::wstring fullPath;
+	std::string name;
+	uint64_t sizeBytes = 0;
+	uint64_t mtimeFileTime = 0;
+};
+
 struct LogsPanelState {
-	std::vector<spacecal::replay::LogFileEntry> files;
+	std::vector<LogFileEntry> files;
 	bool listBuilt = false;
 	int selectedIdx = -1;
 	std::string copyHint;

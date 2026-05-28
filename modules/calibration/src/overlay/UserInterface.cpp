@@ -8,7 +8,6 @@
 #include "Protocol.h"
 #include "Version.h"
 #include "BuildStamp.h"
-#include "MotionRecording.h"
 #include "Wizard.h"
 #include "UserInterfaceFooter.h"
 #include "UserInterfaceBanners.h"

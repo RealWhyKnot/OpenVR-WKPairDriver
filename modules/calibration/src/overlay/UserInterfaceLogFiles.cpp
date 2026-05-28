@@ -1,7 +1,10 @@
 #include "UserInterfaceLogFiles.h"
 
 #include "UiControls.h"
+#include "Win32Text.h"
 #include "Win32Paths.h"
+
+#include <algorithm>
 
 #include <imgui/imgui.h>
 #ifndef WIN32_LEAN_AND_MEAN
@@ -11,6 +14,49 @@
 #include <shellapi.h>
 
 namespace spacecal::ui_logs {
+namespace {
+
+uint64_t FileTimeToUint64(const FILETIME& ft)
+{
+	return (static_cast<uint64_t>(ft.dwHighDateTime) << 32)
+		| static_cast<uint64_t>(ft.dwLowDateTime);
+}
+
+std::vector<LogFileEntry> ListLogFiles()
+{
+	std::vector<LogFileEntry> files;
+	std::wstring directory = openvr_pair::common::WkOpenVrLogsPath(false);
+	if (directory.empty()) return files;
+	if (directory.back() != L'\\' && directory.back() != L'/') {
+		directory.push_back(L'\\');
+	}
+
+	WIN32_FIND_DATAW data{};
+	HANDLE find = FindFirstFileW((directory + L"*.txt").c_str(), &data);
+	if (find == INVALID_HANDLE_VALUE) {
+		return files;
+	}
+
+	do {
+		if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+		LogFileEntry entry;
+		entry.fullPath = directory + data.cFileName;
+		entry.name = openvr_pair::common::WideToUtf8(data.cFileName);
+		entry.sizeBytes =
+			(static_cast<uint64_t>(data.nFileSizeHigh) << 32)
+			| static_cast<uint64_t>(data.nFileSizeLow);
+		entry.mtimeFileTime = FileTimeToUint64(data.ftLastWriteTime);
+		files.push_back(entry);
+	} while (FindNextFileW(find, &data));
+
+	FindClose(find);
+	std::sort(files.begin(), files.end(), [](const LogFileEntry& a, const LogFileEntry& b) {
+		return a.mtimeFileTime > b.mtimeFileTime;
+	});
+	return files;
+}
+
+} // namespace
 
 LogsPanelState& LogsState()
 {
@@ -20,7 +66,7 @@ LogsPanelState& LogsState()
 
 void RebuildLogsList(LogsPanelState& state)
 {
-	state.files = spacecal::replay::ListRecordings();
+	state.files = ListLogFiles();
 	state.listBuilt = true;
 	if (state.selectedIdx >= static_cast<int>(state.files.size())) {
 		state.selectedIdx = -1;

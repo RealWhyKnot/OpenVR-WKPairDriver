@@ -1,11 +1,14 @@
 #include "CalibrationMetrics.h"
+#include "BuildChannel.h"
 #include "BuildStamp.h"
 #include "CalibrationLogLaunchContext.h"
 #include "DiagnosticsLog.h"
 #include "FileLog.h"
 #include "LogPaths.h"
-#include "MotionRecording.h"
 #include "Win32Paths.h"
+#if WKOPENVR_BUILD_IS_DEV
+#include "MotionRecording.h"
+#endif
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
@@ -126,6 +129,9 @@ namespace Metrics {
 #else
 	bool enableLogs = (std::string(SPACECAL_BUILD_CHANNEL) == "dev");
 #endif
+#if WKOPENVR_BUILD_IS_DEV
+	bool enableReplayCsv = true;
+#endif
 
 	static FILE* logFile = nullptr;
 	static std::wstring logFilePath;
@@ -198,6 +204,7 @@ namespace Metrics {
 	{ #n ".y", [](auto &s) { s << n.last()(1); } }, \
 	{ #n ".z", [](auto &s) { s << n.last()(2); } }
 
+#if WKOPENVR_BUILD_IS_DEV
 	static const CsvField fields[] = {
 		{
 			"Timestamp",
@@ -281,6 +288,7 @@ namespace Metrics {
 		{ "tgt_qz", [](auto& s) { s.precision(17); s << g_tickRaw.targetRot.z(); } },
 		{ "tick_phase", [](auto& s) { s << TickPhaseName(g_tickRaw.phase); } },
 	};
+#endif
 	
 	
 	// Launch-context details are written by CalibrationLogLaunchContext.cpp.
@@ -465,15 +473,18 @@ namespace Metrics {
 		std::ostringstream header;
 		header.precision(17);
 
-		// Wire-format version annotation. v2 added per-tick raw reference + target
-		// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
-		// harness in tools/replay/ rejects logs that don't begin with this banner so
-		// older v1 captures (which lacked raw poses) fail loud rather than silently
-		// being interpreted with the wrong column layout. New columns added later
-		// (samplesInBuffer, watchdogResetCount, reject_reason, translationDiversity,
-		// rotationDiversity, translationAxisRangesCm.{x,y,z}) are still v2 because
-		// the replay harness looks columns up by name, not position.
-		header << "# spacecal_log_v2\n";
+#if WKOPENVR_BUILD_IS_DEV
+		if (enableReplayCsv) {
+			// Wire-format version annotation. v2 added per-tick raw reference + target
+			// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
+			// harness rejects logs that don't begin with this banner so older captures
+			// fail loud rather than being interpreted with the wrong column layout.
+			header << "# spacecal_log_v2\n";
+		} else
+#endif
+		{
+			header << "# spacecal_debug_log\n";
+		}
 
 		// === Self-describing header ============================================
 		// Triage from a debug log starts with "what build was this, on what
@@ -483,7 +494,13 @@ namespace Metrics {
 		header << "# build_stamp=" SPACECAL_BUILD_STAMP "\n";
 		header << "# build_channel=" SPACECAL_BUILD_CHANNEL "\n";
 		header << "# debug_logging_effective=1\n";
-		header << "# replay_recording=enabled format=spacecal_log_v2 flush=per_write\n";
+		header << "# replay_recording="
+#if WKOPENVR_BUILD_IS_DEV
+			<< (enableReplayCsv ? "enabled format=spacecal_log_v2" : "disabled")
+#else
+			<< "not_compiled"
+#endif
+			<< " flush=per_write\n";
 
 		if (!WriteRawLogText(header.str())) {
 			DiscardOpenLogFile();
@@ -492,7 +509,8 @@ namespace Metrics {
 		header.str(std::string());
 		header.clear();
 
-		if (std::string(SPACECAL_BUILD_CHANNEL) == "dev") {
+#if WKOPENVR_BUILD_IS_DEV
+		if (enableReplayCsv) {
 			const spacecal::replay::RecordingRetentionPolicy retentionPolicy{};
 			const auto prune = spacecal::replay::PruneRecordings(retentionPolicy);
 			header << "# dev_auto_recording=enabled"
@@ -507,8 +525,11 @@ namespace Metrics {
 				<< " failed_deletes=" << prune.failedDeletes
 				<< "\n";
 		} else {
-			header << "# dev_auto_recording=disabled build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+			header << "# dev_auto_recording=disabled replay_csv=0\n";
 		}
+#else
+		header << "# dev_auto_recording=not_compiled build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+#endif
 
 		// HMD identification — model + tracking system. Driver-side issues often
 		// correlate to a specific HMD or runtime, so this is the first thing
@@ -589,15 +610,19 @@ namespace Metrics {
 		// the failure mode itself.
 		WriteLaunchContextBanner(header);
 
-		// Banner divider so a human grepping the file can see where header ends
-		// and the column row begins. Replay harness ignores any line starting with #.
-		header << "# === columns ===\n";
+#if WKOPENVR_BUILD_IS_DEV
+		if (enableReplayCsv) {
+			// Banner divider so a human grepping the file can see where header ends
+			// and the column row begins. Replay harness ignores any line starting with #.
+			header << "# === columns ===\n";
 
-		for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
-			if (i > 0) header << ",";
-			header << fields[i].name;
+			for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+				if (i > 0) header << ",";
+				header << fields[i].name;
+			}
+			header << "\n";
 		}
-		header << "\n";
+#endif
 
 		logFileIsOpen = true;
 		if (!WriteRawLogText(header.str())) {
@@ -680,6 +705,8 @@ namespace Metrics {
 	}
 
 	void WriteLogEntry() {
+#if WKOPENVR_BUILD_IS_DEV
+		if (!enableReplayCsv) return;
 		if (!CheckLogOpen()) return;
 
 		if (logFileIsOpen) {
@@ -694,6 +721,7 @@ namespace Metrics {
 				++logRowsWritten;
 			}
 		}
+#endif
 	}
 
 	bool EnsureLogFileReady(const char* reason) {
@@ -719,7 +747,13 @@ namespace Metrics {
 		health.failedToOpen = failedToOpenLogFile;
 		health.writeFailed = logWriteFailed;
 		health.flushFailed = logFlushFailed;
-		health.devAutoRecording = std::string(SPACECAL_BUILD_CHANNEL) == "dev" && enableLogs;
+#if WKOPENVR_BUILD_IS_DEV
+		health.replayCsvEnabled = enableReplayCsv;
+		health.devAutoRecording = enableLogs && enableReplayCsv;
+#else
+		health.replayCsvEnabled = false;
+		health.devAutoRecording = false;
+#endif
 		health.path = logFilePath;
 		health.sizeBytes = CurrentLogSizeBytes();
 		health.rowsWritten = logRowsWritten;
