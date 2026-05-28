@@ -15,6 +15,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **inputhealth:** Widen safe drift learning (9f81724)
 - **runtime:** Add health summaries (a52ed25)
 - **boundary:** Add spatial drawing framework (848c3c4)
+- **boundary:** Improve floor source and hmd preview (2fcc071)
 
 ### Changed
 - **calibration:** Split guardian setup ui (0e96267)
