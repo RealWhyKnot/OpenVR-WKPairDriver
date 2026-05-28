@@ -27,6 +27,7 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - Refactor overlay UI composition helpers (25ed3d1)
 - **overlay:** Split logs helpers (2026.5.27.0-beta) (075f03c)
 - diag(debug): improve runtime diagnostics (2026.5.27.0-beta) (148a650)
+- diag(calibration): log quality verdicts (5c88595)
 
 ### Fixed
 - **calibration:** Gate head tracker offset solve (00d21bd)
@@ -66,6 +67,13 @@ Mirror of the root `CHANGELOG.md`, kept in lock-step by `.github/scripts/Update-
 - **installer:** Escape SteamVR path lookup (a715cec)
 - **calibration:** Keep head tracker hidden by serial (850c924)
 - **installer:** Release install root before uninstall cleanup (2026.5.27.1-beta) (1f02233)
+- **logs:** Prompt for debug logs before reports (30e360a)
+- **boundary:** Stabilize floor and room setup (053fb26)
+- **boundary:** Draw from controller floor position (a1735a7)
+- **calibration:** Base auto speed on fit rms (d1c1aa3)
+- **boundary:** Show live draw cursor (1d3b145)
+- **boundary:** Draw from controller pointer (c0e8ead)
+- **boundary:** Preview floor from lowest controller (81f0c01)
 
 ---
 
