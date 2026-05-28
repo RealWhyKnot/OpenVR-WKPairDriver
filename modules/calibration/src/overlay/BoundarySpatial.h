@@ -73,6 +73,7 @@ struct SpatialPrimitive {
     double floorY = 0.0;
     double ceilingY = 2.4;
     bool closeLoop = false;
+    int layer = 0;
     SpatialStyle style;
 };
 

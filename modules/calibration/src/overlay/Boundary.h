@@ -113,6 +113,68 @@ SteamVrFloorVerification EvaluateSteamVrFloorVerification(
     double measuredFloorYStanding,
     double toleranceMeters = 0.05);
 
+struct BoundaryFloorApplyResolution {
+    bool steamVrNativeFloorActive = false;
+    double boundaryStandingFloorY = 0.0;
+    const char* warning = "";
+};
+
+BoundaryFloorApplyResolution ResolveBoundaryFloorApply(
+    double measuredFloorYStanding,
+    bool steamVrCommitSucceeded,
+    bool steamVrVerificationAttempted,
+    bool steamVrVerified);
+
+enum class BoundaryFloorSourceKind {
+    None,
+    SteamVrStanding,
+    SavedBoundary,
+    ControllerContact,
+    Manual,
+};
+
+const char* BoundaryFloorSourceKindName(BoundaryFloorSourceKind kind);
+
+struct SteamVrFloorSnapshot {
+    bool chaperoneAvailable = false;
+    vr::ChaperoneCalibrationState calibrationState = vr::ChaperoneCalibrationState_Error;
+    bool playAreaSizeValid = false;
+    float playAreaX = 0.0f;
+    float playAreaZ = 0.0f;
+    bool playAreaRectValid = false;
+    vr::HmdQuad_t playAreaRect = {};
+    bool chaperoneSetupAvailable = false;
+    bool standingZeroValid = false;
+    vr::HmdMatrix34_t standingZeroToRaw = {};
+};
+
+struct BoundaryFloorSourceRequest {
+    bool boundaryStandingSpace = true;
+    std::vector<BoundaryVertex> boundaryVertices;
+    double savedBoundaryFloorY = 0.0;
+    bool hasSavedBoundaryFloor = false;
+    bool targetTransformValid = false;
+    Eigen::AffineCompact3d targetToStanding = Eigen::AffineCompact3d::Identity();
+    bool controllerContactValid = false;
+    double controllerContactStandingY = 0.0;
+    bool manualFloorValid = false;
+    double manualStandingFloorY = 0.0;
+};
+
+struct BoundaryFloorSourceDecision {
+    bool valid = false;
+    BoundaryFloorSourceKind source = BoundaryFloorSourceKind::None;
+    double boundaryFloorY = 0.0;
+    double standingFloorY = 0.0;
+    std::vector<std::string> rejectedReasons;
+};
+
+SteamVrFloorSnapshot QuerySteamVrFloorSnapshot();
+
+BoundaryFloorSourceDecision ResolveBoundaryFloorSource(
+    const SteamVrFloorSnapshot& steamVr,
+    const BoundaryFloorSourceRequest& request);
+
 bool BoundaryControllerMatchesTargetTrackingSystem(
     const std::string& controllerTrackingSystem,
     const std::string& targetTrackingSystem);

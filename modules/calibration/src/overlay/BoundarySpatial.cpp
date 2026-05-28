@@ -88,6 +88,7 @@ SpatialPrimitive FloorMarkerPrimitive(
     primitive.style.a = 235;
     primitive.style.fillA = 36;
     primitive.style.fill = false;
+    primitive.layer = 10;
     return primitive;
 }
 
@@ -138,7 +139,7 @@ std::vector<SpatialRenderCommand> BuildSpatialRenderCommands(
         command.ceilingY = standing.ceilingY;
         command.closeLoop = standing.closeLoop;
         command.style = standing.style;
-        command.layer = standing.kind == SpatialPrimitiveKind::Marker ? 10 : 0;
+        command.layer = standing.layer;
         commands.push_back(std::move(command));
     }
 

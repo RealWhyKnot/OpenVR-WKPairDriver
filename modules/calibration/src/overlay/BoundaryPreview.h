@@ -38,6 +38,10 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
 BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     const std::vector<SpatialRenderCommand>& commands);
 
+int BoundaryPreviewUploadFailureDisableThreshold();
+
+bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount);
+
 vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin();
 
 vr::HmdMatrix34_t BoundaryPreviewTransform(

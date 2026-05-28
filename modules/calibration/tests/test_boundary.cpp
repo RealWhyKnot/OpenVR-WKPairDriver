@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -51,6 +52,66 @@ struct ControllerContactCase {
     Eigen::Affine3d pose;
     double expectedOffsetMeters;
 };
+
+SteamVrFloorSnapshot ValidSteamVrFloorSnapshot()
+{
+    SteamVrFloorSnapshot snapshot;
+    snapshot.chaperoneAvailable = true;
+    snapshot.calibrationState = vr::ChaperoneCalibrationState_OK;
+    snapshot.playAreaSizeValid = true;
+    snapshot.playAreaX = 2.0f;
+    snapshot.playAreaZ = 2.0f;
+    snapshot.playAreaRectValid = true;
+    snapshot.playAreaRect.vCorners[0].v[0] = -1.0f;
+    snapshot.playAreaRect.vCorners[0].v[1] = 0.0f;
+    snapshot.playAreaRect.vCorners[0].v[2] = -1.0f;
+    snapshot.playAreaRect.vCorners[1].v[0] = 1.0f;
+    snapshot.playAreaRect.vCorners[1].v[1] = 0.0f;
+    snapshot.playAreaRect.vCorners[1].v[2] = -1.0f;
+    snapshot.playAreaRect.vCorners[2].v[0] = 1.0f;
+    snapshot.playAreaRect.vCorners[2].v[1] = 0.0f;
+    snapshot.playAreaRect.vCorners[2].v[2] = 1.0f;
+    snapshot.playAreaRect.vCorners[3].v[0] = -1.0f;
+    snapshot.playAreaRect.vCorners[3].v[1] = 0.0f;
+    snapshot.playAreaRect.vCorners[3].v[2] = 1.0f;
+    snapshot.chaperoneSetupAvailable = true;
+    snapshot.standingZeroValid = true;
+    snapshot.standingZeroToRaw = MakeIdentityMatrix34();
+    return snapshot;
+}
+
+size_t RasterPixelIndexForWorld(
+    const BoundaryPreviewRaster& raster,
+    double x,
+    double z,
+    size_t channel)
+{
+    const double half = raster.plane.spanMeters * 0.5;
+    const double minX = raster.plane.centerX - half;
+    const double maxZ = raster.plane.centerZ + half;
+    const double scale = static_cast<double>(BoundaryPreviewRaster::kTextureSize - 1) /
+        raster.plane.spanMeters;
+    const int px = std::clamp(
+        static_cast<int>(std::lround((x - minX) * scale)),
+        0,
+        BoundaryPreviewRaster::kTextureSize - 1);
+    const int py = std::clamp(
+        static_cast<int>(std::lround((maxZ - z) * scale)),
+        0,
+        BoundaryPreviewRaster::kTextureSize - 1);
+    return static_cast<size_t>(py * BoundaryPreviewRaster::kTextureSize + px) * 4u + channel;
+}
+
+uint8_t RasterChannelAtWorld(
+    const BoundaryPreviewRaster& raster,
+    double x,
+    double z,
+    size_t channel)
+{
+    const size_t idx = RasterPixelIndexForWorld(raster, x, z, channel);
+    EXPECT_LT(idx, raster.rgba.size());
+    return raster.rgba[idx];
+}
 
 Eigen::Affine3d FaceDownPose()
 {
@@ -368,6 +429,23 @@ TEST(BoundaryTransformTest, FloorApplyDefaultsToBoundaryLocalHeight) {
     EXPECT_NEAR(BoundaryFloorYAfterApply(0.42, true), 0.0, 1e-9);
 }
 
+TEST(BoundaryTransformTest, FloorApplyResolutionFallsBackWhenSteamVrDoesNotMove) {
+    const auto verified = ResolveBoundaryFloorApply(0.42, true, true, true);
+    EXPECT_TRUE(verified.steamVrNativeFloorActive);
+    EXPECT_NEAR(verified.boundaryStandingFloorY, 0.0, 1e-9);
+    EXPECT_STREQ(verified.warning, "");
+
+    const auto stale = ResolveBoundaryFloorApply(0.42, true, true, false);
+    EXPECT_FALSE(stale.steamVrNativeFloorActive);
+    EXPECT_NEAR(stale.boundaryStandingFloorY, 0.42, 1e-9);
+    EXPECT_STRNE(stale.warning, "");
+
+    const auto rejected = ResolveBoundaryFloorApply(-0.20, false, false, false);
+    EXPECT_FALSE(rejected.steamVrNativeFloorActive);
+    EXPECT_NEAR(rejected.boundaryStandingFloorY, -0.20, 1e-9);
+    EXPECT_STRNE(rejected.warning, "");
+}
+
 TEST(BoundaryTransformTest, SteamVrFloorVerificationRequiresObservedPoseShift) {
     StandingYSample before;
     before.valid = true;
@@ -410,6 +488,79 @@ TEST(BoundaryTransformTest, ControllerTargetMatchRequiresConfiguredTargetSystem)
     EXPECT_FALSE(BoundaryControllerMatchesTargetTrackingSystem("", "lighthouse"));
     EXPECT_FALSE(BoundaryControllerMatchesTargetTrackingSystem("oculus", "lighthouse"));
     EXPECT_TRUE(BoundaryControllerMatchesTargetTrackingSystem("lighthouse", "lighthouse"));
+}
+
+TEST(BoundaryFloorSourceTest, ValidSteamVrChaperoneSelectsStandingFloor) {
+    BoundaryFloorSourceRequest request;
+    request.boundaryStandingSpace = true;
+    request.hasSavedBoundaryFloor = true;
+    request.savedBoundaryFloorY = 0.35;
+
+    const auto decision =
+        ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
+
+    ASSERT_TRUE(decision.valid);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SteamVrStanding);
+    EXPECT_NEAR(decision.standingFloorY, 0.0, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, 0.0, 1e-9);
+}
+
+TEST(BoundaryFloorSourceTest, ControllerContactOverridesSteamVrCandidate) {
+    BoundaryFloorSourceRequest request;
+    request.boundaryStandingSpace = true;
+    request.controllerContactValid = true;
+    request.controllerContactStandingY = 0.47;
+    request.hasSavedBoundaryFloor = true;
+    request.savedBoundaryFloorY = 0.35;
+
+    const auto decision =
+        ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
+
+    ASSERT_TRUE(decision.valid);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::ControllerContact);
+    EXPECT_NEAR(decision.standingFloorY, 0.47, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, 0.47, 1e-9);
+}
+
+TEST(BoundaryFloorSourceTest, InvalidSteamVrFallsBackToSavedBoundary) {
+    SteamVrFloorSnapshot snapshot = ValidSteamVrFloorSnapshot();
+    snapshot.calibrationState = vr::ChaperoneCalibrationState_Error_PlayAreaInvalid;
+    snapshot.playAreaSizeValid = false;
+    snapshot.playAreaRectValid = false;
+
+    BoundaryFloorSourceRequest request;
+    request.boundaryStandingSpace = true;
+    request.hasSavedBoundaryFloor = true;
+    request.savedBoundaryFloorY = -0.18;
+
+    const auto decision = ResolveBoundaryFloorSource(snapshot, request);
+
+    ASSERT_TRUE(decision.valid);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SavedBoundary);
+    EXPECT_NEAR(decision.standingFloorY, -0.18, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, -0.18, 1e-9);
+    EXPECT_FALSE(decision.rejectedReasons.empty());
+}
+
+TEST(BoundaryFloorSourceTest, TargetSpaceSteamVrFloorMapsToTargetHeight) {
+    Eigen::AffineCompact3d targetToStanding = Eigen::AffineCompact3d::Identity();
+    targetToStanding.translation() = Eigen::Vector3d(1.0, 2.50, -1.0);
+
+    BoundaryFloorSourceRequest request;
+    request.boundaryStandingSpace = false;
+    request.boundaryVertices = SquareBoundary(-1.0, -1.0, 1.0, 1.0, 0.0);
+    request.targetTransformValid = true;
+    request.targetToStanding = targetToStanding;
+    request.hasSavedBoundaryFloor = true;
+    request.savedBoundaryFloorY = -2.0;
+
+    const auto decision =
+        ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
+
+    ASSERT_TRUE(decision.valid);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SteamVrStanding);
+    EXPECT_NEAR(decision.standingFloorY, 0.0, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, -2.50, 1e-9);
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1256,72 @@ TEST(BoundaryPreviewTest, ClosedRasterFillsInterior) {
     EXPECT_GT(closedRaster.rgba[centerAlpha], 0u);
 }
 
+TEST(BoundaryPreviewTest, StyledMarkersRenderNewestWhiteAndOlderGray) {
+    SpatialRenderCommand oldPoint;
+    oldPoint.kind = SpatialPrimitiveKind::Marker;
+    oldPoint.standingVertices = { { -0.30, 0.0, 0.0 } };
+    oldPoint.style.r = 120;
+    oldPoint.style.g = 120;
+    oldPoint.style.b = 120;
+    oldPoint.style.a = 210;
+    oldPoint.style.fillA = 40;
+    oldPoint.style.strokeMeters = 0.0;
+    oldPoint.style.dotMeters = 0.080;
+    oldPoint.layer = 1;
+
+    SpatialRenderCommand newestPoint;
+    newestPoint.kind = SpatialPrimitiveKind::Marker;
+    newestPoint.standingVertices = { { 0.30, 0.0, 0.0 } };
+    newestPoint.style.r = 255;
+    newestPoint.style.g = 255;
+    newestPoint.style.b = 255;
+    newestPoint.style.a = 255;
+    newestPoint.style.fillA = 80;
+    newestPoint.style.strokeMeters = 0.0;
+    newestPoint.style.dotMeters = 0.105;
+    newestPoint.layer = 2;
+
+    const auto raster = BuildBoundaryPreviewRaster({ oldPoint, newestPoint });
+    ASSERT_TRUE(raster.plane.valid);
+
+    const uint8_t oldR = RasterChannelAtWorld(raster, -0.30, 0.0, 0);
+    const uint8_t oldG = RasterChannelAtWorld(raster, -0.30, 0.0, 1);
+    const uint8_t oldB = RasterChannelAtWorld(raster, -0.30, 0.0, 2);
+    const uint8_t newR = RasterChannelAtWorld(raster, 0.30, 0.0, 0);
+    const uint8_t newG = RasterChannelAtWorld(raster, 0.30, 0.0, 1);
+    const uint8_t newB = RasterChannelAtWorld(raster, 0.30, 0.0, 2);
+
+    EXPECT_NEAR(oldR, oldG, 2);
+    EXPECT_NEAR(oldG, oldB, 2);
+    EXPECT_GT(newR, oldR);
+    EXPECT_GT(newG, oldG);
+    EXPECT_GT(newB, oldB);
+    EXPECT_NEAR(newR, newG, 2);
+    EXPECT_NEAR(newG, newB, 2);
+}
+
+TEST(BoundaryPreviewTest, CommandFillCanShowClosureWithoutPathMutation) {
+    SpatialRenderCommand fill;
+    fill.kind = SpatialPrimitiveKind::PolygonFloorRegion;
+    fill.standingVertices = SquareBoundary(-1.0, -1.0, 1.0, 1.0);
+    fill.closeLoop = true;
+    fill.style.r = 210;
+    fill.style.g = 210;
+    fill.style.b = 210;
+    fill.style.a = 0;
+    fill.style.fillA = 72;
+    fill.style.strokeMeters = 0.0;
+    fill.style.dotMeters = 0.0;
+    fill.style.fill = true;
+
+    const auto raster = BuildBoundaryPreviewRaster({ fill });
+    ASSERT_TRUE(raster.plane.valid);
+
+    EXPECT_GT(RasterChannelAtWorld(raster, 0.0, 0.0, 3), 0u);
+    EXPECT_EQ(fill.standingVertices.size(), 4u);
+    EXPECT_TRUE(fill.closeLoop);
+}
+
 TEST(BoundaryPreviewTest, UsesStandingTrackingUniverseForFloorOverlay) {
     EXPECT_EQ(BoundaryPreviewTrackingOrigin(), vr::TrackingUniverseStanding);
 
@@ -1178,6 +1395,14 @@ TEST(BoundaryPreviewTest, StrokeWidthScalesToWorldSpace) {
     };
 
     EXPECT_GT(verticalAlphaRun(compactRaster), verticalAlphaRun(wideRaster));
+}
+
+TEST(BoundaryPreviewTest, UploadFailuresDisableAfterThreshold) {
+    EXPECT_EQ(BoundaryPreviewUploadFailureDisableThreshold(), 3);
+    EXPECT_FALSE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(0));
+    EXPECT_FALSE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(2));
+    EXPECT_TRUE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(3));
+    EXPECT_TRUE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(4));
 }
 
 TEST(ChaperoneWorkingSetTest, BuildsPerimeterQuadsAndPlayArea) {

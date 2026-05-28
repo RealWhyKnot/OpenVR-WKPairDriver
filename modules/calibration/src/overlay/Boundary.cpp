@@ -461,6 +461,263 @@ SteamVrFloorVerification EvaluateSteamVrFloorVerification(
     return result;
 }
 
+BoundaryFloorApplyResolution ResolveBoundaryFloorApply(
+    double measuredFloorYStanding,
+    bool steamVrCommitSucceeded,
+    bool steamVrVerificationAttempted,
+    bool steamVrVerified)
+{
+    BoundaryFloorApplyResolution result;
+    result.boundaryStandingFloorY = std::isfinite(measuredFloorYStanding)
+        ? measuredFloorYStanding
+        : 0.0;
+
+    if (steamVrCommitSucceeded && steamVrVerificationAttempted && steamVrVerified) {
+        result.steamVrNativeFloorActive = true;
+        result.boundaryStandingFloorY = 0.0;
+        return result;
+    }
+
+    if (!steamVrCommitSucceeded) {
+        result.warning = "SteamVR rejected the floor change. Boundary floor was applied locally.";
+        return result;
+    }
+
+    if (steamVrVerificationAttempted && !steamVrVerified) {
+        result.warning =
+            "SteamVR accepted the floor change, but live poses did not move as expected. Boundary floor was applied locally.";
+    }
+    return result;
+}
+
+const char* BoundaryFloorSourceKindName(BoundaryFloorSourceKind kind)
+{
+    switch (kind) {
+    case BoundaryFloorSourceKind::None: return "none";
+    case BoundaryFloorSourceKind::SteamVrStanding: return "SteamVR";
+    case BoundaryFloorSourceKind::SavedBoundary: return "saved boundary";
+    case BoundaryFloorSourceKind::ControllerContact: return "controller";
+    case BoundaryFloorSourceKind::Manual: return "manual";
+    }
+    return "unknown";
+}
+
+namespace {
+
+bool FloatFinite(float value)
+{
+    return std::isfinite(static_cast<double>(value));
+}
+
+bool Matrix34Finite(const vr::HmdMatrix34_t& matrix)
+{
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            if (!FloatFinite(matrix.m[r][c])) return false;
+        }
+    }
+    return true;
+}
+
+bool PlayAreaSizeLooksValid(float x, float z)
+{
+    return FloatFinite(x) && FloatFinite(z) &&
+        x >= 0.25f && z >= 0.25f &&
+        x <= 20.0f && z <= 20.0f;
+}
+
+bool PlayAreaRectLooksValid(const vr::HmdQuad_t& rect)
+{
+    bool anyHorizontalSpan = false;
+    for (int i = 0; i < 4; ++i) {
+        const auto& p = rect.vCorners[i];
+        if (!FloatFinite(p.v[0]) || !FloatFinite(p.v[1]) || !FloatFinite(p.v[2])) {
+            return false;
+        }
+        if (std::fabs(static_cast<double>(p.v[1])) > 0.10) {
+            return false;
+        }
+        if (i > 0) {
+            const auto& q = rect.vCorners[0];
+            const double dx = static_cast<double>(p.v[0] - q.v[0]);
+            const double dz = static_cast<double>(p.v[2] - q.v[2]);
+            if ((dx * dx + dz * dz) > (0.20 * 0.20)) {
+                anyHorizontalSpan = true;
+            }
+        }
+    }
+    return anyHorizontalSpan;
+}
+
+bool StandingFloorToBoundaryFloor(
+    const BoundaryFloorSourceRequest& request,
+    double standingFloorY,
+    double& boundaryFloorY)
+{
+    if (!std::isfinite(standingFloorY) || standingFloorY < -5.0 || standingFloorY > 5.0) {
+        return false;
+    }
+
+    if (request.boundaryStandingSpace) {
+        boundaryFloorY = standingFloorY;
+        return std::isfinite(boundaryFloorY);
+    }
+
+    if (!request.targetTransformValid) {
+        return false;
+    }
+
+    boundaryFloorY = TargetFloorYForStandingFloor(
+        request.boundaryVertices,
+        request.targetToStanding,
+        standingFloorY);
+    return std::isfinite(boundaryFloorY) &&
+        boundaryFloorY >= -5.0 &&
+        boundaryFloorY <= 5.0;
+}
+
+bool SavedBoundaryStandingFloor(
+    const BoundaryFloorSourceRequest& request,
+    double& standingFloorY)
+{
+    if (!request.hasSavedBoundaryFloor ||
+        !std::isfinite(request.savedBoundaryFloorY) ||
+        request.savedBoundaryFloorY < -5.0 ||
+        request.savedBoundaryFloorY > 5.0)
+    {
+        return false;
+    }
+
+    if (request.boundaryStandingSpace) {
+        standingFloorY = request.savedBoundaryFloorY;
+        return std::isfinite(standingFloorY);
+    }
+
+    if (!request.targetTransformValid) {
+        return false;
+    }
+
+    standingFloorY = TransformHeightToStandingUniverse(
+        request.boundaryVertices,
+        request.savedBoundaryFloorY,
+        request.targetToStanding);
+    return std::isfinite(standingFloorY);
+}
+
+} // namespace
+
+SteamVrFloorSnapshot QuerySteamVrFloorSnapshot()
+{
+    SteamVrFloorSnapshot snapshot;
+    if (auto* chaperone = vr::VRChaperone()) {
+        snapshot.chaperoneAvailable = true;
+        snapshot.calibrationState = chaperone->GetCalibrationState();
+        snapshot.playAreaSizeValid =
+            chaperone->GetPlayAreaSize(&snapshot.playAreaX, &snapshot.playAreaZ) &&
+            PlayAreaSizeLooksValid(snapshot.playAreaX, snapshot.playAreaZ);
+        snapshot.playAreaRectValid =
+            chaperone->GetPlayAreaRect(&snapshot.playAreaRect) &&
+            PlayAreaRectLooksValid(snapshot.playAreaRect);
+    }
+
+    if (auto* setup = vr::VRChaperoneSetup()) {
+        snapshot.chaperoneSetupAvailable = true;
+        snapshot.standingZeroValid =
+            setup->GetWorkingStandingZeroPoseToRawTrackingPose(
+                &snapshot.standingZeroToRaw) &&
+            Matrix34Finite(snapshot.standingZeroToRaw);
+    }
+    return snapshot;
+}
+
+BoundaryFloorSourceDecision ResolveBoundaryFloorSource(
+    const SteamVrFloorSnapshot& steamVr,
+    const BoundaryFloorSourceRequest& request)
+{
+    BoundaryFloorSourceDecision decision;
+
+    auto reject = [&](const char* reason) {
+        decision.rejectedReasons.emplace_back(reason ? reason : "unknown");
+    };
+
+    auto selectStandingFloor = [&](
+        BoundaryFloorSourceKind source,
+        double standingFloorY,
+        const char* rejectReason) {
+        if (decision.valid) return;
+        double boundaryFloorY = 0.0;
+        if (!StandingFloorToBoundaryFloor(request, standingFloorY, boundaryFloorY)) {
+            reject(rejectReason);
+            return;
+        }
+        decision.valid = true;
+        decision.source = source;
+        decision.standingFloorY = standingFloorY;
+        decision.boundaryFloorY = boundaryFloorY;
+    };
+
+    if (request.controllerContactValid) {
+        selectStandingFloor(
+            BoundaryFloorSourceKind::ControllerContact,
+            request.controllerContactStandingY,
+            "controller_floor_rejected");
+    } else {
+        reject("controller_floor_unavailable");
+    }
+
+    bool steamVrReady = true;
+    if (!steamVr.chaperoneAvailable) {
+        reject("steamvr_chaperone_unavailable");
+        steamVrReady = false;
+    }
+    if (steamVr.chaperoneAvailable &&
+        steamVr.calibrationState != vr::ChaperoneCalibrationState_OK)
+    {
+        reject("steamvr_chaperone_not_ok");
+        steamVrReady = false;
+    }
+    if (!steamVr.playAreaSizeValid) {
+        reject("steamvr_play_area_size_invalid");
+        steamVrReady = false;
+    }
+    if (!steamVr.playAreaRectValid) {
+        reject("steamvr_play_area_rect_invalid");
+        steamVrReady = false;
+    }
+    if (steamVr.chaperoneSetupAvailable && !steamVr.standingZeroValid) {
+        reject("steamvr_standing_zero_invalid");
+    }
+    if (steamVrReady) {
+        selectStandingFloor(
+            BoundaryFloorSourceKind::SteamVrStanding,
+            0.0,
+            "steamvr_floor_transform_rejected");
+    }
+
+    double savedStandingFloorY = 0.0;
+    if (SavedBoundaryStandingFloor(request, savedStandingFloorY)) {
+        if (!decision.valid) {
+            decision.valid = true;
+            decision.source = BoundaryFloorSourceKind::SavedBoundary;
+            decision.boundaryFloorY = request.savedBoundaryFloorY;
+            decision.standingFloorY = savedStandingFloorY;
+        }
+    } else {
+        reject("saved_boundary_floor_unavailable");
+    }
+
+    if (request.manualFloorValid) {
+        selectStandingFloor(
+            BoundaryFloorSourceKind::Manual,
+            request.manualStandingFloorY,
+            "manual_floor_rejected");
+    } else {
+        reject("manual_floor_unavailable");
+    }
+
+    return decision;
+}
+
 bool BoundaryControllerMatchesTargetTrackingSystem(
     const std::string& controllerTrackingSystem,
     const std::string& targetTrackingSystem)

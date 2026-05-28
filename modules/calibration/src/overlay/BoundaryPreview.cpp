@@ -15,6 +15,7 @@ namespace {
 
 constexpr double kMinPreviewSpanMeters = 1.0;
 constexpr double kPreviewPadMeters = 0.30;
+constexpr int kUploadFailureDisableThreshold = 3;
 constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
@@ -61,6 +62,8 @@ uint64_t HashRenderCommand(uint64_t hash, const SpatialRenderCommand& command)
     hash = HashU64(hash, static_cast<uint64_t>(command.style.a));
     hash = HashU64(hash, static_cast<uint64_t>(command.style.fillA));
     hash = HashU64(hash, command.style.fill ? 1u : 0u);
+    hash = HashU64(hash, static_cast<uint64_t>(std::llround(command.style.strokeMeters * 1000.0)));
+    hash = HashU64(hash, static_cast<uint64_t>(std::llround(command.style.dotMeters * 1000.0)));
     hash = HashU64(hash, command.standingVertices.size());
     for (const auto& v : command.standingVertices) {
         hash = HashVertex(hash, v);
@@ -198,9 +201,13 @@ void DrawSoftLine(
     }
 }
 
-void FillPolygon(std::vector<uint8_t>& pixels, const std::vector<std::pair<int, int>>& points)
+void FillPolygon(
+    std::vector<uint8_t>& pixels,
+    const std::vector<std::pair<int, int>>& points,
+    const SpatialStyle& style)
 {
     if (points.size() < 3) return;
+    if (!style.fill || style.fillA == 0) return;
 
     constexpr int size = BoundaryPreviewRaster::kTextureSize;
     std::vector<double> intersections;
@@ -233,7 +240,7 @@ void FillPolygon(std::vector<uint8_t>& pixels, const std::vector<std::pair<int, 
                 0,
                 size - 1);
             for (int x = xStart; x <= xEnd; ++x) {
-                BlendPixel(pixels, x, y, 0, 190, 220, 72);
+                BlendPixel(pixels, x, y, style.r, style.g, style.b, style.fillA);
             }
         }
     }
@@ -245,19 +252,29 @@ void DrawBoundarySegment(
     const std::pair<int, int>& b,
     bool closing,
     double strokeRadius,
-    double strokeFeather)
+    double strokeFeather,
+    const SpatialStyle& style)
 {
+    if (style.strokeMeters <= 0.0 || style.a == 0) return;
+    const uint8_t haloAlpha = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(style.a) / 4,
+        0,
+        255));
+    const uint8_t midAlpha = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(style.a),
+        0,
+        255));
     DrawSoftLine(pixels, a.first, a.second, b.first, b.second,
         closing ? strokeRadius * 0.9 : strokeRadius,
         strokeFeather,
-        0, closing ? 180 : 255, closing ? 255 : 190, 56);
+        style.r, style.g, style.b, haloAlpha);
     DrawSoftLine(pixels, a.first, a.second, b.first, b.second,
         closing ? strokeRadius * 0.35 : strokeRadius * 0.42,
         std::max(1.5, strokeFeather * 0.35),
-        0, closing ? 220 : 255, closing ? 255 : 190, 245);
+        style.r, style.g, style.b, midAlpha);
     DrawSoftLine(pixels, a.first, a.second, b.first, b.second,
         std::max(1.25, strokeRadius * 0.14),
-        1.5, 235, 255, 255, 92);
+        1.5, 255, 255, 255, static_cast<uint8_t>(std::min<int>(style.a, 92)));
 }
 
 void DrawBoundaryVertex(
@@ -265,23 +282,32 @@ void DrawBoundaryVertex(
     const std::pair<int, int>& p,
     bool first,
     bool last,
-    double dotRadius)
+    double dotRadius,
+    const SpatialStyle& style)
 {
-    if (last) {
-        DrawSoftDot(pixels, p.first, p.second, dotRadius * 1.6, dotRadius * 0.55, 255, 220, 80, 72);
-        DrawSoftRing(pixels, p.first, p.second, dotRadius, std::max(2.0, dotRadius * 0.28), 2.0, 255, 248, 150, 230);
-        DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.5, 2.0, 255, 245, 90, 255);
+    if (style.dotMeters <= 0.0 || style.a == 0) return;
+    const uint8_t haloAlpha = style.fillA != 0
+        ? style.fillA
+        : static_cast<uint8_t>(std::min<int>(style.a / 4, 72));
+    if (last || first) {
+        DrawSoftDot(pixels, p.first, p.second, dotRadius * 1.45, dotRadius * 0.55,
+            style.r, style.g, style.b, haloAlpha);
+        DrawSoftRing(pixels, p.first, p.second, dotRadius,
+            std::max(2.0, dotRadius * 0.25),
+            2.0,
+            style.r,
+            style.g,
+            style.b,
+            static_cast<uint8_t>(std::min<int>(style.a, 240)));
+        DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.45, 2.0,
+            style.r, style.g, style.b, static_cast<uint8_t>(std::min<int>(style.a, 255)));
         return;
     }
 
-    if (first) {
-        DrawSoftRing(pixels, p.first, p.second, dotRadius * 0.95, std::max(2.0, dotRadius * 0.28), 2.0, 120, 230, 255, 220);
-        DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.40, 2.0, 230, 255, 255, 240);
-        return;
-    }
-
-    DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.65, dotRadius * 0.30, 0, 255, 190, 64);
-    DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.33, 1.75, 0, 235, 180, 235);
+    DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.70, dotRadius * 0.30,
+        style.r, style.g, style.b, haloAlpha);
+    DrawSoftDot(pixels, p.first, p.second, dotRadius * 0.36, 1.75,
+        style.r, style.g, style.b, style.a);
 }
 
 bool EnsureCreated()
@@ -404,22 +430,6 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
     const double maxZ = raster.plane.centerZ + half;
     const double scale = static_cast<double>(BoundaryPreviewRaster::kTextureSize - 1) /
         raster.plane.spanMeters;
-    const double strokeRadius = WorldMetersToPixels(
-        raster.plane.spanMeters,
-        0.035,
-        4.5,
-        18.0);
-    const double strokeFeather = WorldMetersToPixels(
-        raster.plane.spanMeters,
-        0.014,
-        2.0,
-        8.0);
-    const double dotRadius = WorldMetersToPixels(
-        raster.plane.spanMeters,
-        0.070,
-        5.5,
-        20.0);
-
     auto toPixel = [&](const BoundaryVertex& v) {
         const int x = ClampPixel((v.x - minX) * scale);
         const int y = ClampPixel((maxZ - v.z) * scale);
@@ -439,8 +449,30 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
         }
 
         if (command.closeLoop && command.style.fill && vertices.size() >= 3) {
-            FillPolygon(raster.rgba, pixelPoints);
+            FillPolygon(raster.rgba, pixelPoints, command.style);
         }
+
+        const double strokeRadius = command.style.strokeMeters > 0.0
+            ? WorldMetersToPixels(
+                raster.plane.spanMeters,
+                command.style.strokeMeters,
+                2.0,
+                18.0)
+            : 0.0;
+        const double strokeFeather = command.style.strokeMeters > 0.0
+            ? WorldMetersToPixels(
+                raster.plane.spanMeters,
+                command.style.strokeMeters * 0.40,
+                1.5,
+                8.0)
+            : 0.0;
+        const double dotRadius = command.style.dotMeters > 0.0
+            ? WorldMetersToPixels(
+                raster.plane.spanMeters,
+                command.style.dotMeters,
+                4.0,
+                22.0)
+            : 0.0;
 
         for (size_t i = 1; i < vertices.size(); ++i) {
             DrawBoundarySegment(
@@ -449,7 +481,8 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
                 pixelPoints[i],
                 false,
                 strokeRadius,
-                strokeFeather);
+                strokeFeather,
+                command.style);
         }
         if (command.closeLoop && vertices.size() >= 3) {
             DrawBoundarySegment(
@@ -458,7 +491,8 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
                 pixelPoints.front(),
                 true,
                 strokeRadius,
-                strokeFeather);
+                strokeFeather,
+                command.style);
         }
 
         for (size_t i = 0; i < vertices.size(); ++i) {
@@ -467,10 +501,21 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
                 pixelPoints[i],
                 i == 0,
                 i + 1 == vertices.size(),
-                dotRadius);
+                dotRadius,
+                command.style);
         }
     }
     return raster;
+}
+
+int BoundaryPreviewUploadFailureDisableThreshold()
+{
+    return kUploadFailureDisableThreshold;
+}
+
+bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount)
+{
+    return failureCount >= kUploadFailureDisableThreshold;
 }
 
 vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin()
@@ -563,7 +608,7 @@ void TickBoundaryPreview(
                     static_cast<int>(err),
                     s.uploadFailureCount);
             }
-            if (s.uploadFailureCount == 3) {
+            if (BoundaryPreviewShouldDisableUploadsAfterFailureCount(s.uploadFailureCount)) {
                 if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
                     vr::VROverlay()->HideOverlay(s.handle);
                 }
