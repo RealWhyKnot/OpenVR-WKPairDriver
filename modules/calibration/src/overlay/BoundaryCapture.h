@@ -17,20 +17,18 @@ struct FloorHitPreview {
     const char* rayName = "";
 };
 
-// Streams controller aim rays while the trigger is held and builds a boundary
-// polygon in lighthouse (pre-transform) space. Call Finish() to clean the raw
-// painted loop down to edge vertices. Cancel() discards the buffer and resets
-// to Idle.
+// Streams controller floor positions and builds a boundary polygon in
+// lighthouse (pre-transform) space. Call Finish() to clean the raw painted
+// loop down to edge vertices. Cancel() discards the buffer and resets to Idle.
 class CaptureSession {
 public:
     void Start();
     void Cancel();
     void Finish();
 
-    // Called each overlay tick. controllerPose is the raw lighthouse-space
-    // pose. The controller's pointer ray is intersected with the floor plane;
-    // a new vertex is appended when triggerHeld AND that floor point has moved
-    // at least kVertexDebounceMeters from the last recorded position.
+    // Pointer-ray capture is kept for callers that need it. The current
+    // boundary UI uses TickProjectedPosition so drawing does not depend on a
+    // trigger click while SteamVR dashboard is open.
     bool Tick(const Eigen::Affine3d& controllerPose, bool triggerHeld, double floorY = 0.0);
     bool TickPointerPose(const Eigen::Affine3d& pointerPose, bool triggerHeld, double floorY = 0.0);
     bool TickProjectedPosition(const Eigen::Affine3d& controllerPose, bool active, double floorY = 0.0);
@@ -66,8 +64,7 @@ private:
         bool active,
         double floorY);
 
-    // Minimum motion required to record a new vertex (avoids duplicate points
-    // while the user holds still with the trigger pressed).
+    // Minimum motion required to record a new vertex.
     static constexpr double kVertexDebounceMeters = 0.05;
     // Perpendicular-distance tolerance for Douglas-Peucker.
     static constexpr double kSimplifyEpsilonMeters = 0.05;

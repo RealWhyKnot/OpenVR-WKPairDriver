@@ -428,6 +428,18 @@ TEST(CaptureSessionTest, ProjectedPositionUsesControllerXZAndFloorY) {
     EXPECT_NEAR(verts[0].z, -0.75, 1e-9);
 }
 
+TEST(CaptureSessionTest, ProjectedPositionDebouncesDuplicateSamples) {
+    CaptureSession session;
+    session.Start();
+
+    Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+    pose.translation() = Eigen::Vector3d(1.25, 1.0, -0.75);
+
+    EXPECT_TRUE(session.TickProjectedPosition(pose, true, 0.0));
+    EXPECT_FALSE(session.TickProjectedPosition(pose, true, 0.0));
+    EXPECT_EQ(session.rawVertexCount(), 1u);
+}
+
 TEST(FloorCaptureSessionTest, TracksLowestControllerImmediately) {
     FloorCaptureSession floor;
     floor.Begin(0.10, 2.60);
@@ -642,6 +654,10 @@ TEST(BoundaryPreviewTest, RasterMarksLivePathPixels) {
 
     EXPECT_GT(openAlpha, 0u);
     EXPECT_GT(closedAlpha, openAlpha);
+}
+
+TEST(BoundaryPreviewTest, RasterUsesHighResolutionTexture) {
+    EXPECT_GE(BoundaryPreviewRaster::kTextureSize, 1024);
 }
 
 TEST(BoundaryPreviewTest, ClosedRasterFillsInterior) {
