@@ -94,6 +94,8 @@ target_include_directories(spacecal_tests
 target_link_libraries(spacecal_tests
     PRIVATE GTest::gtest_main
     PRIVATE openvr_pair_common
+    PRIVATE pair_gl3w
+    PRIVATE opengl32
     PRIVATE ${CMAKE_SOURCE_DIR}/lib/openvr/lib/win64/openvr_api.lib
 )
 

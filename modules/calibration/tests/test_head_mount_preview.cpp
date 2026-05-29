@@ -36,3 +36,14 @@ TEST(HeadMountPreviewTest, ForwardDistanceIsClampedAwayFromEyePoint) {
 
     EXPECT_FLOAT_EQ(mat.m[2][3], -0.05f);
 }
+
+TEST(HeadMountPreviewTest, HmdReferenceMarkerUsesTrackedDeviceRelativeOffset) {
+    const auto mat = HeadMountPreviewHmdReferenceTransform();
+
+    EXPECT_FLOAT_EQ(mat.m[0][0], 1.0f);
+    EXPECT_FLOAT_EQ(mat.m[1][1], 1.0f);
+    EXPECT_FLOAT_EQ(mat.m[2][2], 1.0f);
+    EXPECT_FLOAT_EQ(mat.m[0][3], 0.12f);
+    EXPECT_FLOAT_EQ(mat.m[1][3], 0.08f);
+    EXPECT_FLOAT_EQ(mat.m[2][3], -0.45f);
+}

@@ -182,6 +182,10 @@ bool BoundaryControllerMatchesTargetTrackingSystem(
     const std::string& controllerTrackingSystem,
     const std::string& targetTrackingSystem);
 
+bool BoundaryCaptureShouldUseTargetSpace(
+    bool controllerMatchesTarget,
+    bool transformReady);
+
 struct ChaperoneWorkingSet {
     bool valid = false;
     float playAreaX = 0.0f;

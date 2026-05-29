@@ -505,12 +505,16 @@ wkopenvr::boundary::BoundaryFloorSourceDecision CurrentFloorSourceDecision(
     bool controllerContactValid = false,
     double controllerContactStandingY = 0.0,
     bool logDecision = false,
-    const char* logContext = "ui")
+    const char* logContext = "ui",
+    bool ignoreSavedBoundary = false)
 {
     const auto snapshot = wkopenvr::boundary::QuerySteamVrFloorSnapshot();
-    const auto request = BuildFloorSourceRequest(
+    auto request = BuildFloorSourceRequest(
         controllerContactValid,
         controllerContactStandingY);
+    if (ignoreSavedBoundary) {
+        request.hasSavedBoundaryFloor = false;
+    }
     auto decision = wkopenvr::boundary::ResolveBoundaryFloorSource(
         snapshot,
         request);
@@ -648,12 +652,14 @@ void StartBoundaryCapture(const BoundaryControllerChoice* selectedController)
 
     char lbuf[256];
     snprintf(lbuf, sizeof lbuf,
-        "[boundary-capture] mode: space=%s floor_y=%.3f require_trigger=%d controller=%d system='%s'",
+        "[boundary-capture] mode: space=%s floor_y=%.3f require_trigger=%d controller=%d system='%s' target_match=%d transform_ready=%d",
         s_captureUsesStandingSpace ? "standing" : "target",
         s_captureFloorY,
         s_captureRequireTrigger ? 1 : 0,
         selectedController ? selectedController->deviceId : -1,
-        selectedController ? selectedController->trackingSystem.c_str() : "");
+        selectedController ? selectedController->trackingSystem.c_str() : "",
+        selectedController && selectedController->matchesTarget ? 1 : 0,
+        BoundaryTransformReady() ? 1 : 0);
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-capture", "%s", lbuf);
 }
@@ -783,9 +789,9 @@ const BoundaryControllerChoice* SelectedBoundaryController(
 
 bool ShouldUseTargetSpaceForBoundaryController(const BoundaryControllerChoice* choice)
 {
-    return choice
-        && choice->matchesTarget
-        && BoundaryTransformReady();
+    return wkopenvr::boundary::BoundaryCaptureShouldUseTargetSpace(
+        choice && choice->matchesTarget,
+        BoundaryTransformReady());
 }
 
 std::string BoundaryControllerLabel(const BoundaryControllerChoice& choice)
@@ -1653,8 +1659,9 @@ void DrawBoundaryPreviewStatus()
         status.uploadsDisabled ? " after upload failures" : "");
     if (status.created || status.uploadFailureCount > 0 || status.lastRasterHash != 0) {
         ImGui::TextDisabled(
-            "Preview detail: source=%s vertices=%zu failures=%d last_error=%d/%s hash=%llu",
+            "Preview detail: source=%s mode=%s vertices=%zu failures=%d last_error=%d/%s hash=%llu",
             status.lastSource,
+            status.uploadMode,
             status.lastVertexCount,
             status.uploadFailureCount,
             status.lastError,
@@ -1693,6 +1700,12 @@ void DrawBoundarySection(ImVec2 panelSize) {
         SelectedBoundaryController(controllerChoices);
     const bool controllerReady = selectedController && selectedController->poseValid;
     const auto& floorSourceDecision = CachedFloorSourceDecision();
+    const auto steamVrFloorDecision = CurrentFloorSourceDecision(
+        false,
+        0.0,
+        false,
+        "steamvr_probe",
+        true);
 
     ImGui::TextWrapped(
         "Set the floor from the selected controller, then walk it around the play-space edge.");
@@ -1779,15 +1792,16 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 ImGui::SetTooltip("No numeric floor entry. Touch the controller to the floor, then apply the live preview.");
             }
             ImGui::SameLine();
-            const bool canUseSteamVrFloor = floorSourceDecision.valid &&
-                floorSourceDecision.source == wkopenvr::boundary::BoundaryFloorSourceKind::SteamVrStanding;
+            const bool canUseSteamVrFloor = steamVrFloorDecision.valid &&
+                steamVrFloorDecision.source == wkopenvr::boundary::BoundaryFloorSourceKind::SteamVrStanding;
             if (!canUseSteamVrFloor) ImGui::BeginDisabled();
             if (ImGui::Button("Use SteamVR floor")) {
                 const auto decision = CurrentFloorSourceDecision(
                     false,
                     0.0,
                     true,
-                    "use_steamvr_floor");
+                    "use_steamvr_floor",
+                    true);
                 if (decision.valid &&
                     decision.source == wkopenvr::boundary::BoundaryFloorSourceKind::SteamVrStanding)
                 {

@@ -4,6 +4,7 @@
 #include "DiagnosticsLog.h"
 
 #include <openvr.h>
+#include <GL/gl3w.h>
 
 #include <algorithm>
 #include <array>
@@ -35,10 +36,12 @@ struct PreviewState {
     std::array<vr::VROverlayHandle_t, kMaxFileMarkerOverlays> fileMarkerHandles{};
     std::array<bool, kMaxFileMarkerOverlays> fileMarkerCreated{};
     std::array<bool, kMaxFileMarkerOverlays> fileMarkerTextureReadyBySlot{};
+    GLuint glTextureId = 0;
     bool created = false;
     bool visible = false;
     bool fileMarkersVisible = false;
     bool fileMarkerTextureReady = false;
+    bool textureReady = false;
     uint64_t uploadedHash = 0;
     uint64_t lastRasterHash = 0;
     int uploadFailureCount = 0;
@@ -451,6 +454,10 @@ void Destroy()
     if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
         vr::VROverlay()->DestroyOverlay(s.handle);
     }
+    if (s.glTextureId != 0 && glDeleteTextures) {
+        GLuint texture = s.glTextureId;
+        glDeleteTextures(1, &texture);
+    }
     if (vr::VROverlay()) {
         for (size_t i = 0; i < s.fileMarkerHandles.size(); ++i) {
             if (s.fileMarkerCreated[i] &&
@@ -461,6 +468,7 @@ void Destroy()
         }
     }
     s.handle = vr::k_ulOverlayHandleInvalid;
+    s.glTextureId = 0;
     s.fileMarkerHandles.fill(vr::k_ulOverlayHandleInvalid);
     s.fileMarkerCreated.fill(false);
     s.fileMarkerTextureReadyBySlot.fill(false);
@@ -468,6 +476,7 @@ void Destroy()
     s.visible = false;
     s.fileMarkersVisible = false;
     s.fileMarkerTextureReady = false;
+    s.textureReady = false;
     s.uploadedHash = 0;
     s.lastRasterHash = 0;
     s.uploadFailureCount = 0;
@@ -478,6 +487,99 @@ void Destroy()
     s.lastVertexCount = 0;
     s.fileMarkerCount = 0;
     openvr_pair::common::DiagnosticLog("boundary-preview", "destroyed");
+}
+
+bool EnsureGlTexture()
+{
+    auto& s = State();
+    if (s.glTextureId != 0) return true;
+    if (!glGenTextures || !glBindTexture || !glTexImage2D || !glTexParameteri) {
+        s.lastError = vr::VROverlayError_InvalidTexture;
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s mode=opengl_texture gl_unavailable=1",
+            s.created ? 1 : 0,
+            s.visible ? 1 : 0,
+            s.uploadsDisabled ? 1 : 0,
+            s.uploadFailureCount + 1,
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            s.lastSource);
+        return false;
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    if (texture == 0) {
+        s.lastError = vr::VROverlayError_InvalidTexture;
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s mode=opengl_texture gl_texture=0",
+            s.created ? 1 : 0,
+            s.visible ? 1 : 0,
+            s.uploadsDisabled ? 1 : 0,
+            s.uploadFailureCount + 1,
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            s.lastSource);
+        return false;
+    }
+
+    s.glTextureId = texture;
+    glBindTexture(GL_TEXTURE_2D, s.glTextureId);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return true;
+}
+
+vr::EVROverlayError UploadRasterTexture(const BoundaryPreviewRaster& raster)
+{
+    auto& s = State();
+    if (!EnsureGlTexture()) {
+        return s.lastError;
+    }
+
+    constexpr int size = BoundaryPreviewRaster::kTextureSize;
+    glBindTexture(GL_TEXTURE_2D, s.glTextureId);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        size,
+        size,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        raster.rgba.data());
+
+    const GLenum glErr = glGetError ? glGetError() : GL_NO_ERROR;
+    if (glErr != GL_NO_ERROR) {
+        s.lastError = vr::VROverlayError_InvalidTexture;
+        openvr_pair::common::DiagnosticLog(
+            "boundary-preview",
+            "texture_upload_gl_failed gl_error=0x%x source=%s vertices=%zu hash=%llu",
+            static_cast<unsigned int>(glErr),
+            s.lastSource,
+            s.lastVertexCount,
+            static_cast<unsigned long long>(raster.hash));
+        return s.lastError;
+    }
+
+    vr::Texture_t texture{};
+    texture.handle = reinterpret_cast<void*>(
+        static_cast<uintptr_t>(s.glTextureId));
+    texture.eType = vr::TextureType_OpenGL;
+    texture.eColorSpace = vr::ColorSpace_Auto;
+
+    const vr::EVROverlayError err =
+        vr::VROverlay()->SetOverlayTexture(s.handle, &texture);
+    if (err == vr::VROverlayError_None && glFlush) {
+        glFlush();
+    }
+    return err;
 }
 
 bool EnsureFileMarkerCreated(size_t index)
@@ -843,6 +945,11 @@ bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount)
     return failureCount >= kUploadFailureDisableThreshold;
 }
 
+bool BoundaryPreviewUsesOpenGlTextureUpload()
+{
+    return true;
+}
+
 int BoundaryPreviewFileMarkerLimit()
 {
     return kMaxFileMarkerOverlays;
@@ -903,6 +1010,7 @@ BoundaryPreviewStatus GetBoundaryPreviewStatus()
     status.uploadsDisabled = s.uploadsDisabled;
     status.fileMarkersVisible = s.fileMarkersVisible;
     status.fileMarkerTextureReady = s.fileMarkerTextureReady;
+    status.textureReady = s.textureReady;
     status.uploadFailureCount = s.uploadFailureCount;
     status.fileMarkerFailureCount = s.fileMarkerFailureCount;
     status.lastError = static_cast<int>(s.lastError);
@@ -1023,23 +1131,20 @@ void TickBoundaryPreview(
         return;
     }
     if (raster.hash != s.uploadedHash) {
-        vr::EVROverlayError err = vr::VROverlay()->SetOverlayRaw(
-            s.handle,
-            raster.rgba.data(),
-            BoundaryPreviewRaster::kTextureSize,
-            BoundaryPreviewRaster::kTextureSize,
-            4);
+        vr::EVROverlayError err = UploadRasterTexture(raster);
         if (err == vr::VROverlayError_None) {
             s.uploadedHash = raster.hash;
             s.uploadFailureCount = 0;
             s.lastError = vr::VROverlayError_None;
+            s.textureReady = true;
         } else {
             s.lastError = err;
+            s.textureReady = false;
             ++s.uploadFailureCount;
             if (s.uploadFailureCount <= 3 || (s.uploadFailureCount % 30) == 0) {
                 openvr_pair::common::DiagnosticLog(
                     "boundary-preview",
-                    "upload_failed err=%d error_name=%s count=%d source=%s vertices=%zu hash=%llu",
+                    "texture_upload_failed err=%d error_name=%s count=%d source=%s vertices=%zu hash=%llu mode=opengl_texture",
                     static_cast<int>(err),
                     OverlayErrorName(err),
                     s.uploadFailureCount,
@@ -1048,7 +1153,7 @@ void TickBoundaryPreview(
                     static_cast<unsigned long long>(raster.hash));
                 openvr_pair::common::DiagnosticLog(
                     "boundary_preview_status",
-                    "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s vertices=%zu hash=%llu",
+                    "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s vertices=%zu hash=%llu mode=opengl_texture",
                     s.created ? 1 : 0,
                     s.visible ? 1 : 0,
                     s.uploadsDisabled ? 1 : 0,
@@ -1067,14 +1172,14 @@ void TickBoundaryPreview(
                 s.uploadsDisabled = true;
                 openvr_pair::common::DiagnosticLog(
                     "boundary-preview",
-                    "uploads_disabled_after_failures err=%d error_name=%s source=%s vertices=%zu",
+                    "uploads_disabled_after_failures err=%d error_name=%s source=%s vertices=%zu mode=opengl_texture",
                     static_cast<int>(err),
                     OverlayErrorName(err),
                     s.lastSource,
                     s.lastVertexCount);
                 openvr_pair::common::DiagnosticLog(
                     "boundary_preview_status",
-                    "created=%d visible=0 uploads_disabled=1 failures=%d error=%d error_name=%s source=%s vertices=%zu",
+                    "created=%d visible=0 uploads_disabled=1 failures=%d error=%d error_name=%s source=%s vertices=%zu mode=opengl_texture",
                     s.created ? 1 : 0,
                     s.uploadFailureCount,
                     static_cast<int>(err),
@@ -1101,7 +1206,7 @@ void TickBoundaryPreview(
     if (!s.visible) {
         openvr_pair::common::DiagnosticLog(
             "boundary_preview_status",
-            "created=1 visible=1 uploads_disabled=0 failures=%d error=%d error_name=%s source=%s vertices=%zu span=%.3f center=(%.3f,%.3f)",
+            "created=1 visible=1 uploads_disabled=0 failures=%d error=%d error_name=%s source=%s vertices=%zu span=%.3f center=(%.3f,%.3f) mode=opengl_texture texture_ready=%d",
             s.uploadFailureCount,
             static_cast<int>(s.lastError),
             OverlayErrorName(s.lastError),
@@ -1109,7 +1214,8 @@ void TickBoundaryPreview(
             s.lastVertexCount,
             raster.plane.spanMeters,
             raster.plane.centerX,
-            raster.plane.centerZ);
+            raster.plane.centerZ,
+            s.textureReady ? 1 : 0);
     }
     s.visible = true;
 }

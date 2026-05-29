@@ -666,6 +666,18 @@ BoundaryFloorSourceDecision ResolveBoundaryFloorSource(
         reject("controller_floor_unavailable");
     }
 
+    double savedStandingFloorY = 0.0;
+    if (SavedBoundaryStandingFloor(request, savedStandingFloorY)) {
+        if (!decision.valid) {
+            decision.valid = true;
+            decision.source = BoundaryFloorSourceKind::SavedBoundary;
+            decision.boundaryFloorY = request.savedBoundaryFloorY;
+            decision.standingFloorY = savedStandingFloorY;
+        }
+    } else {
+        reject("saved_boundary_floor_unavailable");
+    }
+
     bool steamVrReady = true;
     if (!steamVr.chaperoneAvailable) {
         reject("steamvr_chaperone_unavailable");
@@ -695,18 +707,6 @@ BoundaryFloorSourceDecision ResolveBoundaryFloorSource(
             "steamvr_floor_transform_rejected");
     }
 
-    double savedStandingFloorY = 0.0;
-    if (SavedBoundaryStandingFloor(request, savedStandingFloorY)) {
-        if (!decision.valid) {
-            decision.valid = true;
-            decision.source = BoundaryFloorSourceKind::SavedBoundary;
-            decision.boundaryFloorY = request.savedBoundaryFloorY;
-            decision.standingFloorY = savedStandingFloorY;
-        }
-    } else {
-        reject("saved_boundary_floor_unavailable");
-    }
-
     if (request.manualFloorValid) {
         selectStandingFloor(
             BoundaryFloorSourceKind::Manual,
@@ -725,6 +725,15 @@ bool BoundaryControllerMatchesTargetTrackingSystem(
 {
     return !targetTrackingSystem.empty()
         && controllerTrackingSystem == targetTrackingSystem;
+}
+
+bool BoundaryCaptureShouldUseTargetSpace(
+    bool controllerMatchesTarget,
+    bool transformReady)
+{
+    (void)controllerMatchesTarget;
+    (void)transformReady;
+    return false;
 }
 
 // ---------------------------------------------------------------------------

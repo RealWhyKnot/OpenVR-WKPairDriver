@@ -31,12 +31,14 @@ struct BoundaryPreviewStatus {
     bool uploadsDisabled = false;
     bool fileMarkersVisible = false;
     bool fileMarkerTextureReady = false;
+    bool textureReady = false;
     int uploadFailureCount = 0;
     int fileMarkerFailureCount = 0;
     int lastError = 0;
     int fileMarkerLastError = 0;
     const char* lastErrorName = "None";
     const char* fileMarkerLastErrorName = "None";
+    const char* uploadMode = "opengl_texture";
     uint64_t uploadedHash = 0;
     uint64_t lastRasterHash = 0;
     size_t lastVertexCount = 0;
@@ -67,6 +69,8 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
 int BoundaryPreviewUploadFailureDisableThreshold();
 
 bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount);
+
+bool BoundaryPreviewUsesOpenGlTextureUpload();
 
 int BoundaryPreviewFileMarkerLimit();
 

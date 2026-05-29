@@ -491,9 +491,10 @@ bool DrawOffsetModal() {
             const auto preview = GetHeadMountPreviewStatus();
             ImGui::Spacing();
             ImGui::TextDisabled(
-                "Offset preview: %s, texture=%s, error=%d/%s",
+                "Offset preview: %s, texture=%s, reference=%s, error=%d/%s",
                 preview.visible ? "visible" : "hidden",
                 preview.textureReady ? "ready" : "missing",
+                preview.referenceVisible ? "visible" : "hidden",
                 preview.lastError,
                 preview.lastErrorName);
         }
@@ -584,9 +585,10 @@ void DrawOffsetInlinePanel() {
     {
         const auto preview = GetHeadMountPreviewStatus();
         ImGui::TextDisabled(
-            "Offset preview: %s, texture=%s, error=%d/%s",
+            "Offset preview: %s, texture=%s, reference=%s, error=%d/%s",
             preview.visible ? "visible" : "hidden",
             preview.textureReady ? "ready" : "missing",
+            preview.referenceVisible ? "visible" : "hidden",
             preview.lastError,
             preview.lastErrorName);
     }

@@ -490,11 +490,31 @@ TEST(BoundaryTransformTest, ControllerTargetMatchRequiresConfiguredTargetSystem)
     EXPECT_TRUE(BoundaryControllerMatchesTargetTrackingSystem("lighthouse", "lighthouse"));
 }
 
-TEST(BoundaryFloorSourceTest, ValidSteamVrChaperoneSelectsStandingFloor) {
+TEST(BoundaryTransformTest, BoundaryCaptureUsesStandingSpaceEvenForTargetControllers) {
+    EXPECT_FALSE(BoundaryCaptureShouldUseTargetSpace(false, false));
+    EXPECT_FALSE(BoundaryCaptureShouldUseTargetSpace(false, true));
+    EXPECT_FALSE(BoundaryCaptureShouldUseTargetSpace(true, false));
+    EXPECT_FALSE(BoundaryCaptureShouldUseTargetSpace(true, true));
+}
+
+TEST(BoundaryFloorSourceTest, SavedBoundaryFloorTakesPriorityOverSteamVrFloor) {
     BoundaryFloorSourceRequest request;
     request.boundaryStandingSpace = true;
     request.hasSavedBoundaryFloor = true;
     request.savedBoundaryFloorY = 0.35;
+
+    const auto decision =
+        ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
+
+    ASSERT_TRUE(decision.valid);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SavedBoundary);
+    EXPECT_NEAR(decision.standingFloorY, 0.35, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, 0.35, 1e-9);
+}
+
+TEST(BoundaryFloorSourceTest, SteamVrFloorIsUsedWhenSavedFloorIsUnavailable) {
+    BoundaryFloorSourceRequest request;
+    request.boundaryStandingSpace = true;
 
     const auto decision =
         ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
@@ -542,7 +562,7 @@ TEST(BoundaryFloorSourceTest, InvalidSteamVrFallsBackToSavedBoundary) {
     EXPECT_FALSE(decision.rejectedReasons.empty());
 }
 
-TEST(BoundaryFloorSourceTest, TargetSpaceSteamVrFloorMapsToTargetHeight) {
+TEST(BoundaryFloorSourceTest, TargetSpaceSavedFloorMapsToStandingHeight) {
     Eigen::AffineCompact3d targetToStanding = Eigen::AffineCompact3d::Identity();
     targetToStanding.translation() = Eigen::Vector3d(1.0, 2.50, -1.0);
 
@@ -558,9 +578,9 @@ TEST(BoundaryFloorSourceTest, TargetSpaceSteamVrFloorMapsToTargetHeight) {
         ResolveBoundaryFloorSource(ValidSteamVrFloorSnapshot(), request);
 
     ASSERT_TRUE(decision.valid);
-    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SteamVrStanding);
-    EXPECT_NEAR(decision.standingFloorY, 0.0, 1e-9);
-    EXPECT_NEAR(decision.boundaryFloorY, -2.50, 1e-9);
+    EXPECT_EQ(decision.source, BoundaryFloorSourceKind::SavedBoundary);
+    EXPECT_NEAR(decision.standingFloorY, 0.50, 1e-9);
+    EXPECT_NEAR(decision.boundaryFloorY, -2.0, 1e-9);
 }
 
 // ---------------------------------------------------------------------------
@@ -1420,6 +1440,10 @@ TEST(BoundaryPreviewTest, UploadFailuresDisableAfterThreshold) {
     EXPECT_FALSE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(2));
     EXPECT_TRUE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(3));
     EXPECT_TRUE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(4));
+}
+
+TEST(BoundaryPreviewTest, UsesOpenGlTextureUploadForHmdPreview) {
+    EXPECT_TRUE(BoundaryPreviewUsesOpenGlTextureUpload());
 }
 
 TEST(BoundaryPreviewTest, StatusExposesInitialUploadDiagnostics) {

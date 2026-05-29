@@ -15,8 +15,12 @@ struct HeadMountPreviewStatus {
     bool created = false;
     bool visible = false;
     bool textureReady = false;
+    bool referenceVisible = false;
+    bool referenceTextureReady = false;
     int lastError = 0;
+    int referenceLastError = 0;
     const char* lastErrorName = "None";
+    const char* referenceLastErrorName = "None";
     const char* lastSource = "none";
     double markerForwardMeters = 0.0;
     vr::ETrackingUniverseOrigin trackingOrigin = vr::TrackingUniverseStanding;
@@ -30,6 +34,8 @@ vr::HmdMatrix34_t HeadMountPreviewTransform(
     const Eigen::Affine3d& headTrackerPose,
     const Eigen::AffineCompact3d& headFromTracker,
     double forwardMeters = HeadMountPreviewForwardMeters());
+
+vr::HmdMatrix34_t HeadMountPreviewHmdReferenceTransform();
 
 HeadMountPreviewStatus GetHeadMountPreviewStatus();
 

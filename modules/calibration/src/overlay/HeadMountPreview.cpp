@@ -28,10 +28,15 @@ namespace {
 
 struct PreviewState {
     vr::VROverlayHandle_t handle  = vr::k_ulOverlayHandleInvalid;
+    vr::VROverlayHandle_t referenceHandle = vr::k_ulOverlayHandleInvalid;
     bool                  created = false;
+    bool                  referenceCreated = false;
     bool                  visible = false;
+    bool                  referenceVisible = false;
     bool                  textureReady = false;
+    bool                  referenceTextureReady = false;
     vr::EVROverlayError   lastError = vr::VROverlayError_None;
+    vr::EVROverlayError   referenceLastError = vr::VROverlayError_None;
     const char*           lastSource = "none";
     vr::ETrackingUniverseOrigin trackingOrigin = vr::TrackingUniverseStanding;
 };
@@ -43,7 +48,10 @@ PreviewState& PS() {
 
 constexpr const char* kPreviewKey   = "wkopenvr.headmount.preview";
 constexpr const char* kPreviewName  = "Head-mount eye-position marker";
+constexpr const char* kReferenceKey = "wkopenvr.headmount.preview.reference";
+constexpr const char* kReferenceName = "Head-mount visible reference marker";
 constexpr float kMarkerWidthM = 0.075f;
+constexpr float kReferenceMarkerWidthM = 0.055f;
 constexpr double kMarkerForwardMeters = 0.45;
 
 #ifdef _WIN32
@@ -171,12 +179,72 @@ bool EnsureCreated(const char* source) {
     return s.textureReady;
 }
 
+bool EnsureReferenceCreated(const char* source) {
+    auto& s = PS();
+    if (s.referenceCreated) return s.referenceTextureReady;
+    if (!vr::VROverlay()) return false;
+
+    vr::EVROverlayError err =
+        vr::VROverlay()->CreateOverlay(kReferenceKey, kReferenceName, &s.referenceHandle);
+    if (err == vr::VROverlayError_KeyInUse) {
+        err = vr::VROverlay()->FindOverlay(kReferenceKey, &s.referenceHandle);
+    }
+    if (err != vr::VROverlayError_None) {
+        s.referenceLastError = err;
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "reference_created=0 reference_visible=0 reference_texture_ready=0 reference_error=%d reference_error_name=%s source=%s",
+            static_cast<int>(err),
+            OverlayErrorName(err),
+            source ? source : "reference_create");
+        return false;
+    }
+
+    vr::VROverlay()->SetOverlayWidthInMeters(s.referenceHandle, kReferenceMarkerWidthM);
+    vr::VROverlay()->SetOverlaySortOrder(s.referenceHandle, 19);
+    vr::VROverlay()->SetOverlayAlpha(s.referenceHandle, 0.90f);
+    vr::VROverlay()->SetOverlayColor(s.referenceHandle, 1.0f, 1.0f, 1.0f);
+
+    const std::string texturePath = ResolveMarkerTexturePath();
+    if (texturePath.empty()) {
+        s.referenceCreated = true;
+        s.referenceVisible = false;
+        s.referenceTextureReady = false;
+        s.referenceLastError = vr::VROverlayError_UnableToLoadFile;
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "reference_created=1 reference_visible=0 reference_texture_ready=0 reference_error=%d reference_error_name=%s source=%s texture_missing=1",
+            static_cast<int>(s.referenceLastError),
+            OverlayErrorName(s.referenceLastError),
+            source ? source : "reference_create");
+        return false;
+    }
+
+    err = vr::VROverlay()->SetOverlayFromFile(s.referenceHandle, texturePath.c_str());
+    s.referenceCreated = true;
+    s.referenceVisible = false;
+    s.referenceTextureReady = (err == vr::VROverlayError_None);
+    s.referenceLastError = err;
+    openvr_pair::common::DiagnosticLog(
+        "head_mount_preview_status",
+        "reference_created=1 reference_visible=0 reference_texture_ready=%d reference_error=%d reference_error_name=%s source=%s texture='%s'",
+        s.referenceTextureReady ? 1 : 0,
+        static_cast<int>(err),
+        OverlayErrorName(err),
+        source ? source : "reference_create",
+        texturePath.c_str());
+    return s.referenceTextureReady;
+}
+
 void HideOnly(const char* source)
 {
     auto& s = PS();
-    if (!s.created) return;
+    if (!s.created && !s.referenceCreated) return;
     if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
         vr::VROverlay()->HideOverlay(s.handle);
+    }
+    if (vr::VROverlay() && s.referenceHandle != vr::k_ulOverlayHandleInvalid) {
+        vr::VROverlay()->HideOverlay(s.referenceHandle);
     }
     if (s.visible) {
         openvr_pair::common::DiagnosticLog(
@@ -187,7 +255,17 @@ void HideOnly(const char* source)
             OverlayErrorName(s.lastError),
             source ? source : s.lastSource);
     }
+    if (s.referenceVisible) {
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "reference_created=1 reference_visible=0 reference_texture_ready=%d reference_error=%d reference_error_name=%s source=%s hmd_relative=1",
+            s.referenceTextureReady ? 1 : 0,
+            static_cast<int>(s.referenceLastError),
+            OverlayErrorName(s.referenceLastError),
+            source ? source : s.lastSource);
+    }
     s.visible = false;
+    s.referenceVisible = false;
 }
 
 } // namespace
@@ -219,6 +297,18 @@ vr::HmdMatrix34_t HeadMountPreviewTransform(
     return ToHmdMatrix34(markerWorld.matrix());
 }
 
+vr::HmdMatrix34_t HeadMountPreviewHmdReferenceTransform()
+{
+    vr::HmdMatrix34_t mat{};
+    mat.m[0][0] = 1.0f;
+    mat.m[1][1] = 1.0f;
+    mat.m[2][2] = 1.0f;
+    mat.m[0][3] = 0.12f;
+    mat.m[1][3] = 0.08f;
+    mat.m[2][3] = -0.45f;
+    return mat;
+}
+
 HeadMountPreviewStatus GetHeadMountPreviewStatus()
 {
     const auto& s = PS();
@@ -226,8 +316,12 @@ HeadMountPreviewStatus GetHeadMountPreviewStatus()
     status.created = s.created;
     status.visible = s.visible;
     status.textureReady = s.textureReady;
+    status.referenceVisible = s.referenceVisible;
+    status.referenceTextureReady = s.referenceTextureReady;
     status.lastError = static_cast<int>(s.lastError);
+    status.referenceLastError = static_cast<int>(s.referenceLastError);
     status.lastErrorName = OverlayErrorName(s.lastError);
+    status.referenceLastErrorName = OverlayErrorName(s.referenceLastError);
     status.lastSource = s.lastSource ? s.lastSource : "none";
     status.markerForwardMeters = kMarkerForwardMeters;
     status.trackingOrigin = s.trackingOrigin;
@@ -249,6 +343,7 @@ void TickPreview(bool wantVisible,
     }
 
     if (!EnsureCreated(source)) return;
+    const bool referenceReady = EnsureReferenceCreated(source);
 
     vr::HmdMatrix34_t mat = HeadMountPreviewTransform(
         headTrackerPose,
@@ -302,6 +397,41 @@ void TickPreview(bool wantVisible,
     }
     s.lastError = vr::VROverlayError_None;
     s.visible = true;
+
+    if (referenceReady) {
+        vr::HmdMatrix34_t refMat = HeadMountPreviewHmdReferenceTransform();
+        err = vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(
+            s.referenceHandle,
+            vr::k_unTrackedDeviceIndex_Hmd,
+            &refMat);
+        if (err == vr::VROverlayError_None) {
+            err = vr::VROverlay()->ShowOverlay(s.referenceHandle);
+        }
+        if (err != vr::VROverlayError_None) {
+            s.referenceLastError = err;
+            openvr_pair::common::DiagnosticLog(
+                "head_mount_preview_status",
+                "reference_created=1 reference_visible=%d reference_texture_ready=%d reference_error=%d reference_error_name=%s source=%s hmd_relative=1",
+                s.referenceVisible ? 1 : 0,
+                s.referenceTextureReady ? 1 : 0,
+                static_cast<int>(err),
+                OverlayErrorName(err),
+                s.lastSource);
+            return;
+        }
+        if (!s.referenceVisible || s.referenceLastError != vr::VROverlayError_None) {
+            openvr_pair::common::DiagnosticLog(
+                "head_mount_preview_status",
+                "reference_created=1 reference_visible=1 reference_texture_ready=%d reference_error=0 reference_error_name=None source=%s hmd_relative=1 pos=(%.3f,%.3f,%.3f)",
+                s.referenceTextureReady ? 1 : 0,
+                s.lastSource,
+                refMat.m[0][3],
+                refMat.m[1][3],
+                refMat.m[2][3]);
+        }
+        s.referenceLastError = vr::VROverlayError_None;
+        s.referenceVisible = true;
+    }
 }
 
 } // namespace wkopenvr::headmount
