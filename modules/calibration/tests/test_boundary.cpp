@@ -1428,10 +1428,72 @@ TEST(BoundaryPreviewTest, StatusExposesInitialUploadDiagnostics) {
     const auto status = GetBoundaryPreviewStatus();
 
     EXPECT_FALSE(status.uploadsDisabled);
+    EXPECT_FALSE(status.fileMarkersVisible);
     EXPECT_EQ(status.uploadFailureCount, 0);
+    EXPECT_EQ(status.fileMarkerFailureCount, 0);
     EXPECT_EQ(status.lastError, 0);
+    EXPECT_EQ(status.fileMarkerLastError, 0);
     ASSERT_STREQ(status.lastErrorName, "None");
+    ASSERT_STREQ(status.fileMarkerLastErrorName, "None");
     EXPECT_EQ(status.renderSize, BoundaryPreviewRaster::kTextureSize);
+}
+
+TEST(BoundaryPreviewTest, FileMarkersPreferExplicitMarkerCommands) {
+    SpatialRenderCommand path;
+    path.kind = SpatialPrimitiveKind::PolylinePath;
+    path.standingVertices = {
+        { 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0 },
+    };
+    path.style.dotMeters = 0.0;
+
+    SpatialRenderCommand marker;
+    marker.kind = SpatialPrimitiveKind::Marker;
+    marker.standingVertices = {
+        { 3.0, 0.1, 4.0 },
+    };
+    marker.style.r = 255;
+    marker.style.g = 70;
+    marker.style.b = 70;
+    marker.style.dotMeters = 0.120;
+
+    const auto markers = BuildBoundaryPreviewFileMarkers({ path, marker });
+
+    ASSERT_EQ(markers.size(), 1u);
+    EXPECT_DOUBLE_EQ(markers[0].vertex.x, 3.0);
+    EXPECT_DOUBLE_EQ(markers[0].vertex.y, 0.1);
+    EXPECT_DOUBLE_EQ(markers[0].vertex.z, 4.0);
+    EXPECT_EQ(markers[0].style.r, 255);
+    EXPECT_DOUBLE_EQ(markers[0].style.dotMeters, 0.120);
+}
+
+TEST(BoundaryPreviewTest, FileMarkersDownsampleWithoutDroppingEndpoints) {
+    SpatialRenderCommand markersCommand;
+    markersCommand.kind = SpatialPrimitiveKind::Marker;
+    for (int i = 0; i < BoundaryPreviewFileMarkerLimit() + 8; ++i) {
+        markersCommand.standingVertices.push_back(
+            { static_cast<double>(i), 0.0, static_cast<double>(i) });
+    }
+
+    const auto markers = BuildBoundaryPreviewFileMarkers({ markersCommand });
+
+    ASSERT_EQ(markers.size(), static_cast<size_t>(BoundaryPreviewFileMarkerLimit()));
+    EXPECT_DOUBLE_EQ(markers.front().vertex.x, 0.0);
+    EXPECT_DOUBLE_EQ(
+        markers.back().vertex.x,
+        static_cast<double>(BoundaryPreviewFileMarkerLimit() + 7));
+}
+
+TEST(BoundaryPreviewTest, FileMarkerTransformUsesFloorPlaneTransform) {
+    const BoundaryVertex marker{ 1.25, -0.10, -2.50 };
+
+    const auto mat = BoundaryPreviewFileMarkerTransform(marker);
+
+    EXPECT_FLOAT_EQ(mat.m[0][3], 1.25f);
+    EXPECT_FLOAT_EQ(mat.m[1][3], -0.075f);
+    EXPECT_FLOAT_EQ(mat.m[2][3], -2.50f);
+    EXPECT_FLOAT_EQ(mat.m[1][2], 1.0f);
+    EXPECT_FLOAT_EQ(mat.m[2][1], -1.0f);
 }
 
 TEST(ChaperoneWorkingSetTest, BuildsPerimeterQuadsAndPlayArea) {

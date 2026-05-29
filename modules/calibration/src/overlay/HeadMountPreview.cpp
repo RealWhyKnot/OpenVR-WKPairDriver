@@ -1,11 +1,22 @@
 #include "HeadMountPreview.h"
 
+#include "DiagnosticsLog.h"
+
 #include <openvr.h>
 #include <Eigen/Geometry>
 
-#include <cstring>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <string>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace wkopenvr::headmount {
 
@@ -18,6 +29,11 @@ namespace {
 struct PreviewState {
     vr::VROverlayHandle_t handle  = vr::k_ulOverlayHandleInvalid;
     bool                  created = false;
+    bool                  visible = false;
+    bool                  textureReady = false;
+    vr::EVROverlayError   lastError = vr::VROverlayError_None;
+    const char*           lastSource = "none";
+    vr::ETrackingUniverseOrigin trackingOrigin = vr::TrackingUniverseStanding;
 };
 
 PreviewState& PS() {
@@ -27,38 +43,66 @@ PreviewState& PS() {
 
 constexpr const char* kPreviewKey   = "wkopenvr.headmount.preview";
 constexpr const char* kPreviewName  = "Head-mount eye-position marker";
-// Overlay diameter in metres. Small enough to be a distinct dot in the scene.
-constexpr float kDotWidthM = 0.04f;
+constexpr float kMarkerWidthM = 0.075f;
+constexpr double kMarkerForwardMeters = 0.45;
 
-// Build a solid-color 8x8 RGBA texture (a flat colored disc). Called once on
-// first creation. Color: bright cyan to stand out against most environments.
-static void UploadDotTexture(vr::VROverlayHandle_t h) {
-    constexpr int W = 8, H = 8;
-    // Generate a circular mask so the marker looks like a dot, not a square.
-    // RGBA, straight alpha.
-    uint8_t pixels[W * H * 4];
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            // Normalised distance from centre [0..1] for a disc.
-            float fx = (x + 0.5f) / W - 0.5f;
-            float fy = (y + 0.5f) / H - 0.5f;
-            float d  = std::sqrt(fx * fx + fy * fy) * 2.0f; // 0 at centre, 1 at rim
-            uint8_t a = (d <= 1.0f) ? 255u : 0u;
-            int idx = (y * W + x) * 4;
-            pixels[idx + 0] = 0u;    // R
-            pixels[idx + 1] = 230u;  // G
-            pixels[idx + 2] = 255u;  // B
-            pixels[idx + 3] = a;
-        }
+#ifdef _WIN32
+std::filesystem::path ExeDir()
+{
+    char buf[MAX_PATH] = {};
+    const DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) return {};
+    return std::filesystem::path(buf).parent_path();
+}
+#else
+std::filesystem::path ExeDir()
+{
+    return {};
+}
+#endif
+
+std::string ResolveMarkerTexturePath()
+{
+    const std::filesystem::path exeDir = ExeDir();
+    if (!exeDir.empty()) {
+        const std::filesystem::path deployed = exeDir / "dashboard_icon.png";
+        if (std::filesystem::exists(deployed)) return deployed.string();
     }
-    vr::VROverlay()->SetOverlayRaw(h, pixels, W, H, 4);
+
+    const std::filesystem::path source =
+        std::filesystem::current_path() / "core" / "src" / "overlay" / "dashboard_icon.png";
+    if (std::filesystem::exists(source)) return source.string();
+    return {};
 }
 
-// Convert an Eigen AffineCompact3d world transform to an OpenVR HmdMatrix34.
-// OpenVR matrices are row-major [3][4] (3 rows, 4 columns):
-//   [ R00 R01 R02 Tx ]
-//   [ R10 R11 R12 Ty ]
-//   [ R20 R21 R22 Tz ]
+const char* OverlayErrorName(vr::EVROverlayError err)
+{
+    switch (err) {
+    case vr::VROverlayError_None: return "None";
+    case vr::VROverlayError_UnknownOverlay: return "UnknownOverlay";
+    case vr::VROverlayError_InvalidHandle: return "InvalidHandle";
+    case vr::VROverlayError_PermissionDenied: return "PermissionDenied";
+    case vr::VROverlayError_OverlayLimitExceeded: return "OverlayLimitExceeded";
+    case vr::VROverlayError_WrongVisibilityType: return "WrongVisibilityType";
+    case vr::VROverlayError_KeyTooLong: return "KeyTooLong";
+    case vr::VROverlayError_NameTooLong: return "NameTooLong";
+    case vr::VROverlayError_KeyInUse: return "KeyInUse";
+    case vr::VROverlayError_WrongTransformType: return "WrongTransformType";
+    case vr::VROverlayError_InvalidTrackedDevice: return "InvalidTrackedDevice";
+    case vr::VROverlayError_InvalidParameter: return "InvalidParameter";
+    case vr::VROverlayError_ThumbnailCantBeDestroyed: return "ThumbnailCantBeDestroyed";
+    case vr::VROverlayError_ArrayTooSmall: return "ArrayTooSmall";
+    case vr::VROverlayError_RequestFailed: return "RequestFailed";
+    case vr::VROverlayError_InvalidTexture: return "InvalidTexture";
+    case vr::VROverlayError_UnableToLoadFile: return "UnableToLoadFile";
+    case vr::VROverlayError_KeyboardAlreadyInUse: return "KeyboardAlreadyInUse";
+    case vr::VROverlayError_NoNeighbor: return "NoNeighbor";
+    case vr::VROverlayError_TooManyMaskPrimitives: return "TooManyMaskPrimitives";
+    case vr::VROverlayError_BadMaskPrimitive: return "BadMaskPrimitive";
+    default: return "Unknown";
+    }
+}
+
 static vr::HmdMatrix34_t ToHmdMatrix34(const Eigen::Matrix4d& m) {
     vr::HmdMatrix34_t out;
     for (int r = 0; r < 3; r++) {
@@ -69,38 +113,81 @@ static vr::HmdMatrix34_t ToHmdMatrix34(const Eigen::Matrix4d& m) {
     return out;
 }
 
-bool EnsureCreated() {
+bool EnsureCreated(const char* source) {
     auto& s = PS();
-    if (s.created) return true;
+    if (s.created) return s.textureReady;
     if (!vr::VROverlay()) return false;
 
     vr::EVROverlayError err =
         vr::VROverlay()->CreateOverlay(kPreviewKey, kPreviewName, &s.handle);
+    if (err == vr::VROverlayError_KeyInUse) {
+        err = vr::VROverlay()->FindOverlay(kPreviewKey, &s.handle);
+    }
     if (err != vr::VROverlayError_None) {
-        fprintf(stderr, "[HeadMountPreview] CreateOverlay failed: %d\n", (int)err);
+        s.lastError = err;
+        std::fprintf(stderr, "[HeadMountPreview] CreateOverlay failed: %d\n", (int)err);
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=0 visible=0 texture_ready=0 error=%d error_name=%s source=%s",
+            static_cast<int>(err),
+            OverlayErrorName(err),
+            source ? source : "create");
         return false;
     }
 
-    vr::VROverlay()->SetOverlayWidthInMeters(s.handle, kDotWidthM);
-    // Sort order: above the average scene overlay so it's visible in passthrough.
-    vr::VROverlay()->SetOverlaySortOrder(s.handle, 10);
-    // Allow semitransparency.
+    vr::VROverlay()->SetOverlayWidthInMeters(s.handle, kMarkerWidthM);
+    vr::VROverlay()->SetOverlaySortOrder(s.handle, 18);
     vr::VROverlay()->SetOverlayAlpha(s.handle, 1.0f);
+    vr::VROverlay()->SetOverlayColor(s.handle, 0.0f, 0.9f, 1.0f);
 
-    UploadDotTexture(s.handle);
+    const std::string texturePath = ResolveMarkerTexturePath();
+    if (texturePath.empty()) {
+        s.created = true;
+        s.visible = false;
+        s.textureReady = false;
+        s.lastError = vr::VROverlayError_UnableToLoadFile;
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=1 visible=0 texture_ready=0 error=%d error_name=%s source=%s texture_missing=1",
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            source ? source : "create");
+        return false;
+    }
 
+    err = vr::VROverlay()->SetOverlayFromFile(s.handle, texturePath.c_str());
     s.created = true;
-    return true;
+    s.visible = false;
+    s.textureReady = (err == vr::VROverlayError_None);
+    s.lastError = err;
+    openvr_pair::common::DiagnosticLog(
+        "head_mount_preview_status",
+        "created=1 visible=0 texture_ready=%d error=%d error_name=%s source=%s texture='%s'",
+        s.textureReady ? 1 : 0,
+        static_cast<int>(err),
+        OverlayErrorName(err),
+        source ? source : "create",
+        texturePath.c_str());
+    return s.textureReady;
 }
 
-void Destroy() {
+void HideOnly(const char* source)
+{
     auto& s = PS();
     if (!s.created) return;
     if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
-        vr::VROverlay()->DestroyOverlay(s.handle);
+        vr::VROverlay()->HideOverlay(s.handle);
     }
-    s.handle  = vr::k_ulOverlayHandleInvalid;
-    s.created = false;
+    if (s.visible) {
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=1 visible=0 texture_ready=%d error=%d error_name=%s source=%s",
+            s.textureReady ? 1 : 0,
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            source ? source : s.lastSource);
+    }
+    s.visible = false;
 }
 
 } // namespace
@@ -109,31 +196,112 @@ void Destroy() {
 // Public interface
 // ---------------------------------------------------------------------------
 
+double HeadMountPreviewForwardMeters()
+{
+    return kMarkerForwardMeters;
+}
+
+vr::ETrackingUniverseOrigin HeadMountPreviewTrackingOrigin()
+{
+    return vr::TrackingUniverseStanding;
+}
+
+vr::HmdMatrix34_t HeadMountPreviewTransform(
+    const Eigen::Affine3d& headTrackerPose,
+    const Eigen::AffineCompact3d& headFromTracker,
+    double forwardMeters)
+{
+    const double clampedForward = std::clamp(forwardMeters, 0.05, 2.0);
+    const Eigen::Affine3d headWorld =
+        headTrackerPose * Eigen::Affine3d(headFromTracker);
+    const Eigen::Affine3d markerWorld =
+        headWorld * Eigen::Translation3d(0.0, 0.0, -clampedForward);
+    return ToHmdMatrix34(markerWorld.matrix());
+}
+
+HeadMountPreviewStatus GetHeadMountPreviewStatus()
+{
+    const auto& s = PS();
+    HeadMountPreviewStatus status;
+    status.created = s.created;
+    status.visible = s.visible;
+    status.textureReady = s.textureReady;
+    status.lastError = static_cast<int>(s.lastError);
+    status.lastErrorName = OverlayErrorName(s.lastError);
+    status.lastSource = s.lastSource ? s.lastSource : "none";
+    status.markerForwardMeters = kMarkerForwardMeters;
+    status.trackingOrigin = s.trackingOrigin;
+    return status;
+}
+
 void TickPreview(bool wantVisible,
                  const Eigen::Affine3d& headTrackerPose,
-                 const Eigen::AffineCompact3d& headFromTracker)
+                 const Eigen::AffineCompact3d& headFromTracker,
+                 vr::ETrackingUniverseOrigin trackingOrigin,
+                 const char* source)
 {
+    auto& s = PS();
+    s.lastSource = source ? source : "unknown";
+    s.trackingOrigin = trackingOrigin;
     if (!wantVisible) {
-        Destroy();
+        HideOnly(source ? source : "hide");
         return;
     }
 
-    if (!EnsureCreated()) return;
+    if (!EnsureCreated(source)) return;
 
-    auto& s = PS();
+    vr::HmdMatrix34_t mat = HeadMountPreviewTransform(
+        headTrackerPose,
+        headFromTracker,
+        kMarkerForwardMeters);
 
-    // Compute eye world transform: tracker_world * headFromTracker.
-    Eigen::Matrix4d eyeWorld = (headTrackerPose *
-        Eigen::Affine3d(headFromTracker)).matrix();
-    vr::HmdMatrix34_t mat = ToHmdMatrix34(eyeWorld);
-
-    // Place in raw tracking universe (same as driver-pose absolute space).
-    vr::VROverlay()->SetOverlayTransformAbsolute(
+    vr::EVROverlayError err = vr::VROverlay()->SetOverlayTransformAbsolute(
         s.handle,
-        vr::TrackingUniverseRawAndUncalibrated,
+        trackingOrigin,
         &mat);
+    if (err != vr::VROverlayError_None) {
+        s.lastError = err;
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=1 visible=%d texture_ready=%d transform_failed=1 error=%d error_name=%s origin=%d source=%s",
+            s.visible ? 1 : 0,
+            s.textureReady ? 1 : 0,
+            static_cast<int>(err),
+            OverlayErrorName(err),
+            static_cast<int>(trackingOrigin),
+            s.lastSource);
+        return;
+    }
 
-    vr::VROverlay()->ShowOverlay(s.handle);
+    err = vr::VROverlay()->ShowOverlay(s.handle);
+    if (err != vr::VROverlayError_None) {
+        s.lastError = err;
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=1 visible=%d texture_ready=%d show_failed=1 error=%d error_name=%s origin=%d source=%s",
+            s.visible ? 1 : 0,
+            s.textureReady ? 1 : 0,
+            static_cast<int>(err),
+            OverlayErrorName(err),
+            static_cast<int>(trackingOrigin),
+            s.lastSource);
+        return;
+    }
+
+    if (!s.visible || s.lastError != vr::VROverlayError_None) {
+        openvr_pair::common::DiagnosticLog(
+            "head_mount_preview_status",
+            "created=1 visible=1 texture_ready=%d error=0 error_name=None origin=%d source=%s forward_m=%.3f pos=(%.3f,%.3f,%.3f)",
+            s.textureReady ? 1 : 0,
+            static_cast<int>(trackingOrigin),
+            s.lastSource,
+            kMarkerForwardMeters,
+            mat.m[0][3],
+            mat.m[1][3],
+            mat.m[2][3]);
+    }
+    s.lastError = vr::VROverlayError_None;
+    s.visible = true;
 }
 
 } // namespace wkopenvr::headmount

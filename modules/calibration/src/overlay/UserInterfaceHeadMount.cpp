@@ -6,6 +6,7 @@
 #include "Configuration.h"
 #include "HeadMountOffsetModal.h"
 #include "HeadMountOffsetPreflight.h"
+#include "HeadMountPreview.h"
 #include "HeadMountTargetBinding.h"
 #include "IPCClient.h"
 #include "Protocol.h"
@@ -139,6 +140,15 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 
 	const bool hasTracker = hasContinuousTarget && !hm.trackerSerial.empty();
 	const bool offsetOk   = hm.offsetCalibrated;
+	if ((!hasTracker || !offsetOk) && s_offsetSlidersOpen) {
+		s_offsetSlidersOpen = false;
+		wkopenvr::headmount::TickPreview(
+			false,
+			Eigen::Affine3d::Identity(),
+			Eigen::AffineCompact3d::Identity(),
+			wkopenvr::headmount::HeadMountPreviewTrackingOrigin(),
+			"fine_tune_unavailable");
+	}
 	const wkopenvr::headmount::OffsetCalibrationPreflight offsetPreflight =
 		wkopenvr::headmount::EvaluateOffsetCalibrationPreflight(CalCtx);
 
@@ -165,14 +175,22 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 						: "Calibrate offset first.");
 		if (ImGui::Button(s_offsetSlidersOpen ? "Hide fine-tune" : "Fine-tune offset")) {
 			s_offsetSlidersOpen = !s_offsetSlidersOpen;
+			if (!s_offsetSlidersOpen) {
+				wkopenvr::headmount::TickPreview(
+					false,
+					Eigen::Affine3d::Identity(),
+					Eigen::AffineCompact3d::Identity(),
+					wkopenvr::headmount::HeadMountPreviewTrackingOrigin(),
+					"fine_tune_closed");
+			}
 		}
 		ds.AttachReasonTooltip();
 	}
 	if (ImGui::IsItemHovered() && offsetOk) {
 		ImGui::SetTooltip(
 			"Nudge the solved offset by hand. Useful if the auto-solve\n"
-			"got close but the in-headset preview marker doesn't sit\n"
-			"exactly at your eye position.");
+			"got close but the in-headset preview marker doesn't stay\n"
+			"centered in front of your view.");
 	}
 	if (!offsetPreflight.ready) {
 		ImGui::TextDisabled("%s", offsetPreflight.message);

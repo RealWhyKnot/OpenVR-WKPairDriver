@@ -29,15 +29,26 @@ struct BoundaryPreviewStatus {
     bool created = false;
     bool visible = false;
     bool uploadsDisabled = false;
+    bool fileMarkersVisible = false;
+    bool fileMarkerTextureReady = false;
     int uploadFailureCount = 0;
+    int fileMarkerFailureCount = 0;
     int lastError = 0;
+    int fileMarkerLastError = 0;
     const char* lastErrorName = "None";
+    const char* fileMarkerLastErrorName = "None";
     uint64_t uploadedHash = 0;
     uint64_t lastRasterHash = 0;
     size_t lastVertexCount = 0;
+    size_t fileMarkerCount = 0;
     int renderSize = BoundaryPreviewRaster::kTextureSize;
     const char* lastSource = "none";
     BoundaryPreviewPlane plane;
+};
+
+struct BoundaryPreviewFileMarker {
+    BoundaryVertex vertex;
+    SpatialStyle style;
 };
 
 BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
@@ -56,6 +67,14 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
 int BoundaryPreviewUploadFailureDisableThreshold();
 
 bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount);
+
+int BoundaryPreviewFileMarkerLimit();
+
+std::vector<BoundaryPreviewFileMarker> BuildBoundaryPreviewFileMarkers(
+    const std::vector<SpatialRenderCommand>& commands);
+
+vr::HmdMatrix34_t BoundaryPreviewFileMarkerTransform(
+    const BoundaryVertex& vertex);
 
 BoundaryPreviewStatus GetBoundaryPreviewStatus();
 

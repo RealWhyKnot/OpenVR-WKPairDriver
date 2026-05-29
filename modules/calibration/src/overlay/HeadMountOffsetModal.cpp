@@ -68,6 +68,65 @@ double NowSeconds() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+Eigen::Affine3d HmdMatrix34ToAffine(const vr::HmdMatrix34_t& m)
+{
+    Eigen::Affine3d affine = Eigen::Affine3d::Identity();
+    affine.linear() << m.m[0][0], m.m[0][1], m.m[0][2],
+                       m.m[1][0], m.m[1][1], m.m[1][2],
+                       m.m[2][0], m.m[2][1], m.m[2][2];
+    affine.translation() = Eigen::Vector3d(m.m[0][3], m.m[1][3], m.m[2][3]);
+    return affine;
+}
+
+bool TryGetDeviceStandingPose(int32_t deviceId, Eigen::Affine3d& out)
+{
+    if (deviceId < 0 || deviceId >= static_cast<int32_t>(vr::k_unMaxTrackedDeviceCount)) {
+        return false;
+    }
+    auto* vrs = vr::VRSystem();
+    if (!vrs) return false;
+
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+    vrs->GetDeviceToAbsoluteTrackingPose(
+        HeadMountPreviewTrackingOrigin(),
+        0.0f,
+        poses,
+        vr::k_unMaxTrackedDeviceCount);
+    const auto& pose = poses[static_cast<vr::TrackedDeviceIndex_t>(deviceId)];
+    if (!pose.bDeviceIsConnected ||
+        !pose.bPoseIsValid ||
+        pose.eTrackingResult != vr::TrackingResult_Running_OK)
+    {
+        return false;
+    }
+    out = HmdMatrix34ToAffine(pose.mDeviceToAbsoluteTracking);
+    return out.matrix().allFinite();
+}
+
+void TickHeadMountOffsetPreview(bool wantVisible, const char* source)
+{
+    const auto& hm = CalCtx.headMount;
+    const bool trackerOk = hm.deviceID >= 0
+        && static_cast<uint32_t>(hm.deviceID) < vr::k_unMaxTrackedDeviceCount
+        && CalCtx.devicePoses[hm.deviceID].poseIsValid;
+    Eigen::Affine3d trackerStanding = Eigen::Affine3d::Identity();
+    if (wantVisible && trackerOk && TryGetDeviceStandingPose(hm.deviceID, trackerStanding)) {
+        TickPreview(
+            true,
+            trackerStanding,
+            hm.headFromTracker,
+            HeadMountPreviewTrackingOrigin(),
+            source);
+    } else {
+        TickPreview(
+            false,
+            Eigen::Affine3d::Identity(),
+            Eigen::AffineCompact3d::Identity(),
+            HeadMountPreviewTrackingOrigin(),
+            source);
+    }
+}
+
 void LogPreflightState(ModalState& s,
                        const OffsetCalibrationPreflight& preflight,
                        const char* context,
@@ -428,6 +487,17 @@ bool DrawOffsetModal() {
             }
         }
 
+        {
+            const auto preview = GetHeadMountPreviewStatus();
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "Offset preview: %s, texture=%s, error=%d/%s",
+                preview.visible ? "visible" : "hidden",
+                preview.textureReady ? "ready" : "missing",
+                preview.lastError,
+                preview.lastErrorName);
+        }
+
         ImGui::EndPopup();
     }
     else {
@@ -439,42 +509,7 @@ bool DrawOffsetModal() {
         }
     }
 
-    // Drive the live preview marker while the modal is open.
-    {
-        const bool modalOpen = s.popupOpened;
-        const auto& hm = CalCtx.headMount;
-        bool trackerOk = hm.deviceID >= 0
-            && (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount
-            && CalCtx.devicePoses[hm.deviceID].poseIsValid;
-
-        if (modalOpen && trackerOk) {
-            const vr::DriverPose_t& raw = CalCtx.devicePoses[hm.deviceID];
-            // Build world pose from DriverPose fields.
-            Eigen::Quaterniond wfd(
-                raw.qWorldFromDriverRotation.w,
-                raw.qWorldFromDriverRotation.x,
-                raw.qWorldFromDriverRotation.y,
-                raw.qWorldFromDriverRotation.z);
-            Eigen::Quaterniond localRot(
-                raw.qRotation.w, raw.qRotation.x,
-                raw.qRotation.y, raw.qRotation.z);
-            Eigen::Quaterniond worldRot = (wfd * localRot).normalized();
-            Eigen::Vector3d wfdTrans(
-                raw.vecWorldFromDriverTranslation[0],
-                raw.vecWorldFromDriverTranslation[1],
-                raw.vecWorldFromDriverTranslation[2]);
-            Eigen::Vector3d localPos(
-                raw.vecPosition[0], raw.vecPosition[1], raw.vecPosition[2]);
-            Eigen::Affine3d trackerWorld =
-                Eigen::Translation3d(wfdTrans + wfd * localPos) * worldRot;
-
-            TickPreview(true, trackerWorld, hm.headFromTracker);
-        }
-        else {
-            TickPreview(false, Eigen::Affine3d::Identity(),
-                Eigen::AffineCompact3d::Identity());
-        }
-    }
+    TickHeadMountOffsetPreview(s.popupOpened, "offset_modal");
 
     return savedOffset;
 }
@@ -544,35 +579,16 @@ void DrawOffsetInlinePanel() {
         hm.headFromTracker.linear()      = q.toRotationMatrix();
         hm.headFromTracker.translation() = t * 0.01; // cm -> m
         CalCtx.NoteHeadMountOffsetChanged();
-
-        // Drive preview while sliders are active.
-        bool trackerOk = hm.deviceID >= 0
-            && (uint32_t)hm.deviceID < vr::k_unMaxTrackedDeviceCount
-            && CalCtx.devicePoses[hm.deviceID].poseIsValid;
-        if (trackerOk) {
-            const vr::DriverPose_t& raw = CalCtx.devicePoses[hm.deviceID];
-            Eigen::Quaterniond wfd(
-                raw.qWorldFromDriverRotation.w,
-                raw.qWorldFromDriverRotation.x,
-                raw.qWorldFromDriverRotation.y,
-                raw.qWorldFromDriverRotation.z);
-            Eigen::Quaterniond localRot(
-                raw.qRotation.w, raw.qRotation.x,
-                raw.qRotation.y, raw.qRotation.z);
-            Eigen::Affine3d trackerWorld =
-                Eigen::Translation3d(
-                    Eigen::Vector3d(
-                        raw.vecWorldFromDriverTranslation[0],
-                        raw.vecWorldFromDriverTranslation[1],
-                        raw.vecWorldFromDriverTranslation[2]) +
-                    wfd *
-                    Eigen::Vector3d(
-                        raw.vecPosition[0],
-                        raw.vecPosition[1],
-                        raw.vecPosition[2])) *
-                (wfd * localRot).normalized();
-            TickPreview(true, trackerWorld, hm.headFromTracker);
-        }
+    }
+    TickHeadMountOffsetPreview(true, "fine_tune");
+    {
+        const auto preview = GetHeadMountPreviewStatus();
+        ImGui::TextDisabled(
+            "Offset preview: %s, texture=%s, error=%d/%s",
+            preview.visible ? "visible" : "hidden",
+            preview.textureReady ? "ready" : "missing",
+            preview.lastError,
+            preview.lastErrorName);
     }
 }
 

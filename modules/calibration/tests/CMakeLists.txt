@@ -55,6 +55,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_shadow_offset.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_source_guard.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_panel_logic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_preview.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_head_mount_visibility.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_prediction_smoothing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_motion_recording_retention.cpp
@@ -71,6 +72,7 @@ add_executable(spacecal_tests
     ${SPACECAL_SRC}/overlay/CalibrationCalc.cpp
     ${SPACECAL_SRC}/overlay/MotionRecording.cpp
     ${SPACECAL_SRC}/overlay/HeadFromTrackerSolve.cpp
+    ${SPACECAL_SRC}/overlay/HeadMountPreview.cpp
     ${SPACECAL_SRC}/overlay/Configuration.cpp
     ${SPACECAL_SRC}/overlay/VRState.cpp
 )

@@ -1062,6 +1062,68 @@ std::vector<wkopenvr::boundary::SpatialRenderCommand> BuildCapturePreviewCommand
             12));
     }
 
+    const double standingFloorY = (!s_captureUsesStandingSpace && BoundaryTransformReady())
+        ? TransformHeightToStandingUniverse(
+            preview.empty() ? rawVertices : preview,
+            s_captureFloorY,
+            PreviewTargetToStandingTransform())
+        : s_captureFloorY;
+    auto pushStandingMarker = [&](double x,
+                                  double z,
+                                  SpatialStyle style,
+                                  int layer) {
+        SpatialPrimitive marker;
+        marker.kind = SpatialPrimitiveKind::Marker;
+        marker.space = StandingSpace();
+        marker.vertices = { { x, standingFloorY, z } };
+        marker.floorY = standingFloorY;
+        marker.ceilingY = standingFloorY + 2.4;
+        marker.closeLoop = false;
+        marker.style = style;
+        marker.layer = layer;
+        primitives.push_back(std::move(marker));
+    };
+
+    SpatialStyle originStyle;
+    originStyle.r = 255;
+    originStyle.g = 70;
+    originStyle.b = 70;
+    originStyle.a = 245;
+    originStyle.fillA = 0;
+    originStyle.strokeMeters = 0.0;
+    originStyle.dotMeters = 0.120;
+    originStyle.fill = false;
+    pushStandingMarker(0.0, 0.0, originStyle, 14);
+
+    if (auto* vrs = vr::VRSystem()) {
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+        vrs->GetDeviceToAbsoluteTrackingPose(
+            vr::TrackingUniverseStanding,
+            0.0f,
+            poses,
+            vr::k_unMaxTrackedDeviceCount);
+        const auto& hmdPose = poses[vr::k_unTrackedDeviceIndex_Hmd];
+        if (hmdPose.bDeviceIsConnected &&
+            hmdPose.bPoseIsValid &&
+            hmdPose.eTrackingResult == vr::TrackingResult_Running_OK)
+        {
+            SpatialStyle hmdStyle;
+            hmdStyle.r = 100;
+            hmdStyle.g = 180;
+            hmdStyle.b = 255;
+            hmdStyle.a = 235;
+            hmdStyle.fillA = 0;
+            hmdStyle.strokeMeters = 0.0;
+            hmdStyle.dotMeters = 0.100;
+            hmdStyle.fill = false;
+            pushStandingMarker(
+                hmdPose.mDeviceToAbsoluteTracking.m[0][3],
+                hmdPose.mDeviceToAbsoluteTracking.m[2][3],
+                hmdStyle,
+                15);
+        }
+    }
+
     for (size_t i = 0; i < rawVertices.size(); ++i) {
         primitives.push_back(CapturePreviewPrimitive(
             SpatialPrimitiveKind::Marker,
@@ -1598,6 +1660,18 @@ void DrawBoundaryPreviewStatus()
             status.lastError,
             status.lastErrorName,
             static_cast<unsigned long long>(status.lastRasterHash));
+    }
+    if (status.fileMarkersVisible || status.fileMarkerFailureCount > 0 ||
+        status.fileMarkerTextureReady)
+    {
+        ImGui::TextDisabled(
+            "Preview markers: %s count=%zu texture=%s failures=%d last_error=%d/%s",
+            status.fileMarkersVisible ? "visible" : "hidden",
+            status.fileMarkerCount,
+            status.fileMarkerTextureReady ? "ready" : "missing",
+            status.fileMarkerFailureCount,
+            status.fileMarkerLastError,
+            status.fileMarkerLastErrorName);
     }
 }
 

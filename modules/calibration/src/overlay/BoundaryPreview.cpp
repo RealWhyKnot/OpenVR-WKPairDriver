@@ -6,9 +6,19 @@
 #include <openvr.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <string>
 #include <utility>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace wkopenvr::boundary {
 namespace {
@@ -16,19 +26,28 @@ namespace {
 constexpr double kMinPreviewSpanMeters = 1.0;
 constexpr double kPreviewPadMeters = 0.30;
 constexpr int kUploadFailureDisableThreshold = 3;
+constexpr int kMaxFileMarkerOverlays = 32;
 constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
 struct PreviewState {
     vr::VROverlayHandle_t handle = vr::k_ulOverlayHandleInvalid;
+    std::array<vr::VROverlayHandle_t, kMaxFileMarkerOverlays> fileMarkerHandles{};
+    std::array<bool, kMaxFileMarkerOverlays> fileMarkerCreated{};
+    std::array<bool, kMaxFileMarkerOverlays> fileMarkerTextureReadyBySlot{};
     bool created = false;
     bool visible = false;
+    bool fileMarkersVisible = false;
+    bool fileMarkerTextureReady = false;
     uint64_t uploadedHash = 0;
     uint64_t lastRasterHash = 0;
     int uploadFailureCount = 0;
+    int fileMarkerFailureCount = 0;
     bool uploadsDisabled = false;
     vr::EVROverlayError lastError = vr::VROverlayError_None;
+    vr::EVROverlayError fileMarkerLastError = vr::VROverlayError_None;
     size_t lastVertexCount = 0;
+    size_t fileMarkerCount = 0;
     const char* lastSource = "none";
     BoundaryPreviewPlane lastPlane;
 };
@@ -41,6 +60,21 @@ PreviewState& State()
 
 constexpr const char* kPreviewKey = "wkopenvr.boundary.preview";
 constexpr const char* kPreviewName = "Boundary drawing preview";
+
+#ifdef _WIN32
+std::filesystem::path ExeDir()
+{
+    char buf[MAX_PATH] = {};
+    const DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) return {};
+    return std::filesystem::path(buf).parent_path();
+}
+#else
+std::filesystem::path ExeDir()
+{
+    return {};
+}
+#endif
 
 const char* OverlayErrorName(vr::EVROverlayError err)
 {
@@ -68,6 +102,20 @@ const char* OverlayErrorName(vr::EVROverlayError err)
     case vr::VROverlayError_BadMaskPrimitive: return "BadMaskPrimitive";
     default: return "Unknown";
     }
+}
+
+std::string ResolveFileMarkerTexturePath()
+{
+    const std::filesystem::path exeDir = ExeDir();
+    if (!exeDir.empty()) {
+        const std::filesystem::path deployed = exeDir / "dashboard_icon.png";
+        if (std::filesystem::exists(deployed)) return deployed.string();
+    }
+
+    const std::filesystem::path source =
+        std::filesystem::current_path() / "core" / "src" / "overlay" / "dashboard_icon.png";
+    if (std::filesystem::exists(source)) return source.string();
+    return {};
 }
 
 uint64_t HashU64(uint64_t hash, uint64_t value)
@@ -403,16 +451,230 @@ void Destroy()
     if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
         vr::VROverlay()->DestroyOverlay(s.handle);
     }
+    if (vr::VROverlay()) {
+        for (size_t i = 0; i < s.fileMarkerHandles.size(); ++i) {
+            if (s.fileMarkerCreated[i] &&
+                s.fileMarkerHandles[i] != vr::k_ulOverlayHandleInvalid)
+            {
+                vr::VROverlay()->DestroyOverlay(s.fileMarkerHandles[i]);
+            }
+        }
+    }
     s.handle = vr::k_ulOverlayHandleInvalid;
+    s.fileMarkerHandles.fill(vr::k_ulOverlayHandleInvalid);
+    s.fileMarkerCreated.fill(false);
+    s.fileMarkerTextureReadyBySlot.fill(false);
     s.created = false;
     s.visible = false;
+    s.fileMarkersVisible = false;
+    s.fileMarkerTextureReady = false;
     s.uploadedHash = 0;
     s.lastRasterHash = 0;
     s.uploadFailureCount = 0;
+    s.fileMarkerFailureCount = 0;
     s.uploadsDisabled = false;
     s.lastError = vr::VROverlayError_None;
+    s.fileMarkerLastError = vr::VROverlayError_None;
     s.lastVertexCount = 0;
+    s.fileMarkerCount = 0;
     openvr_pair::common::DiagnosticLog("boundary-preview", "destroyed");
+}
+
+bool EnsureFileMarkerCreated(size_t index)
+{
+    auto& s = State();
+    if (index >= s.fileMarkerHandles.size()) return false;
+    if (s.fileMarkerCreated[index]) return s.fileMarkerTextureReadyBySlot[index];
+    if (!vr::VROverlay()) return false;
+
+    const std::string texturePath = ResolveFileMarkerTexturePath();
+    if (texturePath.empty()) {
+        s.fileMarkerLastError = vr::VROverlayError_UnableToLoadFile;
+        s.fileMarkerTextureReady = false;
+        ++s.fileMarkerFailureCount;
+        if (s.fileMarkerFailureCount <= 3 || (s.fileMarkerFailureCount % 30) == 0) {
+            openvr_pair::common::DiagnosticLog(
+                "boundary_preview_status",
+                "file_markers_visible=%d file_markers=%zu file_texture_ready=0 file_failures=%d file_error=%d file_error_name=%s source=%s texture_missing=1",
+                s.fileMarkersVisible ? 1 : 0,
+                s.fileMarkerCount,
+                s.fileMarkerFailureCount,
+                static_cast<int>(s.fileMarkerLastError),
+                OverlayErrorName(s.fileMarkerLastError),
+                s.lastSource);
+        }
+        return false;
+    }
+
+    char key[96];
+    std::snprintf(key, sizeof key, "wkopenvr.boundary.preview.marker.%02zu", index);
+    char name[96];
+    std::snprintf(name, sizeof name, "Boundary preview marker %02zu", index);
+    vr::EVROverlayError err =
+        vr::VROverlay()->CreateOverlay(key, name, &s.fileMarkerHandles[index]);
+    if (err == vr::VROverlayError_KeyInUse) {
+        err = vr::VROverlay()->FindOverlay(key, &s.fileMarkerHandles[index]);
+    }
+    if (err != vr::VROverlayError_None) {
+        s.fileMarkerLastError = err;
+        ++s.fileMarkerFailureCount;
+        if (s.fileMarkerFailureCount <= 3 || (s.fileMarkerFailureCount % 30) == 0) {
+            openvr_pair::common::DiagnosticLog(
+                "boundary_preview_status",
+                "file_marker_create_failed index=%zu error=%d error_name=%s failures=%d source=%s",
+                index,
+                static_cast<int>(err),
+                OverlayErrorName(err),
+                s.fileMarkerFailureCount,
+                s.lastSource);
+        }
+        return false;
+    }
+
+    vr::VROverlay()->SetOverlaySortOrder(s.fileMarkerHandles[index], 20 + static_cast<uint32_t>(index));
+    vr::VROverlay()->SetOverlayAlpha(s.fileMarkerHandles[index], 0.92f);
+    err = vr::VROverlay()->SetOverlayFromFile(s.fileMarkerHandles[index], texturePath.c_str());
+    s.fileMarkerCreated[index] = true;
+    s.fileMarkerTextureReadyBySlot[index] = (err == vr::VROverlayError_None);
+    s.fileMarkerLastError = err;
+    s.fileMarkerTextureReady =
+        s.fileMarkerTextureReady || s.fileMarkerTextureReadyBySlot[index];
+    if (err != vr::VROverlayError_None) {
+        ++s.fileMarkerFailureCount;
+    }
+    openvr_pair::common::DiagnosticLog(
+        "boundary_preview_status",
+        "file_marker_created index=%zu texture_ready=%d error=%d error_name=%s source=%s texture='%s'",
+        index,
+        s.fileMarkerTextureReady ? 1 : 0,
+        static_cast<int>(err),
+        OverlayErrorName(err),
+        s.lastSource,
+        texturePath.c_str());
+    return s.fileMarkerTextureReady;
+}
+
+void HideFileMarkers(const char* source)
+{
+    auto& s = State();
+    if (!s.fileMarkersVisible && s.fileMarkerCount == 0) return;
+    if (vr::VROverlay()) {
+        for (size_t i = 0; i < s.fileMarkerHandles.size(); ++i) {
+            if (s.fileMarkerCreated[i] &&
+                s.fileMarkerHandles[i] != vr::k_ulOverlayHandleInvalid)
+            {
+                vr::VROverlay()->HideOverlay(s.fileMarkerHandles[i]);
+            }
+        }
+    }
+    openvr_pair::common::DiagnosticLog(
+        "boundary_preview_status",
+        "file_markers_visible=0 file_markers=0 file_texture_ready=%d file_failures=%d file_error=%d file_error_name=%s source=%s",
+        s.fileMarkerTextureReady ? 1 : 0,
+        s.fileMarkerFailureCount,
+        static_cast<int>(s.fileMarkerLastError),
+        OverlayErrorName(s.fileMarkerLastError),
+        source ? source : s.lastSource);
+    s.fileMarkersVisible = false;
+    s.fileMarkerCount = 0;
+}
+
+float MarkerWidthMeters(const SpatialStyle& style)
+{
+    const double requested = style.dotMeters > 0.0 ? style.dotMeters * 1.35 : 0.075;
+    return static_cast<float>(std::clamp(requested, 0.045, 0.18));
+}
+
+void TickFileMarkers(
+    const std::vector<SpatialRenderCommand>& commands,
+    const char* source)
+{
+    auto& s = State();
+    const std::vector<BoundaryPreviewFileMarker> markers =
+        BuildBoundaryPreviewFileMarkers(commands);
+    if (markers.empty()) {
+        HideFileMarkers(source ? source : "no_file_markers");
+        return;
+    }
+
+    size_t shown = 0;
+    const size_t activeSlots = std::min(markers.size(), s.fileMarkerHandles.size());
+    for (size_t i = 0; i < activeSlots; ++i) {
+        if (!EnsureFileMarkerCreated(i)) continue;
+
+        const auto& marker = markers[i];
+        const float r = static_cast<float>(marker.style.r) / 255.0f;
+        const float g = static_cast<float>(marker.style.g) / 255.0f;
+        const float b = static_cast<float>(marker.style.b) / 255.0f;
+        const float a = static_cast<float>(marker.style.a) / 255.0f;
+        vr::VROverlay()->SetOverlayColor(s.fileMarkerHandles[i], r, g, b);
+        vr::VROverlay()->SetOverlayAlpha(s.fileMarkerHandles[i], std::clamp(a, 0.25f, 1.0f));
+        vr::VROverlay()->SetOverlayWidthInMeters(
+            s.fileMarkerHandles[i],
+            MarkerWidthMeters(marker.style));
+        const vr::HmdMatrix34_t mat = BoundaryPreviewFileMarkerTransform(marker.vertex);
+        vr::EVROverlayError err = vr::VROverlay()->SetOverlayTransformAbsolute(
+            s.fileMarkerHandles[i],
+            BoundaryPreviewTrackingOrigin(),
+            &mat);
+        if (err == vr::VROverlayError_None) {
+            err = vr::VROverlay()->ShowOverlay(s.fileMarkerHandles[i]);
+        }
+        if (err != vr::VROverlayError_None) {
+            if (vr::VROverlay() &&
+                s.fileMarkerHandles[i] != vr::k_ulOverlayHandleInvalid)
+            {
+                vr::VROverlay()->HideOverlay(s.fileMarkerHandles[i]);
+            }
+            s.fileMarkerLastError = err;
+            ++s.fileMarkerFailureCount;
+            if (s.fileMarkerFailureCount <= 3 || (s.fileMarkerFailureCount % 30) == 0) {
+                openvr_pair::common::DiagnosticLog(
+                    "boundary_preview_status",
+                    "file_marker_show_failed index=%zu error=%d error_name=%s failures=%d source=%s pos=(%.3f,%.3f,%.3f)",
+                    i,
+                    static_cast<int>(err),
+                    OverlayErrorName(err),
+                    s.fileMarkerFailureCount,
+                    source ? source : s.lastSource,
+                    marker.vertex.x,
+                    marker.vertex.y,
+                    marker.vertex.z);
+            }
+            continue;
+        }
+        ++shown;
+    }
+
+    for (size_t i = activeSlots; i < s.fileMarkerHandles.size(); ++i) {
+        if (s.fileMarkerCreated[i] &&
+            s.fileMarkerHandles[i] != vr::k_ulOverlayHandleInvalid)
+        {
+            vr::VROverlay()->HideOverlay(s.fileMarkerHandles[i]);
+        }
+    }
+
+    const bool wasVisible = s.fileMarkersVisible;
+    const size_t previousCount = s.fileMarkerCount;
+    s.fileMarkersVisible = shown > 0;
+    s.fileMarkerCount = shown;
+    if (shown > 0) {
+        s.fileMarkerLastError = vr::VROverlayError_None;
+    }
+    if (s.fileMarkersVisible != wasVisible || previousCount != shown) {
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "file_markers_visible=%d file_markers=%zu file_texture_ready=%d file_failures=%d file_error=%d file_error_name=%s source=%s raw_visible=%d raw_disabled=%d",
+            s.fileMarkersVisible ? 1 : 0,
+            s.fileMarkerCount,
+            s.fileMarkerTextureReady ? 1 : 0,
+            s.fileMarkerFailureCount,
+            static_cast<int>(s.fileMarkerLastError),
+            OverlayErrorName(s.fileMarkerLastError),
+            source ? source : s.lastSource,
+            s.visible ? 1 : 0,
+            s.uploadsDisabled ? 1 : 0);
+    }
 }
 
 double WorldMetersToPixels(double spanMeters, double meters, double minPixels, double maxPixels)
@@ -581,6 +843,57 @@ bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount)
     return failureCount >= kUploadFailureDisableThreshold;
 }
 
+int BoundaryPreviewFileMarkerLimit()
+{
+    return kMaxFileMarkerOverlays;
+}
+
+std::vector<BoundaryPreviewFileMarker> BuildBoundaryPreviewFileMarkers(
+    const std::vector<SpatialRenderCommand>& commands)
+{
+    std::vector<BoundaryPreviewFileMarker> explicitMarkers;
+    std::vector<BoundaryPreviewFileMarker> pathMarkers;
+    for (const SpatialRenderCommand& command : commands) {
+        const bool isExplicitMarker = command.kind == SpatialPrimitiveKind::Marker;
+        for (const BoundaryVertex& vertex : command.standingVertices) {
+            BoundaryPreviewFileMarker marker;
+            marker.vertex = vertex;
+            marker.style = command.style;
+            if (marker.style.dotMeters <= 0.0) {
+                marker.style.dotMeters = isExplicitMarker ? 0.075 : 0.055;
+            }
+            if (isExplicitMarker) {
+                explicitMarkers.push_back(marker);
+            } else {
+                pathMarkers.push_back(marker);
+            }
+        }
+    }
+
+    std::vector<BoundaryPreviewFileMarker>& source =
+        explicitMarkers.empty() ? pathMarkers : explicitMarkers;
+    if (source.size() <= kMaxFileMarkerOverlays) {
+        return source;
+    }
+
+    std::vector<BoundaryPreviewFileMarker> sampled;
+    sampled.reserve(kMaxFileMarkerOverlays);
+    const double last = static_cast<double>(source.size() - 1);
+    for (int i = 0; i < kMaxFileMarkerOverlays; ++i) {
+        const double t = static_cast<double>(i) /
+            static_cast<double>(kMaxFileMarkerOverlays - 1);
+        const size_t idx = static_cast<size_t>(std::llround(t * last));
+        sampled.push_back(source[std::min(idx, source.size() - 1)]);
+    }
+    return sampled;
+}
+
+vr::HmdMatrix34_t BoundaryPreviewFileMarkerTransform(
+    const BoundaryVertex& vertex)
+{
+    return BoundaryPreviewTransform(vertex.x, vertex.y, vertex.z);
+}
+
 BoundaryPreviewStatus GetBoundaryPreviewStatus()
 {
     const auto& s = State();
@@ -588,12 +901,18 @@ BoundaryPreviewStatus GetBoundaryPreviewStatus()
     status.created = s.created;
     status.visible = s.visible;
     status.uploadsDisabled = s.uploadsDisabled;
+    status.fileMarkersVisible = s.fileMarkersVisible;
+    status.fileMarkerTextureReady = s.fileMarkerTextureReady;
     status.uploadFailureCount = s.uploadFailureCount;
+    status.fileMarkerFailureCount = s.fileMarkerFailureCount;
     status.lastError = static_cast<int>(s.lastError);
+    status.fileMarkerLastError = static_cast<int>(s.fileMarkerLastError);
     status.lastErrorName = OverlayErrorName(s.lastError);
+    status.fileMarkerLastErrorName = OverlayErrorName(s.fileMarkerLastError);
     status.uploadedHash = s.uploadedHash;
     status.lastRasterHash = s.lastRasterHash;
     status.lastVertexCount = s.lastVertexCount;
+    status.fileMarkerCount = s.fileMarkerCount;
     status.lastSource = s.lastSource ? s.lastSource : "none";
     status.plane = s.lastPlane;
     return status;
@@ -684,6 +1003,7 @@ void TickBoundaryPreview(
 
     if (!wantVisible || commands.empty()) {
         HideOnly(source ? source : "hidden");
+        HideFileMarkers(source ? source : "hidden");
         return;
     }
 
@@ -692,8 +1012,11 @@ void TickBoundaryPreview(
     s.lastPlane = raster.plane;
     if (!raster.plane.valid) {
         HideOnly(source ? source : "invalid_plane");
+        HideFileMarkers(source ? source : "invalid_plane");
         return;
     }
+    TickFileMarkers(commands, source ? source : "file_markers");
+
     if (!EnsureCreated()) return;
 
     if (s.uploadsDisabled) {
