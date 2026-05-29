@@ -101,6 +101,20 @@ DeviceProfile Decode(const picojson::value &v)
 	getBool("enable_rest_recenter",     p.enable_rest_recenter);
 	getBool("enable_trigger_remap",     p.enable_trigger_remap);
 	getBool("corrections_enabled",      p.corrections_enabled);
+	getBool("rest_recenter_migrated",   p.rest_recenter_migrated);
+
+	// One-time migration: rest-recenter's default was flipped on. Profiles saved
+	// before the flip persisted the old off default and lack the marker above;
+	// force rest-recenter on once for them, then record the marker so a later
+	// deliberate opt-out is respected.
+	if (!p.rest_recenter_migrated) {
+		if (!p.enable_rest_recenter) {
+			LOG("[profiles] rest-recenter off->on migration for '%s' (default flip)",
+				p.serial.c_str());
+		}
+		p.enable_rest_recenter = true;
+		p.rest_recenter_migrated = true;
+	}
 
 	auto learnedIt = obj.find("learned_paths");
 	if (learnedIt != obj.end() && learnedIt->second.is<picojson::array>()) {
@@ -165,6 +179,7 @@ std::string Encode(const DeviceProfile &p)
 	obj["enable_rest_recenter"]    = picojson::value(p.enable_rest_recenter);
 	obj["enable_trigger_remap"]    = picojson::value(p.enable_trigger_remap);
 	obj["corrections_enabled"]     = picojson::value(p.corrections_enabled);
+	obj["rest_recenter_migrated"]  = picojson::value(p.rest_recenter_migrated);
 
 	picojson::array learned;
 	learned.reserve(p.learned_paths.size());

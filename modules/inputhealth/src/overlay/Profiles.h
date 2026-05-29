@@ -47,6 +47,12 @@ struct DeviceProfile
 	bool enable_trigger_remap    = false;
 	bool corrections_enabled     = true;
 
+	// Set once the rest-recenter default-flip migration has run for this profile
+	// (see Decode in Profiles.cpp). Profiles saved before the default was flipped
+	// on lack this marker, which triggers a one-time force-on of
+	// enable_rest_recenter so existing users pick up the new default.
+	bool rest_recenter_migrated  = false;
+
 	std::vector<LearnedPathRecord> learned_paths;
 };
 
