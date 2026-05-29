@@ -22,9 +22,15 @@ constexpr uint64_t kFnvPrime = 1099511628211ull;
 struct PreviewState {
     vr::VROverlayHandle_t handle = vr::k_ulOverlayHandleInvalid;
     bool created = false;
+    bool visible = false;
     uint64_t uploadedHash = 0;
+    uint64_t lastRasterHash = 0;
     int uploadFailureCount = 0;
     bool uploadsDisabled = false;
+    vr::EVROverlayError lastError = vr::VROverlayError_None;
+    size_t lastVertexCount = 0;
+    const char* lastSource = "none";
+    BoundaryPreviewPlane lastPlane;
 };
 
 PreviewState& State()
@@ -35,6 +41,34 @@ PreviewState& State()
 
 constexpr const char* kPreviewKey = "wkopenvr.boundary.preview";
 constexpr const char* kPreviewName = "Boundary drawing preview";
+
+const char* OverlayErrorName(vr::EVROverlayError err)
+{
+    switch (err) {
+    case vr::VROverlayError_None: return "None";
+    case vr::VROverlayError_UnknownOverlay: return "UnknownOverlay";
+    case vr::VROverlayError_InvalidHandle: return "InvalidHandle";
+    case vr::VROverlayError_PermissionDenied: return "PermissionDenied";
+    case vr::VROverlayError_OverlayLimitExceeded: return "OverlayLimitExceeded";
+    case vr::VROverlayError_WrongVisibilityType: return "WrongVisibilityType";
+    case vr::VROverlayError_KeyTooLong: return "KeyTooLong";
+    case vr::VROverlayError_NameTooLong: return "NameTooLong";
+    case vr::VROverlayError_KeyInUse: return "KeyInUse";
+    case vr::VROverlayError_WrongTransformType: return "WrongTransformType";
+    case vr::VROverlayError_InvalidTrackedDevice: return "InvalidTrackedDevice";
+    case vr::VROverlayError_InvalidParameter: return "InvalidParameter";
+    case vr::VROverlayError_ThumbnailCantBeDestroyed: return "ThumbnailCantBeDestroyed";
+    case vr::VROverlayError_ArrayTooSmall: return "ArrayTooSmall";
+    case vr::VROverlayError_RequestFailed: return "RequestFailed";
+    case vr::VROverlayError_InvalidTexture: return "InvalidTexture";
+    case vr::VROverlayError_UnableToLoadFile: return "UnableToLoadFile";
+    case vr::VROverlayError_KeyboardAlreadyInUse: return "KeyboardAlreadyInUse";
+    case vr::VROverlayError_NoNeighbor: return "NoNeighbor";
+    case vr::VROverlayError_TooManyMaskPrimitives: return "TooManyMaskPrimitives";
+    case vr::VROverlayError_BadMaskPrimitive: return "BadMaskPrimitive";
+    default: return "Unknown";
+    }
+}
 
 uint64_t HashU64(uint64_t hash, uint64_t value)
 {
@@ -330,10 +364,35 @@ bool EnsureCreated()
     vr::VROverlay()->SetOverlaySortOrder(s.handle, 12);
     vr::VROverlay()->SetOverlayAlpha(s.handle, 0.95f);
     s.created = true;
+    s.visible = false;
     s.uploadedHash = 0;
     s.uploadsDisabled = false;
+    s.lastError = vr::VROverlayError_None;
     openvr_pair::common::DiagnosticLog("boundary-preview", "created");
+    openvr_pair::common::DiagnosticLog(
+        "boundary_preview_status",
+        "created=1 visible=0 uploads_disabled=0 failures=0 error=0 error_name=None source=create");
     return true;
+}
+
+void HideOnly(const char* source)
+{
+    auto& s = State();
+    if (!s.created) return;
+    if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
+        vr::VROverlay()->HideOverlay(s.handle);
+    }
+    if (s.visible) {
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "created=1 visible=0 uploads_disabled=%d failures=%d error=%d error_name=%s source=%s",
+            s.uploadsDisabled ? 1 : 0,
+            s.uploadFailureCount,
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            source ? source : s.lastSource);
+    }
+    s.visible = false;
 }
 
 void Destroy()
@@ -346,9 +405,13 @@ void Destroy()
     }
     s.handle = vr::k_ulOverlayHandleInvalid;
     s.created = false;
+    s.visible = false;
     s.uploadedHash = 0;
+    s.lastRasterHash = 0;
     s.uploadFailureCount = 0;
     s.uploadsDisabled = false;
+    s.lastError = vr::VROverlayError_None;
+    s.lastVertexCount = 0;
     openvr_pair::common::DiagnosticLog("boundary-preview", "destroyed");
 }
 
@@ -518,6 +581,41 @@ bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount)
     return failureCount >= kUploadFailureDisableThreshold;
 }
 
+BoundaryPreviewStatus GetBoundaryPreviewStatus()
+{
+    const auto& s = State();
+    BoundaryPreviewStatus status;
+    status.created = s.created;
+    status.visible = s.visible;
+    status.uploadsDisabled = s.uploadsDisabled;
+    status.uploadFailureCount = s.uploadFailureCount;
+    status.lastError = static_cast<int>(s.lastError);
+    status.lastErrorName = OverlayErrorName(s.lastError);
+    status.uploadedHash = s.uploadedHash;
+    status.lastRasterHash = s.lastRasterHash;
+    status.lastVertexCount = s.lastVertexCount;
+    status.lastSource = s.lastSource ? s.lastSource : "none";
+    status.plane = s.lastPlane;
+    return status;
+}
+
+void ResetBoundaryPreviewUploadFailures()
+{
+    auto& s = State();
+    const bool wasDisabled = s.uploadsDisabled || s.uploadFailureCount > 0;
+    s.uploadFailureCount = 0;
+    s.uploadsDisabled = false;
+    s.lastError = vr::VROverlayError_None;
+    s.uploadedHash = 0;
+    if (wasDisabled) {
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "created=%d visible=%d uploads_disabled=0 failures=0 error=0 error_name=None source=reset",
+            s.created ? 1 : 0,
+            s.visible ? 1 : 0);
+    }
+}
+
 vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin()
 {
     return vr::TrackingUniverseStanding;
@@ -552,7 +650,8 @@ void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<BoundaryVertex>& vertices,
     double floorY,
-    bool closeLoop)
+    bool closeLoop,
+    const char* source)
 {
     SpatialSession session = BoundaryCaptureSessionDescriptor(
         StandingSpace(),
@@ -565,27 +664,38 @@ void TickBoundaryPreview(
     TickBoundaryPreview(
         wantVisible,
         BuildSpatialRenderCommands({ primitive }),
-        floorY);
+        floorY,
+        source);
 }
 
 void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<SpatialRenderCommand>& commands,
-    double floorY)
+    double floorY,
+    const char* source)
 {
+    auto& s = State();
+    s.lastSource = source ? source : "unknown";
+    size_t vertexCount = 0;
+    for (const auto& command : commands) {
+        vertexCount += command.standingVertices.size();
+    }
+    s.lastVertexCount = vertexCount;
+
     if (!wantVisible || commands.empty()) {
-        Destroy();
+        HideOnly(source ? source : "hidden");
         return;
     }
 
     BoundaryPreviewRaster raster = BuildBoundaryPreviewRaster(commands);
+    s.lastRasterHash = raster.hash;
+    s.lastPlane = raster.plane;
     if (!raster.plane.valid) {
-        Destroy();
+        HideOnly(source ? source : "invalid_plane");
         return;
     }
     if (!EnsureCreated()) return;
 
-    auto& s = State();
     if (s.uploadsDisabled) {
         return;
     }
@@ -599,23 +709,55 @@ void TickBoundaryPreview(
         if (err == vr::VROverlayError_None) {
             s.uploadedHash = raster.hash;
             s.uploadFailureCount = 0;
+            s.lastError = vr::VROverlayError_None;
         } else {
+            s.lastError = err;
             ++s.uploadFailureCount;
             if (s.uploadFailureCount <= 3 || (s.uploadFailureCount % 30) == 0) {
                 openvr_pair::common::DiagnosticLog(
                     "boundary-preview",
-                    "upload_failed err=%d count=%d",
+                    "upload_failed err=%d error_name=%s count=%d source=%s vertices=%zu hash=%llu",
                     static_cast<int>(err),
-                    s.uploadFailureCount);
+                    OverlayErrorName(err),
+                    s.uploadFailureCount,
+                    s.lastSource,
+                    s.lastVertexCount,
+                    static_cast<unsigned long long>(raster.hash));
+                openvr_pair::common::DiagnosticLog(
+                    "boundary_preview_status",
+                    "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s vertices=%zu hash=%llu",
+                    s.created ? 1 : 0,
+                    s.visible ? 1 : 0,
+                    s.uploadsDisabled ? 1 : 0,
+                    s.uploadFailureCount,
+                    static_cast<int>(err),
+                    OverlayErrorName(err),
+                    s.lastSource,
+                    s.lastVertexCount,
+                    static_cast<unsigned long long>(raster.hash));
             }
             if (BoundaryPreviewShouldDisableUploadsAfterFailureCount(s.uploadFailureCount)) {
                 if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
                     vr::VROverlay()->HideOverlay(s.handle);
                 }
+                s.visible = false;
                 s.uploadsDisabled = true;
                 openvr_pair::common::DiagnosticLog(
                     "boundary-preview",
-                    "uploads_disabled_after_failures");
+                    "uploads_disabled_after_failures err=%d error_name=%s source=%s vertices=%zu",
+                    static_cast<int>(err),
+                    OverlayErrorName(err),
+                    s.lastSource,
+                    s.lastVertexCount);
+                openvr_pair::common::DiagnosticLog(
+                    "boundary_preview_status",
+                    "created=%d visible=0 uploads_disabled=1 failures=%d error=%d error_name=%s source=%s vertices=%zu",
+                    s.created ? 1 : 0,
+                    s.uploadFailureCount,
+                    static_cast<int>(err),
+                    OverlayErrorName(err),
+                    s.lastSource,
+                    s.lastVertexCount);
             }
             return;
         }
@@ -633,6 +775,20 @@ void TickBoundaryPreview(
         BoundaryPreviewTrackingOrigin(),
         &mat);
     vr::VROverlay()->ShowOverlay(s.handle);
+    if (!s.visible) {
+        openvr_pair::common::DiagnosticLog(
+            "boundary_preview_status",
+            "created=1 visible=1 uploads_disabled=0 failures=%d error=%d error_name=%s source=%s vertices=%zu span=%.3f center=(%.3f,%.3f)",
+            s.uploadFailureCount,
+            static_cast<int>(s.lastError),
+            OverlayErrorName(s.lastError),
+            s.lastSource,
+            s.lastVertexCount,
+            raster.plane.spanMeters,
+            raster.plane.centerX,
+            raster.plane.centerZ);
+    }
+    s.visible = true;
 }
 
 } // namespace wkopenvr::boundary

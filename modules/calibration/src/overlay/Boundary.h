@@ -12,6 +12,9 @@ namespace wkopenvr::boundary {
 // Top-down projection: drop Y, keep X and Z.
 struct XZPoint { double x, z; };
 
+// Axis-aligned bounding rectangle of the boundary polygon on the XZ plane.
+struct PolygonBounds { double xMin, xMax, zMin, zMax; };
+
 // Polygon area on the XZ plane (signed). Clockwise winding gives negative.
 double SignedAreaXZ(const std::vector<XZPoint>& poly);
 double AbsoluteAreaXZ(const std::vector<XZPoint>& poly);
@@ -194,10 +197,26 @@ enum class ChaperoneOutputStatus {
     VisualOnlyNoStandingOrigin,
 };
 
+struct ChaperonePreflightDiagnostics {
+    size_t inputVertexCount = 0;
+    size_t normalizedVertexCount = 0;
+    double areaMetersSq = 0.0;
+    PolygonBounds bounds{0.0, 0.0, 0.0, 0.0};
+    bool originInsidePolygon = false;
+    double originDistanceMeters = 0.0;
+    double centroidX = 0.0;
+    double centroidZ = 0.0;
+    double floorY = 0.0;
+    double ceilingY = 0.0;
+    float playAreaX = 0.0f;
+    float playAreaZ = 0.0f;
+};
+
 struct ChaperoneOutput {
     ChaperoneOutputStatus status = ChaperoneOutputStatus::Empty;
     ChaperoneWorkingSet workingSet;
     const char* reason = "empty";
+    ChaperonePreflightDiagnostics diagnostics;
 
     bool ready() const { return status == ChaperoneOutputStatus::Ready && workingSet.valid; }
 };
@@ -255,8 +274,6 @@ std::vector<uint8_t> SnapshotCurrentChaperone();
 // Returns false if snapshot bytes don't parse.
 bool RestoreChaperoneFromSnapshot(const std::vector<uint8_t>& snapshot);
 
-// Axis-aligned bounding rectangle of the boundary polygon on the XZ plane.
-struct PolygonBounds { double xMin, xMax, zMin, zMax; };
 PolygonBounds ComputePolygonBoundsXZ(const std::vector<BoundaryVertex>& v);
 
 }  // namespace wkopenvr::boundary

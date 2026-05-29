@@ -16,6 +16,7 @@ struct FloorCaptureCandidate {
     double floorY = 0.0;
     size_t sampleCount = 0;
     double jitterMeters = 0.0;
+    double recentDriftMeters = 0.0;
     bool ready = false;
     bool stable = false;
     int deviceId = -1;

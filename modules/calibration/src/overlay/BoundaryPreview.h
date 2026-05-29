@@ -25,6 +25,21 @@ struct BoundaryPreviewRaster {
     uint64_t hash = 0;
 };
 
+struct BoundaryPreviewStatus {
+    bool created = false;
+    bool visible = false;
+    bool uploadsDisabled = false;
+    int uploadFailureCount = 0;
+    int lastError = 0;
+    const char* lastErrorName = "None";
+    uint64_t uploadedHash = 0;
+    uint64_t lastRasterHash = 0;
+    size_t lastVertexCount = 0;
+    int renderSize = BoundaryPreviewRaster::kTextureSize;
+    const char* lastSource = "none";
+    BoundaryPreviewPlane plane;
+};
+
 BoundaryPreviewPlane ComputeBoundaryPreviewPlane(
     const std::vector<BoundaryVertex>& vertices);
 
@@ -42,6 +57,10 @@ int BoundaryPreviewUploadFailureDisableThreshold();
 
 bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount);
 
+BoundaryPreviewStatus GetBoundaryPreviewStatus();
+
+void ResetBoundaryPreviewUploadFailures();
+
 vr::ETrackingUniverseOrigin BoundaryPreviewTrackingOrigin();
 
 vr::HmdMatrix34_t BoundaryPreviewTransform(
@@ -53,11 +72,13 @@ void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<BoundaryVertex>& vertices,
     double floorY,
-    bool closeLoop);
+    bool closeLoop,
+    const char* source = nullptr);
 
 void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<SpatialRenderCommand>& commands,
-    double floorY);
+    double floorY,
+    const char* source = nullptr);
 
 } // namespace wkopenvr::boundary

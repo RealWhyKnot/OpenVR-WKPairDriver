@@ -40,6 +40,7 @@ bool FloorCaptureSession::Observe(
     constexpr double kSmoothing = 0.55;
     constexpr double kChangeMeters = 0.002;
     constexpr double kMarkerMoveMeters = 0.01;
+    constexpr double kStableRecentDriftMeters = 0.008;
 
     m_recentFloorSamples.push_back(y);
     while (m_recentFloorSamples.size() > kRecentSampleLimit) {
@@ -60,6 +61,9 @@ bool FloorCaptureSession::Observe(
         estimate = std::min(estimate, y);
     }
     const double jitterMeters = sorted[highPercentileIndex] - sorted[percentileIndex];
+    const double recentDriftMeters = m_recentFloorSamples.size() >= 2
+        ? std::fabs(m_recentFloorSamples.back() - m_recentFloorSamples.front())
+        : 0.0;
 
     const double previousFloorY = m_candidate.floorY;
     const Eigen::Vector3d previousPos = m_candidate.pose.translation();
@@ -80,8 +84,11 @@ bool FloorCaptureSession::Observe(
     m_candidate.pose = rawPose;
     m_candidate.sampleCount = nextCount;
     m_candidate.jitterMeters = jitterMeters;
+    m_candidate.recentDriftMeters = recentDriftMeters;
     m_candidate.ready = nextCount >= 4;
-    m_candidate.stable = nextCount >= 8 && jitterMeters <= 0.02;
+    m_candidate.stable = nextCount >= 8 &&
+        jitterMeters <= 0.02 &&
+        recentDriftMeters <= kStableRecentDriftMeters;
     return floorMoved || markerMoved || deviceChanged;
 }
 

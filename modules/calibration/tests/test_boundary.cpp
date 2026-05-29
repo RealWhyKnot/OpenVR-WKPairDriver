@@ -865,6 +865,23 @@ TEST(FloorCaptureSessionTest, ReportsUnstableWhenFloorSamplesAreStillMoving) {
     EXPECT_GT(floor.candidate().jitterMeters, 0.02);
 }
 
+TEST(FloorCaptureSessionTest, RejectsLowJitterButDriftingLatestWindow) {
+    FloorCaptureSession floor;
+    floor.Begin(0.10, 2.60);
+
+    for (int i = 0; i < 8; ++i) {
+        Eigen::Affine3d moving = Eigen::Affine3d::Identity();
+        moving.translation() = Eigen::Vector3d(0.0, 0.400 + 0.0015 * i, 0.0);
+        floor.Observe(moving, 4, "lighthouse");
+    }
+
+    ASSERT_TRUE(floor.candidate().valid);
+    EXPECT_TRUE(floor.candidate().ready);
+    EXPECT_LT(floor.candidate().jitterMeters, 0.02);
+    EXPECT_GT(floor.candidate().recentDriftMeters, 0.008);
+    EXPECT_FALSE(floor.candidate().stable);
+}
+
 TEST(FloorCaptureSessionTest, IgnoresInvalidSamplesAndHighOutliers) {
     FloorCaptureSession floor;
     floor.Begin(0.10, 2.60);
@@ -1405,6 +1422,18 @@ TEST(BoundaryPreviewTest, UploadFailuresDisableAfterThreshold) {
     EXPECT_TRUE(BoundaryPreviewShouldDisableUploadsAfterFailureCount(4));
 }
 
+TEST(BoundaryPreviewTest, StatusExposesInitialUploadDiagnostics) {
+    ResetBoundaryPreviewUploadFailures();
+
+    const auto status = GetBoundaryPreviewStatus();
+
+    EXPECT_FALSE(status.uploadsDisabled);
+    EXPECT_EQ(status.uploadFailureCount, 0);
+    EXPECT_EQ(status.lastError, 0);
+    ASSERT_STREQ(status.lastErrorName, "None");
+    EXPECT_EQ(status.renderSize, BoundaryPreviewRaster::kTextureSize);
+}
+
 TEST(ChaperoneWorkingSetTest, BuildsPerimeterQuadsAndPlayArea) {
     const std::vector<BoundaryVertex> verts = {
         { -1.0, 0.0, -2.0 },
@@ -1543,6 +1572,11 @@ TEST(ChaperoneWorkingSetTest, RejectsBoundaryThatDoesNotContainStandingOrigin) {
     EXPECT_FALSE(output.ready());
     EXPECT_EQ(output.status, ChaperoneOutputStatus::VisualOnlyNoStandingOrigin);
     ASSERT_STREQ(output.reason, "standing_origin_outside_polygon");
+    EXPECT_FALSE(output.diagnostics.originInsidePolygon);
+    EXPECT_NEAR(output.diagnostics.originDistanceMeters, std::sqrt(2.0), 1e-9);
+    EXPECT_NEAR(output.diagnostics.centroidX, 2.0, 1e-9);
+    EXPECT_NEAR(output.diagnostics.centroidZ, 2.0, 1e-9);
+    EXPECT_NEAR(output.diagnostics.areaMetersSq, 4.0, 1e-9);
 }
 
 TEST(ChaperoneWorkingSetTest, RejectsDegenerateAndNonFiniteGeometry) {

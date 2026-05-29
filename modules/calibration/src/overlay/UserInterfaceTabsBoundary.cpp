@@ -42,9 +42,11 @@ wkopenvr::boundary::CaptureSession s_capture;
 wkopenvr::boundary::FloorCaptureSession s_floorCapture;
 wkopenvr::boundary::SpatialSession s_spatialSession;
 std::string s_boundaryError;
+std::string s_boundaryNativeStatus;
 uint64_t s_floorSessionId = 0;
 bool s_steamVrWorkingPreviewVisible = false;
 bool s_floorPreviewVisible = false;
+bool s_moveSteamVrFloorOnApply = false;
 Eigen::AffineCompact3d s_capturePreviewTransform = Eigen::AffineCompact3d::Identity();
 bool s_capturePreviewTransformValid = false;
 bool s_captureUsesStandingSpace = false;
@@ -77,11 +79,19 @@ struct BoundaryControllerChoice {
     bool matchesTarget = false;
 };
 
+struct NativeBoundaryPushResult {
+    bool attempted = false;
+    bool applied = false;
+    bool visualOnly = false;
+    wkopenvr::boundary::ChaperoneOutput preflight;
+    std::string message;
+};
+
 std::string TrackingSystemName(vr::IVRSystem* vrs, vr::TrackedDeviceIndex_t deviceId);
 bool ShouldUseTargetSpaceForBoundaryController(const BoundaryControllerChoice* choice);
 
 void HideBoundaryPreviewOverlay() {
-    wkopenvr::boundary::TickBoundaryPreview(false, {}, CalCtx.boundary.floorY, false);
+    wkopenvr::boundary::TickBoundaryPreview(false, {}, CalCtx.boundary.floorY, false, "hide");
     s_floorPreviewVisible = false;
     if (s_steamVrWorkingPreviewVisible) {
         wkopenvr::boundary::HideWorkingChaperonePreview();
@@ -169,7 +179,8 @@ void TickBoundaryPreviewForTargetVerticesAtFloor(
             targetVertices,
             targetFloorY,
             targetToStanding),
-        closeLoop);
+        closeLoop,
+        "target_vertices");
 
     if (s_steamVrWorkingPreviewVisible) {
         wkopenvr::boundary::HideWorkingChaperonePreview();
@@ -191,21 +202,58 @@ void TickBoundaryPreviewForStandingVerticesAtFloor(
         true,
         standingVertices,
         floorY,
-        closeLoop);
+        closeLoop,
+        "standing_vertices");
 }
 
-bool PushTargetBoundaryToChaperoneWithTransform(
-    std::string& error,
+void LogNativeBoundaryPreflight(
+    const char* source,
+    const wkopenvr::boundary::ChaperoneOutput& output,
+    const Eigen::AffineCompact3d& targetToStanding,
+    bool standingSpace)
+{
+    const auto& d = output.diagnostics;
+    const Eigen::Vector3d t = targetToStanding.translation();
+    char lbuf[1024];
+    snprintf(lbuf, sizeof lbuf,
+        "[boundary_native_preflight] source=%s status=%d reason=%s ready=%d space=%s input_vertices=%zu normalized_vertices=%zu area=%.3f floor=%.3f ceiling=%.3f origin_inside=%d origin_distance=%.3f centroid=(%.3f,%.3f) bounds_x=(%.3f,%.3f) bounds_z=(%.3f,%.3f) play=(%.3f,%.3f) transform_trans=(%.3f,%.3f,%.3f)",
+        source ? source : "unknown",
+        static_cast<int>(output.status),
+        output.reason ? output.reason : "",
+        output.ready() ? 1 : 0,
+        standingSpace ? "standing" : "target",
+        d.inputVertexCount,
+        d.normalizedVertexCount,
+        d.areaMetersSq,
+        d.floorY,
+        d.ceilingY,
+        d.originInsidePolygon ? 1 : 0,
+        d.originDistanceMeters,
+        d.centroidX,
+        d.centroidZ,
+        d.bounds.xMin,
+        d.bounds.xMax,
+        d.bounds.zMin,
+        d.bounds.zMax,
+        d.playAreaX,
+        d.playAreaZ,
+        t.x(), t.y(), t.z());
+    Metrics::WriteLogAnnotation(lbuf);
+    openvr_pair::common::DiagnosticLog("boundary_native_preflight", "%s", lbuf);
+}
+
+NativeBoundaryPushResult PushTargetBoundaryToChaperoneWithTransform(
     const Eigen::AffineCompact3d& targetToStanding,
     const char* source)
 {
+    NativeBoundaryPushResult result;
     if (!CalCtx.boundary.standingSpace && !BoundaryTransformReady()) {
-        error = "Run calibration first so the boundary can be mapped into SteamVR space.";
-        return false;
+        result.message = "Run calibration first so the boundary can be mapped into SteamVR space.";
+        return result;
     }
     if (CalCtx.boundary.vertices.size() < 3) {
-        error = "Boundary needs at least three floor points.";
-        return false;
+        result.message = "Boundary needs at least three floor points.";
+        return result;
     }
 
     const auto standingVertices = CalCtx.boundary.standingSpace
@@ -245,8 +293,16 @@ bool PushTargetBoundaryToChaperoneWithTransform(
         standingVertices,
         standingFloor,
         standingCeiling);
+    result.preflight = output;
+    LogNativeBoundaryPreflight(
+        source,
+        output,
+        targetToStanding,
+        CalCtx.boundary.standingSpace);
     if (!output.ready()) {
-        error = output.status == wkopenvr::boundary::ChaperoneOutputStatus::VisualOnlyNoStandingOrigin
+        result.visualOnly =
+            output.status == wkopenvr::boundary::ChaperoneOutputStatus::VisualOnlyNoStandingOrigin;
+        result.message = result.visualOnly
             ? "Boundary can be previewed, but SteamVR native chaperone requires the standing origin inside the polygon."
             : "Boundary geometry is not valid for SteamVR native chaperone.";
         char obuf[224];
@@ -256,27 +312,59 @@ bool PushTargetBoundaryToChaperoneWithTransform(
             output.reason ? output.reason : "");
         Metrics::WriteLogAnnotation(obuf);
         openvr_pair::common::DiagnosticLog("boundary", "%s", obuf);
-        return false;
+        openvr_pair::common::DiagnosticLog(
+            "boundary_apply_native_skipped",
+            "source=%s status=%d reason=%s origin_inside=%d origin_distance=%.3f visual_only=%d",
+            source ? source : "unknown",
+            static_cast<int>(output.status),
+            output.reason ? output.reason : "",
+            output.diagnostics.originInsidePolygon ? 1 : 0,
+            output.diagnostics.originDistanceMeters,
+            result.visualOnly ? 1 : 0);
+        return result;
     }
 
+    result.attempted = true;
     const bool ok = wkopenvr::boundary::PushToChaperone(
         standingVertices,
         standingFloor,
         standingCeiling);
     if (!ok) {
-        error = "PushToChaperone failed. Is SteamVR running?";
+        result.message = "PushToChaperone failed. Is SteamVR running?";
+        openvr_pair::common::DiagnosticLog(
+            "boundary_apply_native_skipped",
+            "source=%s status=%d reason=push_failed origin_inside=%d origin_distance=%.3f visual_only=0",
+            source ? source : "unknown",
+            static_cast<int>(output.status),
+            output.diagnostics.originInsidePolygon ? 1 : 0,
+            output.diagnostics.originDistanceMeters);
     } else {
         NoteBoundaryPushedForTransform(targetToStanding);
+        result.applied = true;
+        result.message = "SteamVR native boundary updated.";
+        openvr_pair::common::DiagnosticLog(
+            "boundary_apply_native_applied",
+            "source=%s vertices=%zu area=%.3f play=(%.3f,%.3f) floor=%.3f ceiling=%.3f",
+            source ? source : "unknown",
+            output.diagnostics.normalizedVertexCount,
+            output.diagnostics.areaMetersSq,
+            output.diagnostics.playAreaX,
+            output.diagnostics.playAreaZ,
+            output.diagnostics.floorY,
+            output.diagnostics.ceilingY);
     }
-    return ok;
+    return result;
 }
 
 bool PushTargetBoundaryToChaperone(std::string& error)
 {
-    return PushTargetBoundaryToChaperoneWithTransform(
-        error,
+    const auto result = PushTargetBoundaryToChaperoneWithTransform(
         BoundaryTargetToStandingTransform(),
         "current");
+    if (!result.applied) {
+        error = result.message;
+    }
+    return result.applied;
 }
 
 void RepushActiveBoundaryAfterEdit()
@@ -285,8 +373,11 @@ void RepushActiveBoundaryAfterEdit()
 
     std::string pushError;
     if (!PushTargetBoundaryToChaperone(pushError)) {
-        CalCtx.boundary.enabled = false;
-        s_boundaryError = pushError;
+        s_boundaryNativeStatus = "WKOpenVR boundary saved locally; SteamVR native boundary was not updated.";
+        if (!pushError.empty()) {
+            s_boundaryNativeStatus += " ";
+            s_boundaryNativeStatus += pushError;
+        }
     }
 }
 
@@ -452,6 +543,7 @@ bool ApplyFloorSourceDecision(
     const char* sourceContext)
 {
     s_boundaryError.clear();
+    s_boundaryNativeStatus.clear();
     if (!decision.valid) {
         s_boundaryError = "No valid floor source is available.";
         return false;
@@ -461,8 +553,11 @@ bool ApplyFloorSourceDecision(
     if (CalCtx.boundary.enabled) {
         std::string pushError;
         if (!PushTargetBoundaryToChaperone(pushError)) {
-            CalCtx.boundary.enabled = false;
-            s_boundaryError = pushError;
+            s_boundaryNativeStatus = "Floor saved locally; SteamVR native boundary was not updated.";
+            if (!pushError.empty()) {
+                s_boundaryNativeStatus += " ";
+                s_boundaryNativeStatus += pushError;
+            }
         }
     }
     SaveProfile(CalCtx);
@@ -477,7 +572,7 @@ bool ApplyFloorSourceDecision(
         CalCtx.boundary.vertices.size());
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-floor", "%s", lbuf);
-    return s_boundaryError.empty();
+    return decision.valid;
 }
 
 void RestoreFloorCaptureOriginal()
@@ -533,6 +628,8 @@ void StartBoundaryCapture(const BoundaryControllerChoice* selectedController)
     s_captureLastTriggerHeld = false;
     s_captureLastTriggerReadable = false;
     s_captureLastTriggerReading = {};
+    s_boundaryNativeStatus.clear();
+    wkopenvr::boundary::ResetBoundaryPreviewUploadFailures();
     s_capture.Start();
     s_spatialSession =
         wkopenvr::boundary::BoundaryCaptureSessionDescriptor(
@@ -988,7 +1085,8 @@ void TickBoundaryPreviewForCapture(
     wkopenvr::boundary::TickBoundaryPreview(
         true,
         commands,
-        commands.front().floorY);
+        commands.front().floorY,
+        "capture");
 
     if (s_steamVrWorkingPreviewVisible) {
         wkopenvr::boundary::HideWorkingChaperonePreview();
@@ -1001,6 +1099,7 @@ bool ApplyFloorFromStandingContactPose(
     vr::TrackedDeviceIndex_t deviceId,
     const std::string& trackingSystem)
 {
+    s_boundaryNativeStatus.clear();
     const double floorY = standingContactPose.translation().y();
     if (!std::isfinite(floorY) || floorY < -5.0 || floorY > 5.0) {
         s_boundaryError = "Controller floor sample was outside the expected tracking range.";
@@ -1026,55 +1125,80 @@ bool ApplyFloorFromStandingContactPose(
     bool steamFloorVerificationAttempted = false;
     bool steamFloorVerified = false;
     std::string steamFloorWarning;
-    const auto beforeFloorSample =
-        wkopenvr::boundary::SampleDeviceStandingY(deviceId);
-    steamFloorCommitSucceeded =
-        wkopenvr::boundary::ApplySteamVrFloorOffset(
-            measuredStandingY,
-            floorError,
-            sizeof floorError);
     wkopenvr::boundary::SteamVrFloorVerification steamFloorVerification;
-    if (steamFloorCommitSucceeded) {
-        const auto afterFloorSample =
+    wkopenvr::boundary::BoundaryFloorApplyResolution applyResolution;
+    applyResolution.boundaryStandingFloorY = measuredStandingY;
+    if (s_moveSteamVrFloorOnApply) {
+        const auto beforeFloorSample =
             wkopenvr::boundary::SampleDeviceStandingY(deviceId);
-        steamFloorVerification =
-            wkopenvr::boundary::EvaluateSteamVrFloorVerification(
-                beforeFloorSample,
-                afterFloorSample,
-                measuredStandingY);
-        steamFloorVerificationAttempted = true;
-        steamFloorVerified = steamFloorVerification.verified;
+        steamFloorCommitSucceeded =
+            wkopenvr::boundary::ApplySteamVrFloorOffset(
+                measuredStandingY,
+                floorError,
+                sizeof floorError);
+        if (steamFloorCommitSucceeded) {
+            const auto afterFloorSample =
+                wkopenvr::boundary::SampleDeviceStandingY(deviceId);
+            steamFloorVerification =
+                wkopenvr::boundary::EvaluateSteamVrFloorVerification(
+                    beforeFloorSample,
+                    afterFloorSample,
+                    measuredStandingY);
+            steamFloorVerificationAttempted = true;
+            steamFloorVerified = steamFloorVerification.verified;
 
-        char vbuf[384];
-        snprintf(vbuf, sizeof vbuf,
-            "[boundary-floor] steamvr floor verify: device=%d before_valid=%d after_valid=%d before_y=%.4f after_y=%.4f expected_after_y=%.4f residual_y=%.4f verified=%d",
+            char vbuf[384];
+            snprintf(vbuf, sizeof vbuf,
+                "[boundary-floor] steamvr floor verify: device=%d before_valid=%d after_valid=%d before_y=%.4f after_y=%.4f expected_after_y=%.4f residual_y=%.4f verified=%d",
+                static_cast<int>(deviceId),
+                steamFloorVerification.beforeValid ? 1 : 0,
+                steamFloorVerification.afterValid ? 1 : 0,
+                steamFloorVerification.beforeY,
+                steamFloorVerification.afterY,
+                steamFloorVerification.expectedAfterY,
+                steamFloorVerification.residualY,
+                steamFloorVerified ? 1 : 0);
+            Metrics::WriteLogAnnotation(vbuf);
+            openvr_pair::common::DiagnosticLog("boundary-floor", "%s", vbuf);
+            if (!steamFloorVerified) {
+                openvr_pair::common::DiagnosticLog(
+                    "boundary_floor_native_verify_failed",
+                    "device=%d before_valid=%d after_valid=%d before_y=%.4f after_y=%.4f expected_after_y=%.4f residual_y=%.4f measured_y=%.4f",
+                    static_cast<int>(deviceId),
+                    steamFloorVerification.beforeValid ? 1 : 0,
+                    steamFloorVerification.afterValid ? 1 : 0,
+                    steamFloorVerification.beforeY,
+                    steamFloorVerification.afterY,
+                    steamFloorVerification.expectedAfterY,
+                    steamFloorVerification.residualY,
+                    measuredStandingY);
+            }
+        }
+        applyResolution =
+            wkopenvr::boundary::ResolveBoundaryFloorApply(
+                measuredStandingY,
+                steamFloorCommitSucceeded,
+                steamFloorVerificationAttempted,
+                steamFloorVerified);
+    } else {
+        openvr_pair::common::DiagnosticLog(
+            "boundary_floor_native_skipped",
+            "device=%d system='%s' measured_standing_y=%.4f reason=toggle_off",
             static_cast<int>(deviceId),
-            steamFloorVerification.beforeValid ? 1 : 0,
-            steamFloorVerification.afterValid ? 1 : 0,
-            steamFloorVerification.beforeY,
-            steamFloorVerification.afterY,
-            steamFloorVerification.expectedAfterY,
-            steamFloorVerification.residualY,
-            steamFloorVerified ? 1 : 0);
-        Metrics::WriteLogAnnotation(vbuf);
-        openvr_pair::common::DiagnosticLog("boundary-floor", "%s", vbuf);
+            trackingSystem.c_str(),
+            measuredStandingY);
     }
-    const auto applyResolution =
-        wkopenvr::boundary::ResolveBoundaryFloorApply(
-            measuredStandingY,
-            steamFloorCommitSucceeded,
-            steamFloorVerificationAttempted,
-            steamFloorVerified);
     if (applyResolution.warning && applyResolution.warning[0]) {
         steamFloorWarning = floorError[0] ? floorError : applyResolution.warning;
     }
     {
         char lbuf[384];
         snprintf(lbuf, sizeof lbuf,
-            "[boundary-floor] apply requested: device=%d system='%s' standing_y=%.4f steamvr_commit=%d steamvr_verify_attempted=%d steamvr_verified=%d native_floor=%d boundary_floor_standing=%.4f",
+            "[boundary-floor] apply requested: device=%d system='%s' standing_y=%.4f steamvr_toggle=%d steamvr_commit=%d steamvr_verify_attempted=%d steamvr_verified=%d native_floor=%d boundary_floor_standing=%.4f",
             static_cast<int>(deviceId),
             trackingSystem.c_str(),
             measuredStandingY,
+            s_moveSteamVrFloorOnApply ? 1 : 0,
             steamFloorCommitSucceeded ? 1 : 0,
             steamFloorVerificationAttempted ? 1 : 0,
             steamFloorVerified ? 1 : 0,
@@ -1114,8 +1238,11 @@ bool ApplyFloorFromStandingContactPose(
     if (CalCtx.boundary.enabled) {
         std::string pushError;
         if (!PushTargetBoundaryToChaperone(pushError)) {
-            CalCtx.boundary.enabled = false;
-            s_boundaryError = pushError;
+            s_boundaryNativeStatus = "Floor saved locally; SteamVR native boundary was not updated.";
+            if (!pushError.empty()) {
+                s_boundaryNativeStatus += " ";
+                s_boundaryNativeStatus += pushError;
+            }
         }
     }
 
@@ -1137,11 +1264,24 @@ bool ApplyFloorFromStandingContactPose(
         CalCtx.boundary.vertices.size());
     Metrics::WriteLogAnnotation(lbuf);
     openvr_pair::common::DiagnosticLog("boundary-floor", "%s", lbuf);
+    openvr_pair::common::DiagnosticLog(
+        "boundary_floor_apply_local",
+        "device=%d system='%s' boundary_floor_y=%.4f measured_standing_y=%.4f steamvr_toggle=%d steamvr_commit=%d steamvr_verified=%d native_floor=%d vertices=%zu",
+        static_cast<int>(deviceId),
+        trackingSystem.c_str(),
+        CalCtx.boundary.floorY,
+        measuredStandingY,
+        s_moveSteamVrFloorOnApply ? 1 : 0,
+        steamFloorCommitSucceeded ? 1 : 0,
+        steamFloorVerified ? 1 : 0,
+        applyResolution.steamVrNativeFloorActive ? 1 : 0,
+        CalCtx.boundary.vertices.size());
     return true;
 }
 
 bool ApplyCapturedBoundary()
 {
+    s_boundaryNativeStatus.clear();
     s_capture.Finish();
     const auto& verts = s_capture.vertices();
     const auto pts = wkopenvr::boundary::ProjectXZ(verts);
@@ -1186,7 +1326,6 @@ bool ApplyCapturedBoundary()
     }
     nextBoundary.enabled = true;
 
-    auto previousBoundary = CalCtx.boundary;
     CalCtx.boundary = std::move(nextBoundary);
     const Eigen::AffineCompact3d applyTransform = s_capturePreviewTransformValid
         ? s_capturePreviewTransform
@@ -1205,16 +1344,33 @@ bool ApplyCapturedBoundary()
         Metrics::WriteLogAnnotation(lbuf);
         openvr_pair::common::DiagnosticLog("boundary", "%s", lbuf);
     }
-    if (!PushTargetBoundaryToChaperoneWithTransform(
-            s_boundaryError,
-            applyTransform,
-            "capture_apply"))
-    {
-        CalCtx.boundary = std::move(previousBoundary);
-        return false;
+    SaveProfile(CalCtx);
+    openvr_pair::common::DiagnosticLog(
+        "boundary_apply_local_saved",
+        "source=capture_apply raw=%zu cleaned=%zu area=%.3f floor_y=%.3f space=%s enabled=%d",
+        s_capture.rawVertexCount(),
+        verts.size(),
+        area,
+        CalCtx.boundary.floorY,
+        CalCtx.boundary.standingSpace ? "standing" : "target",
+        CalCtx.boundary.enabled ? 1 : 0);
+
+    const auto nativeResult = PushTargetBoundaryToChaperoneWithTransform(
+        applyTransform,
+        "capture_apply");
+    s_boundaryNativeStatus.clear();
+    if (!nativeResult.applied) {
+        s_boundaryNativeStatus = nativeResult.visualOnly
+            ? "Saved locally; SteamVR native boundary skipped because the standing origin is outside the drawn area."
+            : "Saved locally; SteamVR native boundary was not updated.";
+        if (!nativeResult.message.empty()) {
+            s_boundaryNativeStatus += " ";
+            s_boundaryNativeStatus += nativeResult.message;
+        }
+    } else {
+        s_boundaryNativeStatus = nativeResult.message;
     }
 
-    SaveProfile(CalCtx);
     s_capture.Cancel();
     StopBoundaryCapturePreview();
     s_boundaryError.clear();
@@ -1226,14 +1382,65 @@ void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts,
                         bool activePath = false) {
     if (verts.empty()) return;
 
+    const bool authoringStanding = activePath
+        ? s_captureUsesStandingSpace
+        : CalCtx.boundary.standingSpace;
+    const double authoringFloorY = activePath
+        ? s_captureFloorY
+        : CalCtx.boundary.floorY;
+    const Eigen::AffineCompact3d targetToStanding = activePath
+        ? (s_capturePreviewTransformValid ? s_capturePreviewTransform : BoundaryTargetToStandingTransform())
+        : BoundaryTargetToStandingTransform();
+
+    auto standingMarkerToAuthoring = [&](double standingX, double standingZ, BoundaryVertex& out) {
+        if (authoringStanding) {
+            out = { standingX, authoringFloorY, standingZ };
+            return true;
+        }
+        if (!BoundaryTransformReady()) return false;
+        const Eigen::Vector3d target =
+            targetToStanding.inverse() * Eigen::Vector3d(standingX, 0.0, standingZ);
+        if (!target.allFinite()) return false;
+        out = { target.x(), authoringFloorY, target.z() };
+        return true;
+    };
+
+    BoundaryVertex originMarker{};
+    const bool originMarkerValid = standingMarkerToAuthoring(0.0, 0.0, originMarker);
+    BoundaryVertex hmdMarker{};
+    bool hmdMarkerValid = false;
+    if (auto* vrs = vr::VRSystem()) {
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+        vrs->GetDeviceToAbsoluteTrackingPose(
+            vr::TrackingUniverseStanding,
+            0.0f,
+            poses,
+            vr::k_unMaxTrackedDeviceCount);
+        const auto& hmdPose = poses[vr::k_unTrackedDeviceIndex_Hmd];
+        if (hmdPose.bDeviceIsConnected &&
+            hmdPose.bPoseIsValid &&
+            hmdPose.eTrackingResult == vr::TrackingResult_Running_OK)
+        {
+            hmdMarkerValid = standingMarkerToAuthoring(
+                hmdPose.mDeviceToAbsoluteTracking.m[0][3],
+                hmdPose.mDeviceToAbsoluteTracking.m[2][3],
+                hmdMarker);
+        }
+    }
+    const bool cursorMarkerValid = activePath && s_smoothedPreviewCursorValid;
+
     double xMin = verts[0].x, xMax = verts[0].x;
     double zMin = verts[0].z, zMax = verts[0].z;
-    for (const auto& v : verts) {
+    auto includePoint = [&](const BoundaryVertex& v) {
         if (v.x < xMin) xMin = v.x;
         if (v.x > xMax) xMax = v.x;
         if (v.z < zMin) zMin = v.z;
         if (v.z > zMax) zMax = v.z;
-    }
+    };
+    for (const auto& v : verts) includePoint(v);
+    if (originMarkerValid) includePoint(originMarker);
+    if (hmdMarkerValid) includePoint(hmdMarker);
+    if (cursorMarkerValid) includePoint(s_smoothedPreviewCursor);
     const double rangeX = xMax - xMin;
     const double rangeZ = zMax - zMin;
     const double range = (rangeX > rangeZ ? rangeX : rangeZ);
@@ -1279,6 +1486,21 @@ void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts,
         const ImU32 dotColor = activePath && last ? IM_COL32(255, 245, 90, 255) : lineColor;
         dl->AddCircleFilled(toCanvas(v.x, v.z), activePath && last ? 5.0f : 3.0f, dotColor);
     }
+    if (originMarkerValid) {
+        const ImVec2 p = toCanvas(originMarker.x, originMarker.z);
+        dl->AddLine(ImVec2(p.x - 7.0f, p.y), ImVec2(p.x + 7.0f, p.y), IM_COL32(255, 90, 90, 255), 2.0f);
+        dl->AddLine(ImVec2(p.x, p.y - 7.0f), ImVec2(p.x, p.y + 7.0f), IM_COL32(255, 90, 90, 255), 2.0f);
+        dl->AddText(ImVec2(p.x + 8.0f, p.y - 7.0f), IM_COL32(255, 150, 150, 230), "origin");
+    }
+    if (hmdMarkerValid) {
+        const ImVec2 p = toCanvas(hmdMarker.x, hmdMarker.z);
+        dl->AddCircleFilled(p, 4.5f, IM_COL32(100, 180, 255, 255), 18);
+        dl->AddText(ImVec2(p.x + 7.0f, p.y - 7.0f), IM_COL32(150, 205, 255, 230), "HMD");
+    }
+    if (cursorMarkerValid) {
+        const ImVec2 p = toCanvas(s_smoothedPreviewCursor.x, s_smoothedPreviewCursor.z);
+        dl->AddCircle(p, 7.0f, IM_COL32(255, 255, 255, 245), 20, 2.0f);
+    }
 
     {
         const float barPxLen = (float)(1.0 / drawSpan * canvasW);
@@ -1286,6 +1508,96 @@ void DrawPolygonPreview(const std::vector<BoundaryVertex>& verts,
         const ImVec2 barB(p0.x + 8.0f + barPxLen, p1.y - 12.0f);
         dl->AddLine(barA, barB, IM_COL32(200, 200, 200, 200), 2.0f);
         dl->AddText(ImVec2(barA.x, barA.y - 14.0f), IM_COL32(200, 200, 200, 200), "1 m");
+    }
+}
+
+wkopenvr::boundary::ChaperoneOutput NativePreflightForAuthoringVertices(
+    const std::vector<BoundaryVertex>& vertices,
+    double authoringFloorY,
+    bool standingSpace,
+    const Eigen::AffineCompact3d& targetToStanding)
+{
+    if (vertices.size() < 3) {
+        return {};
+    }
+    if (!standingSpace && !BoundaryTransformReady()) {
+        return {};
+    }
+
+    const auto standingVertices = standingSpace
+        ? vertices
+        : BoundaryVerticesToStanding(vertices, targetToStanding);
+    const double standingFloor = standingSpace
+        ? authoringFloorY
+        : wkopenvr::boundary::TransformHeightToStandingUniverse(
+            vertices,
+            authoringFloorY,
+            targetToStanding);
+    const double standingCeiling = standingSpace
+        ? authoringFloorY + kAutoBoundaryWallHeightMeters
+        : wkopenvr::boundary::TransformHeightToStandingUniverse(
+            vertices,
+            authoringFloorY + kAutoBoundaryWallHeightMeters,
+            targetToStanding);
+    return wkopenvr::boundary::BuildChaperoneOutput(
+        standingVertices,
+        standingFloor,
+        standingCeiling);
+}
+
+void DrawNativePreflightStatus(
+    const std::vector<BoundaryVertex>& vertices,
+    double authoringFloorY,
+    bool standingSpace,
+    const Eigen::AffineCompact3d& targetToStanding)
+{
+    if (vertices.size() < 3) return;
+    const auto output = NativePreflightForAuthoringVertices(
+        vertices,
+        authoringFloorY,
+        standingSpace,
+        targetToStanding);
+    const auto& pal = openvr_pair::overlay::ui::GetPalette();
+    if (output.ready()) {
+        ImGui::TextColored(
+            pal.statusOk,
+            "SteamVR native eligible: origin inside, play area %.2f x %.2f m",
+            output.diagnostics.playAreaX,
+            output.diagnostics.playAreaZ);
+    } else if (output.status == wkopenvr::boundary::ChaperoneOutputStatus::VisualOnlyNoStandingOrigin) {
+        ImGui::TextColored(
+            pal.statusWarn,
+            "Local boundary OK; SteamVR native origin is %.2f m outside the drawn area.",
+            output.diagnostics.originDistanceMeters);
+    } else {
+        ImGui::TextColored(
+            pal.statusWarn,
+            "SteamVR native pending: %s",
+            output.reason ? output.reason : "not ready");
+    }
+}
+
+void DrawBoundaryPreviewStatus()
+{
+    const auto status = wkopenvr::boundary::GetBoundaryPreviewStatus();
+    const auto& pal = openvr_pair::overlay::ui::GetPalette();
+    const ImVec4 color = status.uploadsDisabled
+        ? pal.statusWarn
+        : (status.visible ? pal.statusOk : pal.statusIdle);
+    ImGui::TextColored(
+        color,
+        "HMD preview: %s%s",
+        status.uploadsDisabled ? "disabled" : (status.visible ? "visible" : "hidden"),
+        status.uploadsDisabled ? " after upload failures" : "");
+    if (status.created || status.uploadFailureCount > 0 || status.lastRasterHash != 0) {
+        ImGui::TextDisabled(
+            "Preview detail: source=%s vertices=%zu failures=%d last_error=%d/%s hash=%llu",
+            status.lastSource,
+            status.lastVertexCount,
+            status.uploadFailureCount,
+            status.lastError,
+            status.lastErrorName,
+            static_cast<unsigned long long>(status.lastRasterHash));
     }
 }
 
@@ -1347,7 +1659,12 @@ void DrawBoundarySection(ImVec2 panelSize) {
                     floor.sampleCount,
                     floor.jitterMeters * 1000.0,
                     floor.stable ? "stable" : (floor.ready ? "ready" : "settling"));
-                ImGui::TextDisabled("Apply updates WKOpenVR and requests a SteamVR floor correction once.");
+                ImGui::TextDisabled("Recent drift %.0f mm. Apply updates WKOpenVR's local floor.",
+                    floor.recentDriftMeters * 1000.0);
+            }
+            ImGui::Checkbox("Also try SteamVR floor correction", &s_moveSteamVrFloorOnApply);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Off keeps the floor local to WKOpenVR. On tries SteamVR once and only treats it as native if live pose verification passes.");
             }
             if (!floor.valid || !floor.stable) ImGui::BeginDisabled();
             if (ImGui::Button("Apply floor")) {
@@ -1370,6 +1687,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 RepushActiveBoundaryAfterEdit();
                 s_floorCapture.Reset();
                 s_boundaryError.clear();
+                s_boundaryNativeStatus.clear();
                 HideBoundaryPreviewOverlay();
             }
         } else {
@@ -1378,6 +1696,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 s_floorCapture.Begin(CalCtx.boundary.floorY, CalCtx.boundary.ceilingY);
                 ++s_floorSessionId;
                 s_boundaryError.clear();
+                s_boundaryNativeStatus.clear();
                 HideBoundaryPreviewOverlay();
                 Metrics::WriteLogAnnotation("[boundary-floor] preview started");
             }
@@ -1434,6 +1753,7 @@ void DrawBoundarySection(ImVec2 panelSize) {
             ImGui::TextDisabled("Preview maps floor to SteamVR Y %.2f m",
                 BoundaryHeightToStanding(CalCtx.boundary.vertices, CalCtx.boundary.floorY));
         }
+        DrawBoundaryPreviewStatus();
 
         ImGui::Spacing();
 
@@ -1448,7 +1768,6 @@ void DrawBoundarySection(ImVec2 panelSize) {
             if (s_floorCapture.active() || !controllerReady) ImGui::BeginDisabled();
             if (ImGui::Button("Draw boundary")) {
                 StartBoundaryCapture(selectedController);
-                HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
             if (s_floorCapture.active() || !controllerReady) ImGui::EndDisabled();
@@ -1459,7 +1778,6 @@ void DrawBoundarySection(ImVec2 panelSize) {
             if (s_floorCapture.active() || !controllerReady) ImGui::BeginDisabled();
             if (ImGui::Button("Draw new boundary")) {
                 StartBoundaryCapture(selectedController);
-                HideBoundaryPreviewOverlay();
                 s_boundaryError.clear();
             }
             if (s_floorCapture.active() || !controllerReady) ImGui::EndDisabled();
@@ -1480,6 +1798,11 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 CalCtx.boundary.enabled ? "applied" : "not applied");
 
             DrawPolygonPreview(CalCtx.boundary.vertices);
+            DrawNativePreflightStatus(
+                CalCtx.boundary.vertices,
+                CalCtx.boundary.floorY,
+                CalCtx.boundary.standingSpace,
+                BoundaryTargetToStandingTransform());
         }
     } else if (state == wkopenvr::boundary::CaptureState::Active) {
         const bool closePreview = BoundaryLoopNearlyClosed(s_capture.vertices());
@@ -1503,6 +1826,22 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 (int)s_capture.rawVertexCount());
         }
         DrawPolygonPreview(s_capture.vertices(), closePreview, true);
+        wkopenvr::boundary::FloorHitPreview statusCursor;
+        const wkopenvr::boundary::FloorHitPreview* statusCursorPtr = nullptr;
+        if (s_smoothedPreviewCursorValid) {
+            statusCursor.valid = true;
+            statusCursor.hit = s_smoothedPreviewCursor;
+            statusCursor.rayName = "controllerXZ";
+            statusCursorPtr = &statusCursor;
+        }
+        DrawNativePreflightStatus(
+            BoundaryPreviewPathWithCursor(
+                s_capture.vertices(),
+                statusCursorPtr),
+            s_captureFloorY,
+            s_captureUsesStandingSpace,
+            s_capturePreviewTransformValid ? s_capturePreviewTransform : BoundaryTargetToStandingTransform());
+        DrawBoundaryPreviewStatus();
         ImGui::Spacing();
         const bool canApply = enoughPoints;
         if (!canApply) ImGui::BeginDisabled();
@@ -1540,6 +1879,10 @@ void DrawBoundarySection(ImVec2 panelSize) {
     if (!s_boundaryError.empty()) {
         ImGui::Spacing();
         openvr_pair::overlay::ui::DrawErrorBanner("Boundary error", s_boundaryError.c_str());
+    }
+    if (!s_boundaryNativeStatus.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(pal.statusWarn, "%s", s_boundaryNativeStatus.c_str());
     }
 
     }

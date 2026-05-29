@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -856,6 +857,61 @@ static bool PointInsideOrOnPolygonXZ(
     return inside;
 }
 
+static double DistancePointToSegmentXZ(
+    double px,
+    double pz,
+    const BoundaryVertex& a,
+    const BoundaryVertex& b)
+{
+    const double abx = b.x - a.x;
+    const double abz = b.z - a.z;
+    const double lenSq = abx * abx + abz * abz;
+    if (lenSq <= 1e-12) {
+        const double dx = px - a.x;
+        const double dz = pz - a.z;
+        return std::sqrt(dx * dx + dz * dz);
+    }
+
+    const double t = std::clamp(
+        ((px - a.x) * abx + (pz - a.z) * abz) / lenSq,
+        0.0,
+        1.0);
+    const double cx = a.x + abx * t;
+    const double cz = a.z + abz * t;
+    const double dx = px - cx;
+    const double dz = pz - cz;
+    return std::sqrt(dx * dx + dz * dz);
+}
+
+static double DistancePointToPolygonXZ(
+    const std::vector<BoundaryVertex>& vertices,
+    double x,
+    double z)
+{
+    if (vertices.empty()) return 0.0;
+    double best = std::numeric_limits<double>::infinity();
+    for (size_t i = 0, j = vertices.size() - 1; i < vertices.size(); j = i++) {
+        best = std::min(best, DistancePointToSegmentXZ(x, z, vertices[j], vertices[i]));
+    }
+    return std::isfinite(best) ? best : 0.0;
+}
+
+static void FillPreflightCentroid(
+    const std::vector<BoundaryVertex>& vertices,
+    ChaperonePreflightDiagnostics& diagnostics)
+{
+    if (vertices.empty()) return;
+    double sumX = 0.0;
+    double sumZ = 0.0;
+    for (const auto& v : vertices) {
+        sumX += v.x;
+        sumZ += v.z;
+    }
+    const double n = static_cast<double>(vertices.size());
+    diagnostics.centroidX = sumX / n;
+    diagnostics.centroidZ = sumZ / n;
+}
+
 static bool CenteredRectangleInsidePolygonXZ(
     const std::vector<BoundaryVertex>& vertices,
     double sizeX,
@@ -928,32 +984,46 @@ ChaperoneOutput BuildChaperoneOutput(
     double ceilingY)
 {
     ChaperoneWorkingSet out;
+    ChaperonePreflightDiagnostics diagnostics;
+    diagnostics.inputVertexCount = standingUniverseVertices.size();
+    diagnostics.floorY = floorY;
+    diagnostics.ceilingY = ceilingY;
     std::vector<BoundaryVertex> vertices =
         NormalizeWorkingSetVertices(standingUniverseVertices);
+    diagnostics.normalizedVertexCount = vertices.size();
+    FillPreflightCentroid(vertices, diagnostics);
     if (vertices.size() < 3 ||
         !std::isfinite(floorY) ||
         !std::isfinite(ceilingY) ||
         ceilingY <= floorY) {
-        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_geometry" };
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_geometry", diagnostics };
     }
 
-    if (std::fabs(SignedAreaVerticesXZ(vertices)) < 0.05) {
-        return { ChaperoneOutputStatus::InvalidGeometry, out, "small_or_degenerate_area" };
+    diagnostics.areaMetersSq = std::fabs(SignedAreaVerticesXZ(vertices));
+    if (diagnostics.areaMetersSq < 0.05) {
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "small_or_degenerate_area", diagnostics };
     }
 
     const PolygonBounds bounds = ComputePolygonBoundsXZ(vertices);
+    diagnostics.bounds = bounds;
     const double spanX = bounds.xMax - bounds.xMin;
     const double spanZ = bounds.zMax - bounds.zMin;
     if (!std::isfinite(spanX) || !std::isfinite(spanZ) ||
         spanX <= 0.0 || spanZ <= 0.0) {
-        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_bounds" };
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "invalid_bounds", diagnostics };
     }
-    if (!PointInsideOrOnPolygonXZ(vertices, 0.0, 0.0)) {
-        return { ChaperoneOutputStatus::VisualOnlyNoStandingOrigin, out, "standing_origin_outside_polygon" };
+    diagnostics.originInsidePolygon = PointInsideOrOnPolygonXZ(vertices, 0.0, 0.0);
+    diagnostics.originDistanceMeters = diagnostics.originInsidePolygon
+        ? 0.0
+        : DistancePointToPolygonXZ(vertices, 0.0, 0.0);
+    if (!diagnostics.originInsidePolygon) {
+        return { ChaperoneOutputStatus::VisualOnlyNoStandingOrigin, out, "standing_origin_outside_polygon", diagnostics };
     }
     if (!ComputeCenteredPlayAreaSize(vertices, bounds, out.playAreaX, out.playAreaZ)) {
-        return { ChaperoneOutputStatus::InvalidGeometry, out, "centered_play_area_failed" };
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "centered_play_area_failed", diagnostics };
     }
+    diagnostics.playAreaX = out.playAreaX;
+    diagnostics.playAreaZ = out.playAreaZ;
 
     out.perimeter.reserve(vertices.size());
     for (const auto& v : vertices) {
@@ -965,9 +1035,9 @@ ChaperoneOutput BuildChaperoneOutput(
     out.collisionBounds = BuildWallQuads(vertices, floorY, ceilingY);
     out.valid = out.perimeter.size() >= 3 && out.collisionBounds.size() >= 3;
     if (!out.valid) {
-        return { ChaperoneOutputStatus::InvalidGeometry, out, "working_set_empty" };
+        return { ChaperoneOutputStatus::InvalidGeometry, out, "working_set_empty", diagnostics };
     }
-    return { ChaperoneOutputStatus::Ready, out, "ready" };
+    return { ChaperoneOutputStatus::Ready, out, "ready", diagnostics };
 }
 
 static bool SetWorkingBoundary(
