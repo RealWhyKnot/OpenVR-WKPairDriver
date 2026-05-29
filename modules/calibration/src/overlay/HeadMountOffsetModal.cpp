@@ -377,6 +377,7 @@ bool DrawOffsetModal() {
                 if (ImGui::Button("Save##hmt_save")) {
                     CalCtx.headMount.headFromTracker = s.lastResult.headFromTracker;
                     CalCtx.headMount.offsetCalibrated = true;
+                    CalCtx.NoteHeadMountOffsetChanged();
                     SaveProfile(CalCtx);
                     if (CalCtx.state == CalibrationState::Continuous) {
                         g_snapNextProfileApply = true;
@@ -542,6 +543,7 @@ void DrawOffsetInlinePanel() {
             Eigen::AngleAxisd(rpy(2) * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX());
         hm.headFromTracker.linear()      = q.toRotationMatrix();
         hm.headFromTracker.translation() = t * 0.01; // cm -> m
+        CalCtx.NoteHeadMountOffsetChanged();
 
         // Drive preview while sliders are active.
         bool trackerOk = hm.deviceID >= 0

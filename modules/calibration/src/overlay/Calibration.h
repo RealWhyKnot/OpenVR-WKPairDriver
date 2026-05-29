@@ -145,6 +145,12 @@ enum class HeadMountMode : uint8_t {
 	DriverSynth  = 3,   // dev-only
 };
 
+enum class HeadMountSampleSource : uint8_t {
+	Unknown = 0,
+	PhysicalTracker,
+	HeadProxy,
+};
+
 // Identity and calibration for a head-mounted tracker (e.g. a Vive tracker
 // zip-tied to a Quest headset). headFromTracker is the rigid offset from the
 // tracker's local frame to the HMD's local frame, solved by the offset
@@ -157,6 +163,7 @@ struct HeadMountConfig {
 	Eigen::AffineCompact3d headFromTracker = Eigen::AffineCompact3d::Identity();
 	bool hideTracker = true;
 	bool offsetCalibrated = false;
+	bool autoCorrectOffset = true;
 	wkopenvr::headmount::DriverSynthTimingConfig driverSynthTiming;
 	// Runtime-resolved OpenVR device ID; not persisted. -1 means unresolved.
 	// Set each AssignTargets() call by matching trackerSerial + trackerTrackingSystem.
@@ -227,6 +234,17 @@ struct CalibrationContext
 
 	// Head-mounted tracker configuration (Quest + lighthouse hybrid).
 	HeadMountConfig headMount;
+	uint32_t headMountOffsetVersion = 0;
+	HeadMountSampleSource headMountLastSampleSource = HeadMountSampleSource::Unknown;
+	HeadMountMode headMountLastSourceMode = HeadMountMode::Off;
+	uint32_t headMountLastSourceOffsetVersion = 0;
+	int32_t headMountLastSourceDeviceID = -2;
+	std::string headMountLastSourceTargetSerial;
+	std::string headMountLastSourceTargetSystem;
+	bool headMountSourceFingerprintValid = false;
+	bool headMountNeedsFreshRelativePose = false;
+	double headMountLastSourceResetTime = -1e9;
+	uint64_t driverSynthFallbackTotal = 0;
 	// Safety boundary: captured chaperone outline + floor/ceiling for re-push.
 	BoundaryConfig  boundary;
 	double timeLastTick = 0, timeLastScan = 0, timeLastAssign = 0;
@@ -570,6 +588,13 @@ struct CalibrationContext
 		ResetConfig();
 	}
 
+	void NoteHeadMountOffsetChanged() {
+		++headMountOffsetVersion;
+		if (headMountOffsetVersion == 0) {
+			headMountOffsetVersion = 1;
+		}
+	}
+
 	void ResetConfig() {
 		alignmentSpeedParams.thr_rot_tiny = 0.49f * (EIGEN_PI / 180.0f);
 		alignmentSpeedParams.thr_rot_small = 0.5f * (EIGEN_PI / 180.0f);
@@ -701,6 +726,16 @@ struct CalibrationContext
 		continuousCalibrationOffset = Eigen::Vector3d::Zero();
 		continuousStartSnapshot = {};
 		lastAcceptedContinuousSnapshot = {};
+		headMountSourceFingerprintValid = false;
+		headMountLastSampleSource = HeadMountSampleSource::Unknown;
+		headMountLastSourceMode = HeadMountMode::Off;
+		headMountLastSourceOffsetVersion = headMountOffsetVersion;
+		headMountLastSourceDeviceID = -2;
+		headMountLastSourceTargetSerial.clear();
+		headMountLastSourceTargetSystem.clear();
+		headMountNeedsFreshRelativePose = false;
+		headMountLastSourceResetTime = -1e9;
+		driverSynthFallbackTotal = 0;
 	}
 
 	void ClearRuntimeCalibrationForRecovery()
@@ -712,6 +747,7 @@ struct CalibrationContext
 		calibratedTranslation = Eigen::Vector3d::Zero();
 		calibratedRotation = Eigen::Vector3d::Zero();
 		lastAcceptedContinuousSnapshot = {};
+		headMountNeedsFreshRelativePose = false;
 	}
 
 	CalibrationProfileSnapshot CaptureProfileSnapshot() const

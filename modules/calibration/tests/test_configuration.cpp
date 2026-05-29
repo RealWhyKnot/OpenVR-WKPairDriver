@@ -582,6 +582,8 @@ TEST(ConfigurationTest, MigrateV3ProfileLoadsWithDisabledV4Sections) {
         << "v3 profile must default head_mount.trackerSerial to empty";
     EXPECT_FALSE(ctx.headMount.offsetCalibrated)
         << "v3 profile must default head_mount.offsetCalibrated to false";
+    EXPECT_TRUE(ctx.headMount.autoCorrectOffset)
+        << "v3 profile must default head_mount.autoCorrectOffset to true";
     EXPECT_TRUE(wkopenvr::headmount::DriverSynthTimingIsDefault(
         ctx.headMount.driverSynthTiming))
         << "v3 profile must default DriverSynth timing";
@@ -604,6 +606,7 @@ TEST(ConfigurationTest, V4SectionsRoundTrip) {
     src.headMount.trackerTrackingSystem = "lighthouse";
     src.headMount.hideTracker = false;
     src.headMount.offsetCalibrated = true;
+    src.headMount.autoCorrectOffset = false;
     src.headMount.driverSynthTiming.staleLimitMs = 120;
     src.headMount.driverSynthTiming.graceHoldMs = 1400;
     src.headMount.driverSynthTiming.blendToFallbackMs = 900;
@@ -636,6 +639,7 @@ TEST(ConfigurationTest, V4SectionsRoundTrip) {
     EXPECT_EQ(dst.headMount.trackerTrackingSystem, "lighthouse");
     EXPECT_FALSE(dst.headMount.hideTracker);
     EXPECT_TRUE(dst.headMount.offsetCalibrated);
+    EXPECT_FALSE(dst.headMount.autoCorrectOffset);
     EXPECT_EQ(dst.headMount.driverSynthTiming.staleLimitMs, 120);
     EXPECT_EQ(dst.headMount.driverSynthTiming.graceHoldMs, 1400);
     EXPECT_EQ(dst.headMount.driverSynthTiming.blendToFallbackMs, 900);
@@ -682,4 +686,27 @@ TEST(ConfigurationTest, V4SectionsSkippedWhenDefault) {
         << "head_mount must be omitted when at default (Off, no serial)";
     EXPECT_EQ(json.find("\"boundary\""),    std::string::npos)
         << "boundary must be omitted when disabled and no vertices captured";
+}
+
+TEST(ConfigurationTest, HeadMountAutoCorrectDisabledPersistsWhenOtherwiseDefault) {
+    CalibrationContext src;
+    src.referenceTrackingSystem = "lighthouse";
+    src.targetTrackingSystem = "oculus";
+    src.validProfile = true;
+    src.headMount.autoCorrectOffset = false;
+
+    std::stringstream io;
+    WriteProfile(src, io);
+    const std::string json = io.str();
+    EXPECT_NE(json.find("\"head_mount\""), std::string::npos);
+    EXPECT_NE(json.find("\"auto_correct_offset\""), std::string::npos);
+
+    CalibrationContext dst;
+    std::stringstream in(json);
+    ParseProfile(dst, in);
+
+    EXPECT_FALSE(dst.headMount.autoCorrectOffset);
+    EXPECT_EQ(dst.headMount.mode, HeadMountMode::Off);
+    EXPECT_TRUE(dst.headMount.trackerSerial.empty());
+    EXPECT_FALSE(dst.headMount.offsetCalibrated);
 }

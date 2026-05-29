@@ -63,6 +63,16 @@
 //   3. Keep the load path tolerant of missing keys for any new field.
 static const int kProfileSchemaVersion = 5;
 
+static const char* HeadMountSampleSourceName(HeadMountSampleSource source)
+{
+	switch (source) {
+	case HeadMountSampleSource::PhysicalTracker: return "physical_tracker";
+	case HeadMountSampleSource::HeadProxy: return "head_proxy";
+	case HeadMountSampleSource::Unknown:
+	default: return "unknown";
+	}
+}
+
 // Set to true when a chaperone geometry array with a non-multiple-of-12 length
 // is encountered during ParseProfile. The UI reads this to show a banner
 // ("corrupted size -- auto-apply disabled") rather than silently doing nothing.
@@ -295,6 +305,8 @@ static void LoadHeadMount(HeadMountConfig& hm, picojson::value& value) {
 		hm.hideTracker = obj["hide_tracker"].get<bool>();
 	if (obj["offset_calibrated"].is<bool>())
 		hm.offsetCalibrated = obj["offset_calibrated"].get<bool>();
+	if (obj["auto_correct_offset"].is<bool>())
+		hm.autoCorrectOffset = obj["auto_correct_offset"].get<bool>();
 	if (obj["driver_synth_stale_limit_ms"].is<double>())
 		hm.driverSynthTiming.staleLimitMs =
 			(int)obj["driver_synth_stale_limit_ms"].get<double>();
@@ -351,8 +363,10 @@ static picojson::object SaveHeadMount(const HeadMountConfig& hm) {
 	obj["tracker_tracking_system"].set<std::string>(hm.trackerTrackingSystem);
 	bool hide = hm.hideTracker;
 	bool offcal = hm.offsetCalibrated;
+	bool autoCorrect = hm.autoCorrectOffset;
 	obj["hide_tracker"].set<bool>(hide);
 	obj["offset_calibrated"].set<bool>(offcal);
+	obj["auto_correct_offset"].set<bool>(autoCorrect);
 	const auto timing =
 		wkopenvr::headmount::ClampDriverSynthTimingConfig(hm.driverSynthTiming);
 	double staleMs = (double)timing.staleLimitMs;
@@ -971,6 +985,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	if (ctx.headMount.mode != HeadMountMode::Off
 		|| !ctx.headMount.trackerSerial.empty()
 		|| ctx.headMount.offsetCalibrated
+		|| !ctx.headMount.autoCorrectOffset
 		|| !wkopenvr::headmount::DriverSynthTimingIsDefault(
 			ctx.headMount.driverSynthTiming)) {
 		profile["head_mount"].set<picojson::object>(SaveHeadMount(ctx.headMount));
@@ -1232,13 +1247,23 @@ void SaveProfile(CalibrationContext &ctx)
 	constexpr double kProfileSaveDeltaWarnCm = 5.0;
 	if (s_lastSavedTransMagCm > 0.0
 		&& std::abs(transMagCm - s_lastSavedTransMagCm) > kProfileSaveDeltaWarnCm) {
-		char anomBuf[280];
+		char anomBuf[640];
 		snprintf(anomBuf, sizeof anomBuf,
 			"[profile-save][anomaly] trans_mag_cm=%.2f prev_trans_mag_cm=%.2f"
-			" delta_cm=%.2f bytes=%zu valid=%d (large_delta_warning)",
+			" delta_cm=%.2f bytes=%zu valid=%d mode=%d source=%s"
+			" offset_version=%u relPosCal=%d needsFreshRelPose=%d"
+			" head_tracker_serial='%s' target_serial='%s'"
+			" (large_delta_warning)",
 			transMagCm, s_lastSavedTransMagCm,
 			std::abs(transMagCm - s_lastSavedTransMagCm),
-			serialized.size(), (int)ctx.validProfile);
+			serialized.size(), (int)ctx.validProfile,
+			(int)ctx.headMount.mode,
+			HeadMountSampleSourceName(ctx.headMountLastSampleSource),
+			(unsigned)ctx.headMountOffsetVersion,
+			(int)ctx.relativePosCalibrated,
+			(int)ctx.headMountNeedsFreshRelativePose,
+			ctx.headMount.trackerSerial.c_str(),
+			ctx.targetStandby.serial.c_str());
 		Metrics::WriteLogAnnotation(anomBuf);
 	}
 	s_lastSavedTransMagCm = transMagCm;

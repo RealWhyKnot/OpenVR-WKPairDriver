@@ -25,9 +25,7 @@ extern CalibrationContext CalCtx;
 void SaveProfile(CalibrationContext& ctx);
 std::string LabelString(const StandbyDevice& device);
 
-namespace {
-
-void SendHeadMountConfig()
+void CCal_SendHeadMountConfig()
 {
 	const auto& hm = CalCtx.headMount;
 	protocol::Request req(protocol::RequestSetHeadMountConfig);
@@ -75,6 +73,8 @@ void SendHeadMountConfig()
 	}
 }
 
+namespace {
+
 bool s_offsetSlidersOpen = false;
 
 #if WKOPENVR_BUILD_IS_DEV
@@ -108,7 +108,7 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 	const bool bindingChanged = wkopenvr::headmount::BindHeadMountToContinuousTarget(CalCtx);
 	if (bindingChanged) {
 		SaveProfile(CalCtx);
-		SendHeadMountConfig();
+		CCal_SendHeadMountConfig();
 	}
 	const bool hasContinuousTarget = wkopenvr::headmount::HasContinuousTargetIdentity(CalCtx);
 
@@ -227,7 +227,7 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 				if (hm.mode != opt.value) {
 					hm.mode = opt.value;
 					SaveProfile(CalCtx);
-					SendHeadMountConfig();
+					CCal_SendHeadMountConfig();
 				}
 			}
 			ImGui::PopID();
@@ -246,7 +246,7 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 		if (ImGui::Checkbox("Hide this tracker from games", &hm.hideTracker)) {
 			CalCtx.quashTargetInContinuous = hm.hideTracker;
 			SaveProfile(CalCtx);
-			SendHeadMountConfig();
+			CCal_SendHeadMountConfig();
 		}
 		ds.AttachReasonTooltip();
 	}
@@ -254,6 +254,16 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 		ImGui::SetTooltip(
 			"Suppress the head-tracker's pose in OpenVR so it doesn't appear as a\n"
 			"floating tracker in-headset. The continuous calibration math still uses its pose internally.");
+	}
+
+	ImGui::Spacing();
+	if (ImGui::Checkbox("Auto-correct headset tracker offset", &hm.autoCorrectOffset)) {
+		SaveProfile(CalCtx);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Let continuous calibration update the saved tracker-to-headset offset after multiple stable checks.\n"
+			"When disabled, the same checks are logged without changing the saved offset.");
 	}
 
 #if WKOPENVR_BUILD_IS_DEV
@@ -306,13 +316,13 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 			if (changed) {
 				hm.driverSynthTiming = timing;
 				SaveProfile(CalCtx);
-				SendHeadMountConfig();
+				CCal_SendHeadMountConfig();
 			}
 		}
 		if (ImGui::Button("Reset DriverSynth timing")) {
 			hm.driverSynthTiming = {};
 			SaveProfile(CalCtx);
-			SendHeadMountConfig();
+			CCal_SendHeadMountConfig();
 		}
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Restore the default DriverSynth fallback timing values.");

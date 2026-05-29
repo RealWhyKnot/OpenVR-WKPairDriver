@@ -84,6 +84,7 @@ TEST(HeadMountPanelLogic, DefaultConfigHasOffModeAndNoOffset) {
     HeadMountConfig hm;
     EXPECT_EQ(HeadMountMode::Off, hm.mode);
     EXPECT_FALSE(hm.offsetCalibrated);
+    EXPECT_TRUE(hm.autoCorrectOffset);
     EXPECT_TRUE(hm.trackerSerial.empty());
     EXPECT_EQ(-1, hm.deviceID);
     EXPECT_TRUE(wkopenvr::headmount::DriverSynthTimingIsDefault(
@@ -243,11 +244,13 @@ TEST(HeadMountPanelLogic, RebindingDifferentTargetClearsOffset) {
     ctx.headMount.trackerSerial = "LHR-OLD";
     ctx.headMount.offsetCalibrated = true;
     ctx.headMount.headFromTracker.translation() = Eigen::Vector3d(0.10, 0.20, 0.30);
+    const uint32_t beforeVersion = ctx.headMountOffsetVersion;
 
     EXPECT_TRUE(wkopenvr::headmount::BindHeadMountToContinuousTarget(ctx));
     EXPECT_EQ(ctx.headMount.trackerSerial, "LHR-NEW");
     EXPECT_FALSE(ctx.headMount.offsetCalibrated);
     EXPECT_TRUE(ctx.headMount.headFromTracker.isApprox(Eigen::AffineCompact3d::Identity()));
+    EXPECT_GT(ctx.headMountOffsetVersion, beforeVersion);
 }
 
 TEST(HeadMountPanelLogic, RebindingSameTargetPreservesOffset) {
@@ -262,10 +265,12 @@ TEST(HeadMountPanelLogic, RebindingSameTargetPreservesOffset) {
     ctx.headMount.trackerSerial = "LHR-HEAD";
     ctx.headMount.offsetCalibrated = true;
     ctx.headMount.headFromTracker.translation() = Eigen::Vector3d(0.10, 0.20, 0.30);
+    const uint32_t beforeVersion = ctx.headMountOffsetVersion;
 
     EXPECT_TRUE(wkopenvr::headmount::BindHeadMountToContinuousTarget(ctx));
     EXPECT_TRUE(ctx.headMount.offsetCalibrated);
     EXPECT_NEAR(ctx.headMount.headFromTracker.translation().x(), 0.10, 1e-9);
     EXPECT_NEAR(ctx.headMount.headFromTracker.translation().y(), 0.20, 1e-9);
     EXPECT_NEAR(ctx.headMount.headFromTracker.translation().z(), 0.30, 1e-9);
+    EXPECT_EQ(ctx.headMountOffsetVersion, beforeVersion);
 }
