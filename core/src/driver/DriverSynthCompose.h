@@ -6,11 +6,8 @@
 // tests can exercise the compose/gate logic without a live OpenVR runtime.
 // All functions are pure: no static state, no global CalCtx access, no vr::*
 // calls beyond struct field access.
-//
-// Only compiled into dev builds (WKOPENVR_BUILD_IS_DEV == 1); the synthesis
-// branch in the hook is gated by the same macro. Including this header in a
-// release build is harmless -- the structs and inline functions compile away
-// -- but the driver never calls into this path.
+// The driver calls these helpers in all build channels; tests include the
+// same header directly so the compose and blend gates stay covered.
 
 #include <algorithm>
 #include <chrono>

@@ -80,3 +80,17 @@ TEST(HeadMountVisibility, ContinuousTargetHideOnlyRunsInContinuousState)
     EXPECT_FALSE(hm::ShouldQuashPublishedTrackerPose(
         ctx, 12u, "LHR-TARGET", "lighthouse"));
 }
+
+TEST(HeadMountVisibility, FloorOffsetAppliesOnlyUnderDriverSynth)
+{
+    // The offset only shifts content coherently when DriverSynth is repositioning
+    // the rendered headset. Every other mode must treat it as zero.
+    EXPECT_DOUBLE_EQ(
+        hm::EffectiveFloorOffsetMetersY(HeadMountMode::DriverSynth, -0.12), -0.12);
+    EXPECT_DOUBLE_EQ(
+        hm::EffectiveFloorOffsetMetersY(HeadMountMode::Off, -0.12), 0.0);
+    EXPECT_DOUBLE_EQ(
+        hm::EffectiveFloorOffsetMetersY(HeadMountMode::AutoPaired, -0.12), 0.0);
+    EXPECT_DOUBLE_EQ(
+        hm::EffectiveFloorOffsetMetersY(HeadMountMode::Corroborate, 0.34), 0.0);
+}

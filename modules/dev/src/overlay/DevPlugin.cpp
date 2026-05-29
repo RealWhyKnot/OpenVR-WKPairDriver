@@ -46,7 +46,8 @@ void DevPlugin::DrawTab(openvr_pair::overlay::ShellContext &context)
 		context,
 		developmentModules,
 		"dev_modules",
-		"No development modules were compiled into this build.");
+		"No development modules were compiled into this build.",
+		{ true });
 
 	ImGui::Spacing();
 	ImGui::Separator();

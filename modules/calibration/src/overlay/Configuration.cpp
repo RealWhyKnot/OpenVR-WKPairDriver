@@ -604,6 +604,12 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.calibratedScale = 1.0;
 	}
 
+	if (obj["floor_offset_meters_y"].is<double>()) {
+		ctx.floorOffsetMetersY = obj["floor_offset_meters_y"].get<double>();
+	} else {
+		ctx.floorOffsetMetersY = 0.0;
+	}
+
 	auto readSpeed = [](const picojson::value& v,
 	                    CalibrationContext::Speed fallback,
 	                    bool allowAuto) -> CalibrationContext::Speed {
@@ -847,6 +853,10 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["y"].set<double>(ctx.calibratedTranslation(1));
 	profile["z"].set<double>(ctx.calibratedTranslation(2));
 	profile["scale"].set<double>(ctx.calibratedScale);
+	if (ctx.floorOffsetMetersY != 0.0) {
+		double floorOffset = ctx.floorOffsetMetersY;
+		profile["floor_offset_meters_y"].set<double>(floorOffset);
+	}
 	WriteStandby(ctx.referenceStandby, profile["reference_device"]);
 	WriteStandby(ctx.targetStandby, profile["target_device"]);
 	profile["continuous_calibration_target_offset_x"].set<double>(ctx.continuousCalibrationOffset(0));

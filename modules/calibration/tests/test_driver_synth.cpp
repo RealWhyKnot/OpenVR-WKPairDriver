@@ -1,7 +1,7 @@
 // Unit tests for the driver-level HMD synthesis pure helpers in
 // DriverSynthCompose.h. The helper is intentionally strict: when DriverSynth
 // is active, the synthesized HMD pose is driven by the selected tracker
-// snapshot and does not depend on the upstream Quest HMD pose.
+// snapshot and does not depend on the upstream headset pose.
 
 #include "DriverSynthCompose.h"
 

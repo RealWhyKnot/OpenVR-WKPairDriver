@@ -73,6 +73,7 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     src.oneShotCalibrationSpeed = CalibrationContext::SLOW; // non-default; must round-trip
     src.continuousCalibrationSpeed = CalibrationContext::VERY_SLOW;
     src.lockRelativePositionMode = CalibrationContext::LockMode::ON;
+    src.floorOffsetMetersY = -0.4375; // non-default; must round-trip
     src.validProfile = true;
 
     std::stringstream io;
@@ -94,6 +95,7 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     EXPECT_EQ(dst.oneShotCalibrationSpeed, CalibrationContext::SLOW);
     EXPECT_EQ(dst.continuousCalibrationSpeed, CalibrationContext::VERY_SLOW);
     EXPECT_EQ(dst.lockRelativePositionMode, CalibrationContext::LockMode::ON);
+    EXPECT_DOUBLE_EQ(dst.floorOffsetMetersY, -0.4375);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +314,8 @@ TEST(ConfigurationTest, InCodeDefaultsArePinned) {
         << "Continuous default speed is AUTO.";
     EXPECT_EQ(ctx.lockRelativePositionMode, CalibrationContext::LockMode::AUTO);
     EXPECT_DOUBLE_EQ(ctx.calibratedScale, 1.0);
+    EXPECT_DOUBLE_EQ(ctx.floorOffsetMetersY, 0.0)
+        << "Floor adjustment defaults to 0 (no vertical nudge until the user sets the floor).";
 
     // v24 slew-rate cap defaults. Stationary at the published lateral-drift
     // detection threshold (~0.5 mm/sec); moving 20x faster so motion-masked

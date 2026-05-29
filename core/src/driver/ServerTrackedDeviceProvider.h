@@ -71,7 +71,7 @@ public:
 		alignmentSpeedParams = params;
 	}
 	// v25: head-mount tracker config from the overlay. Caches state used by
-	// the DriverSynth branch in HandleDevicePoseUpdated (dev builds only).
+	// the DriverSynth branch in HandleDevicePoseUpdated.
 	void SetHeadMountConfig(const protocol::SetHeadMountConfig &cfg);
 	bool HandleIpcRequest(uint32_t featureMask, const protocol::Request &request, protocol::Response &response);
 	void OnGetGenericInterface(const char *pchInterface, void *iface);
@@ -349,7 +349,6 @@ private:
 	// HeadMountDriverState mirrors the wire payload but uses fixed-size buffers
 	// that are trivially copyable; no std::string so the mutex-guarded copy
 	// does not allocate.
-#if WKOPENVR_BUILD_IS_DEV
 	struct HeadMountDriverState {
 		int     mode          = 0;      // HeadMountMode value; 3 = DriverSynth
 		int32_t deviceId      = -1;     // -1 = unresolved
@@ -375,8 +374,6 @@ private:
 	driver_synth::TrackerSnapshot    m_trackerSnap;
 	driver_synth::SourceBlendState   m_driverSynthBlendState;
 	std::atomic<bool>                m_driverSynthBlendReset{false};
-
-#endif // WKOPENVR_BUILD_IS_DEV
 
 	// Finger-smoothing config packed into an atomic uint64_t. Single-writer
 	// (IPC thread, on user UI input -- rare) / many-reader (skeletal hook

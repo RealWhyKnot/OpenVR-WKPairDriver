@@ -46,7 +46,8 @@ public:
 
 inline bool ShouldShowInModulesTab(FeaturePluginChannel channel)
 {
-	return channel == FeaturePluginChannel::Release;
+	return channel == FeaturePluginChannel::Release
+		|| channel == FeaturePluginChannel::Development;
 }
 
 inline bool ShouldShowInModulesTab(const FeaturePlugin &plugin)

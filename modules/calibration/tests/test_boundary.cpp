@@ -1267,6 +1267,32 @@ TEST(SpatialFrameworkTest, RasterCanRenderMultipleCommands) {
     EXPECT_GT(CountAlphaPixels(raster), 0u);
 }
 
+TEST(BoundaryPreviewTest, PerVertexDotsAddCoverageToTheDrawnPath) {
+    std::vector<BoundaryVertex> verts = {
+        { -1.0, 0.0, -1.0 },
+        {  0.0, 0.0,  1.0 },
+        {  1.0, 0.0, -1.0 },
+    };
+
+    SpatialRenderCommand lineOnly;
+    lineOnly.kind = SpatialPrimitiveKind::PolylinePath;
+    lineOnly.standingVertices = verts;
+    lineOnly.ageFade = true;
+    lineOnly.style.a = 235;
+    lineOnly.style.strokeMeters = 0.03;
+    lineOnly.style.dotMeters = 0.0;
+
+    SpatialRenderCommand withDots = lineOnly;
+    withDots.style.dotMeters = 0.05;
+
+    const auto rasterLine = BuildBoundaryPreviewRaster({ lineOnly });
+    const auto rasterDots = BuildBoundaryPreviewRaster({ withDots });
+
+    ASSERT_TRUE(rasterDots.plane.valid);
+    // A dot at every captured point paints more pixels than the bare line.
+    EXPECT_GT(CountAlphaPixels(rasterDots), CountAlphaPixels(rasterLine));
+}
+
 TEST(ControllerSelectionTest, DefaultsToRightControllerWithValidPose) {
     using wkopenvr::controller_input::ChoosePreferredController;
     using wkopenvr::controller_input::ControllerSelectionChoice;
@@ -1550,6 +1576,48 @@ TEST(BoundaryPreviewTest, FileMarkersDownsampleWithoutDroppingEndpoints) {
     EXPECT_DOUBLE_EQ(
         markers.back().vertex.x,
         static_cast<double>(BoundaryPreviewFileMarkerLimit() + 7));
+}
+
+TEST(BoundaryPreviewTest, PersistentBoundaryCommandsAreFilledOutlineNoMarkers) {
+    const std::vector<BoundaryVertex> square = {
+        { 0.0, 0.0, 0.0 },
+        { 2.0, 0.0, 0.0 },
+        { 2.0, 0.0, 2.0 },
+        { 0.0, 0.0, 2.0 },
+    };
+
+    const auto commands = BuildPersistentBoundaryCommands(square, 0.0);
+
+    int fillCount = 0;
+    int outlineCount = 0;
+    int markerCount = 0;
+    for (const auto& command : commands) {
+        if (command.kind == SpatialPrimitiveKind::Marker) {
+            ++markerCount;
+        } else if (command.kind == SpatialPrimitiveKind::PolygonFloorRegion) {
+            ++fillCount;
+            EXPECT_TRUE(command.style.fill);
+            EXPECT_GT(command.style.fillA, 0);
+            EXPECT_TRUE(command.closeLoop);
+        } else if (command.kind == SpatialPrimitiveKind::PolylinePath) {
+            ++outlineCount;
+            EXPECT_FALSE(command.style.fill);
+            EXPECT_GT(command.style.strokeMeters, 0.0);
+            EXPECT_DOUBLE_EQ(command.style.dotMeters, 0.0);
+            EXPECT_TRUE(command.closeLoop);
+        }
+    }
+    EXPECT_EQ(fillCount, 1);
+    EXPECT_EQ(outlineCount, 1);
+    EXPECT_EQ(markerCount, 0);
+}
+
+TEST(BoundaryPreviewTest, PersistentBoundaryCommandsEmptyBelowThreeVertices) {
+    const std::vector<BoundaryVertex> twoPoints = {
+        { 0.0, 0.0, 0.0 },
+        { 1.0, 0.0, 1.0 },
+    };
+    EXPECT_TRUE(BuildPersistentBoundaryCommands(twoPoints, 0.0).empty());
 }
 
 TEST(BoundaryPreviewTest, FileMarkerTransformUsesFloorPlaneTransform) {

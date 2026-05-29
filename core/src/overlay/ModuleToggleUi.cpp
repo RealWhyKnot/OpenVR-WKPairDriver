@@ -18,7 +18,8 @@ void DrawModuleToggleTable(
 	ShellContext &context,
 	const std::vector<FeaturePlugin *> &plugins,
 	const char *tableId,
-	const char *emptyMessage)
+	const char *emptyMessage,
+	ModuleToggleTableOptions options)
 {
 	if (plugins.empty()) {
 		ui::DrawEmptyState(emptyMessage ? emptyMessage : "No modules.");
@@ -51,7 +52,28 @@ void DrawModuleToggleTable(
 
 		ui::NextColumn();
 		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted(plugin->Name());
+		const bool markDevelopment =
+			options.markDevelopmentModules
+			&& plugin->Channel() == FeaturePluginChannel::Development;
+		if (markDevelopment) {
+			const char *marker = (options.developmentMarker && options.developmentMarker[0])
+				? options.developmentMarker
+				: "(dev only)";
+			const char *tooltip = (options.developmentTooltip && options.developmentTooltip[0])
+				? options.developmentTooltip
+				: "This module is compiled into dev builds and omitted from release builds.";
+			ui::ScopedStyleColor textColor(ImGuiCol_Text, ui::StatusColor(ui::StatusTone::Info));
+			ImGui::TextUnformatted(plugin->Name());
+			bool hovered = ImGui::IsItemHovered();
+			ImGui::SameLine();
+			ImGui::TextUnformatted(marker);
+			hovered = hovered || ImGui::IsItemHovered();
+			if (hovered) {
+				ImGui::SetTooltip("%s", tooltip);
+			}
+		} else {
+			ImGui::TextUnformatted(plugin->Name());
+		}
 
 		ui::NextColumn();
 		ImGui::AlignTextToFramePadding();

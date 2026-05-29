@@ -153,6 +153,58 @@ std::vector<SpatialRenderCommand> BuildSpatialRenderCommands(
     return commands;
 }
 
+std::vector<SpatialRenderCommand> BuildPersistentBoundaryCommands(
+    const std::vector<BoundaryVertex>& standingVertices,
+    double standingFloorY)
+{
+    std::vector<SpatialPrimitive> primitives;
+    if (standingVertices.size() < 3) {
+        return BuildSpatialRenderCommands(primitives);
+    }
+
+    const double ceilingY = standingFloorY + 2.4;
+
+    // Translucent filled floor region (layer 0, drawn underneath the outline).
+    SpatialPrimitive fill;
+    fill.kind = SpatialPrimitiveKind::PolygonFloorRegion;
+    fill.space = StandingSpace();
+    fill.vertices = standingVertices;
+    fill.floorY = standingFloorY;
+    fill.ceilingY = ceilingY;
+    fill.closeLoop = true;
+    fill.style.r = 0;
+    fill.style.g = 255;
+    fill.style.b = 190;
+    fill.style.a = 0;
+    fill.style.fillA = 64;
+    fill.style.strokeMeters = 0.0;
+    fill.style.dotMeters = 0.0;
+    fill.style.fill = true;
+    fill.layer = 0;
+    primitives.push_back(std::move(fill));
+
+    // Thin bright closed outline on top of the fill. No vertex dots.
+    SpatialPrimitive outline;
+    outline.kind = SpatialPrimitiveKind::PolylinePath;
+    outline.space = StandingSpace();
+    outline.vertices = standingVertices;
+    outline.floorY = standingFloorY;
+    outline.ceilingY = ceilingY;
+    outline.closeLoop = true;
+    outline.style.r = 0;
+    outline.style.g = 255;
+    outline.style.b = 190;
+    outline.style.a = 245;
+    outline.style.fillA = 0;
+    outline.style.strokeMeters = 0.030;
+    outline.style.dotMeters = 0.0;
+    outline.style.fill = false;
+    outline.layer = 2;
+    primitives.push_back(std::move(outline));
+
+    return BuildSpatialRenderCommands(primitives);
+}
+
 uint8_t BoundaryAgeShade(size_t vertexIndex, size_t vertexCount)
 {
     if (vertexCount <= 1 || vertexIndex + 1 >= vertexCount) {

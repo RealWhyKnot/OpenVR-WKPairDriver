@@ -122,6 +122,14 @@ SpatialPrimitive TransformPrimitiveToStanding(
 std::vector<SpatialRenderCommand> BuildSpatialRenderCommands(
     const std::vector<SpatialPrimitive>& primitives);
 
+// Builds the applied/persistent boundary as a single filled floor region plus a
+// thin closed outline, both already in standing space. Emits no Marker
+// primitives, so the applied overlay reads as one clean filled shape instead of
+// a scatter of per-vertex icons. Pure so it can be unit tested without a renderer.
+std::vector<SpatialRenderCommand> BuildPersistentBoundaryCommands(
+    const std::vector<BoundaryVertex>& standingVertices,
+    double standingFloorY);
+
 // Maps a path vertex's position-in-time to a grayscale shade: the newest
 // vertex is bright white (255), older vertices fade toward mid-gray. Pure so
 // it can be unit tested without a renderer.

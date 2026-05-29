@@ -2680,7 +2680,6 @@ void CalibrationTick(double time)
 		}
 	}
 
-#if WKOPENVR_BUILD_IS_DEV
 	if (ctx.state == CalibrationState::Continuous
 		&& ctx.headMount.mode == HeadMountMode::DriverSynth)
 	{
@@ -2748,7 +2747,6 @@ void CalibrationTick(double time)
 		}
 		s_lastDriverSynthReady = synthStatus.ready;
 	}
-#endif
 
 	TickHeadMountSourceTransitionGuard(ctx, time);
 	TickHeadMountShadowOffsetEstimator(ctx, time);

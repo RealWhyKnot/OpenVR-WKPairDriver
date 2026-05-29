@@ -872,13 +872,20 @@ BoundaryPreviewRaster BuildBoundaryPreviewRaster(
         }
 
         for (size_t i = 0; i < vertices.size(); ++i) {
+            SpatialStyle vertexStyle = command.style;
+            if (command.ageFade) {
+                const uint8_t shade = BoundaryAgeShade(i, vertices.size());
+                vertexStyle.r = shade;
+                vertexStyle.g = shade;
+                vertexStyle.b = shade;
+            }
             DrawBoundaryVertex(
                 raster.rgba,
                 pixelPoints[i],
                 i == 0,
                 i + 1 == vertices.size(),
                 dotRadius,
-                command.style);
+                vertexStyle);
         }
     }
     return raster;
@@ -1048,7 +1055,8 @@ void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<SpatialRenderCommand>& commands,
     double floorY,
-    const char* source)
+    const char* source,
+    bool showFileMarkers)
 {
     auto& s = State();
     s.lastSource = source ? source : "unknown";
@@ -1072,7 +1080,11 @@ void TickBoundaryPreview(
         HideFileMarkers(source ? source : "invalid_plane");
         return;
     }
-    TickFileMarkers(commands, source ? source : "file_markers");
+    if (showFileMarkers) {
+        TickFileMarkers(commands, source ? source : "file_markers");
+    } else {
+        HideFileMarkers(source ? source : "markers_suppressed");
+    }
 
     if (!EnsureCreated()) return;
 

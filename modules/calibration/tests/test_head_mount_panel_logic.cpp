@@ -21,7 +21,7 @@ bool CorroborateRadioEnabled(bool offsetCalibrated) {
     return offsetCalibrated;
 }
 
-// Returns true when the DriverSynth radio item should be enabled (dev builds).
+// Returns true when the DriverSynth radio item should be enabled.
 // Mirrors the same gate as Corroborate (both require offsetCalibrated).
 bool DriverSynthRadioEnabled(bool offsetCalibrated) {
     return offsetCalibrated;

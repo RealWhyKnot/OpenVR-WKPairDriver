@@ -102,6 +102,7 @@ void TickBoundaryPreview(
     bool wantVisible,
     const std::vector<SpatialRenderCommand>& commands,
     double floorY,
-    const char* source = nullptr);
+    const char* source = nullptr,
+    bool showFileMarkers = true);
 
 } // namespace wkopenvr::boundary

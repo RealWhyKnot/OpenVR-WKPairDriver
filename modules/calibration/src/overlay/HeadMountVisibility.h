@@ -45,4 +45,15 @@ inline bool ShouldQuashPublishedTrackerPose(const CalibrationContext& ctx,
 		|| ShouldHideContinuousTarget(ctx, openVrId);
 }
 
+// The vertical floor offset shifts all calibrated content in world-space Y. That
+// is only coherent when the rendered headset is also being repositioned, i.e.
+// DriverSynth. With synth off the real headset owns its pose, so applying the
+// offset would slide calibrated content out of alignment. Gate the applied value
+// here; the stored offset is left untouched so it returns when synth is
+// re-enabled.
+inline double EffectiveFloorOffsetMetersY(HeadMountMode mode, double storedOffsetMetersY)
+{
+	return mode == HeadMountMode::DriverSynth ? storedOffsetMetersY : 0.0;
+}
+
 } // namespace wkopenvr::headmount

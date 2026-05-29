@@ -234,7 +234,7 @@ namespace protocol
 	// rejects the handshake rather than dispatching into a mismatched
 	// union layout.
 	//
-	// v26 (2026-05-27): SetHeadMountConfig gains dev DriverSynth timing
+	// v26 (2026-05-27): SetHeadMountConfig gains DriverSynth timing
 	// fields for tracker stale detection, grace hold, fallback blend,
 	// stable-return hold, and synth blend. The payload grows, so paired
 	// overlay+driver install is required.

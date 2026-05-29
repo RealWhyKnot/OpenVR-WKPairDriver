@@ -773,9 +773,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	shmem.SetPose(openVRID, pose);
 
-#if WKOPENVR_BUILD_IS_DEV
-	// DriverSynth: dev-only experimental path that replaces the upstream Quest
-	// HMD pose with one synthesized from the head-mounted lighthouse tracker.
+	// DriverSynth replaces the upstream HMD pose with one synthesized from the
+	// head-mounted lighthouse tracker.
 	// The tracker snapshot is written later in this function, after the normal
 	// calibration transform has been applied to a copy of the tracker pose. That
 	// makes the HMD follow the calibrated lighthouse pose instead of raw tracker
@@ -841,7 +840,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				driverSynthTiming);
 
 			// Synthesis failure no longer hard-switches the HMD pose source here.
-			// The normal HMD path below first builds the Quest fallback pose, then
+			// The normal HMD path below first builds the headset fallback pose, then
 			// the source blender crossfades between fallback and tracker synth.
 			if (!driverSynthComposeOk)
 			{
@@ -881,13 +880,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			}
 		}
 	}
-#endif // WKOPENVR_BUILD_IS_DEV
 
 	const bool quashTransition = tf.quash && !tf.prevQuash;
 	tf.prevQuash = tf.quash;
 
 	if (tf.quash) {
-#if WKOPENVR_BUILD_IS_DEV
 		if (driverSynthTrackerSlot && tf.enabled) {
 			vr::DriverPose_t synthTrackerPose = pose;
 			synthTrackerPose.vecPosition[0] *= tf.scale;
@@ -906,7 +903,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				LOG("[driver-synth] tracker snapshot skipped: hidden selected tracker has no enabled transform");
 			}
 		}
-#endif
 		openvr_pair::common::quash::ApplyQuashToPose(pose);
 		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_QUASH_APPLY);
 
@@ -954,9 +950,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
-#if WKOPENVR_BUILD_IS_DEV
 		snapshotDriverSynthTracker(pose);
-#endif
 		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_PER_ID_APPLY);
 	}
 	else
@@ -1028,14 +1022,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 
 		if (deviceSystem[openVRID].empty()) {
-#if WKOPENVR_BUILD_IS_DEV
 			if (driverSynthTrackerSlot) {
 				static std::atomic<bool> s_loggedUnknownSystem{false};
 				if (!s_loggedUnknownSystem.exchange(true, std::memory_order_relaxed)) {
 					LOG("[driver-synth] tracker snapshot skipped: tracking system unknown for selected tracker");
 				}
 			}
-#endif
 			return true; // No system known yet; nothing to fall back to.
 		}
 
@@ -1073,9 +1065,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			BlendTransform(tf, deviceWorldPose);
 			ApplyTransform(tf, pose);
-#if WKOPENVR_BUILD_IS_DEV
 			snapshotDriverSynthTracker(pose);
-#endif
 			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_FALLBACK_APPLY);
 		}
 		else if (tf.fallbackActive) {
@@ -1088,7 +1078,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 	}
 
-#if WKOPENVR_BUILD_IS_DEV
 	if (openVRID == 0 && driverSynthHmdMode) {
 		if (m_driverSynthBlendReset.exchange(false, std::memory_order_relaxed)) {
 			m_driverSynthBlendState = driver_synth::SourceBlendState{};
@@ -1112,7 +1101,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			    (long long)driverSynthTrackerAgeMs);
 		}
 	}
-#endif
 
 #if OPENVR_PAIR_HAS_PHANTOM_DRIVER
 	// Phantom-tracker pipeline. OnRealPoseObserved records the pose AFTER
@@ -1158,7 +1146,6 @@ void ServerTrackedDeviceProvider::HandleApplyRandomOffset() {
 
 void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMountConfig &cfg)
 {
-#if WKOPENVR_BUILD_IS_DEV
 	// Copy the wire payload into the cached state under its own mutex. The
 	// pose hook copies this state out (under lock, instantly) and then works
 	// on the copy without holding the lock, so the critical section here is
@@ -1234,9 +1221,6 @@ void ServerTrackedDeviceProvider::SetHeadMountConfig(const protocol::SetHeadMoun
 		m_trackerSnap = driver_synth::TrackerSnapshot{};
 		m_driverSynthBlendReset.store(true, std::memory_order_relaxed);
 	}
-#else
-	(void)cfg;
-#endif // WKOPENVR_BUILD_IS_DEV
 }
 
 void ServerTrackedDeviceProvider::SetFingerSmoothingConfig(const protocol::FingerSmoothingConfig &cfg)

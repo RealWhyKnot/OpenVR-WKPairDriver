@@ -2,6 +2,7 @@
 
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
+#include "CalibrationProfileApply.h"
 #include "Configuration.h"
 #include "HeadMountOffsetModal.h"
 #include "HeadMountOffsetPreflight.h"
@@ -24,6 +25,7 @@ extern CalibrationContext CalCtx;
 
 void SaveProfile(CalibrationContext& ctx);
 std::string LabelString(const StandbyDevice& device);
+void CCal_InvalidateBoundaryFloorSourceCache();
 
 void CCal_SendHeadMountConfig()
 {
@@ -76,6 +78,95 @@ void CCal_SendHeadMountConfig()
 namespace {
 
 bool s_offsetSlidersOpen = false;
+
+bool DrawDriverSynthTimingControl(const char* label,
+	int& value,
+	int minValue,
+	int maxValue,
+	const char* tooltip)
+{
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted(label);
+	ImGui::TableSetColumnIndex(1);
+	ImGui::PushItemWidth(-1.0f);
+	const bool changed = ImGui::SliderInt("##value", &value, minValue, maxValue, "%d ms");
+	ImGui::PopItemWidth();
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("%s", tooltip);
+	}
+	return changed;
+}
+
+void DrawDriverSynthTimingPanel(HeadMountConfig& hm)
+{
+	if (hm.mode != HeadMountMode::DriverSynth) return;
+
+	ImGui::Spacing();
+	ImGui::SetNextItemOpen(false, ImGuiCond_FirstUseEver);
+	if (!ImGui::CollapsingHeader("Advanced fallback timing")) return;
+
+	ImGui::Indent();
+	if (ImGui::BeginTable("driver_synth_timing", 2,
+		ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
+	{
+		auto timing = wkopenvr::headmount::ClampDriverSynthTimingConfig(
+			hm.driverSynthTiming);
+		bool changed = false;
+		ImGui::PushID("stale_limit");
+		changed |= DrawDriverSynthTimingControl("Tracker stale limit",
+			timing.staleLimitMs,
+			wkopenvr::headmount::kDriverSynthStaleLimitMsMin,
+			wkopenvr::headmount::kDriverSynthStaleLimitMsMax,
+			"How old the last tracker pose can be before it is treated as missing.");
+		ImGui::PopID();
+		ImGui::PushID("grace_hold");
+		changed |= DrawDriverSynthTimingControl("Grace hold",
+			timing.graceHoldMs,
+			wkopenvr::headmount::kDriverSynthTransitionMsMin,
+			wkopenvr::headmount::kDriverSynthTransitionMsMax,
+			"How long to keep the last tracker-synth pose before fading to headset tracking.");
+		ImGui::PopID();
+		ImGui::PushID("blend_out");
+		changed |= DrawDriverSynthTimingControl("Blend to fallback",
+			timing.blendToFallbackMs,
+			wkopenvr::headmount::kDriverSynthTransitionMsMin,
+			wkopenvr::headmount::kDriverSynthTransitionMsMax,
+			"Fade duration from tracker-synth pose to headset tracking after grace expires.");
+		ImGui::PopID();
+		ImGui::PushID("stable_return");
+		changed |= DrawDriverSynthTimingControl("Stable before return",
+			timing.stableBeforeSynthMs,
+			wkopenvr::headmount::kDriverSynthTransitionMsMin,
+			wkopenvr::headmount::kDriverSynthTransitionMsMax,
+			"How long the tracker must be good again before WKOpenVR blends back to it.");
+		ImGui::PopID();
+		ImGui::PushID("blend_in");
+		changed |= DrawDriverSynthTimingControl("Blend back to tracker",
+			timing.blendToSynthMs,
+			wkopenvr::headmount::kDriverSynthTransitionMsMin,
+			wkopenvr::headmount::kDriverSynthTransitionMsMax,
+			"Fade duration from headset tracking back to tracker-synth pose.");
+		ImGui::PopID();
+		ImGui::EndTable();
+
+		if (changed) {
+			hm.driverSynthTiming = timing;
+			SaveProfile(CalCtx);
+			CCal_SendHeadMountConfig();
+		}
+	}
+	if (ImGui::Button("Reset DriverSynth timing")) {
+		hm.driverSynthTiming = {};
+		SaveProfile(CalCtx);
+		CCal_SendHeadMountConfig();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Restore the default DriverSynth fallback timing values.");
+	}
+	ImGui::Unindent();
+}
 
 } // namespace
 
@@ -204,6 +295,11 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 			  "jumps don't trigger recovery or feed bad samples into the solver.\n"
 			  "Requires the offset to be calibrated.",
 			  true },
+			{ HeadMountMode::DriverSynth, "Synthesize headset pose from tracker",
+			  "The driver uses the head-mounted tracker as the primary headset pose source\n"
+			  "while it is fresh, then blends back to headset tracking if the tracker drops out.\n"
+			  "Requires the offset to be calibrated.",
+			  true },
 		};
 
 		for (const auto& opt : opts) {
@@ -215,6 +311,12 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 			if (ImGui::RadioButton(opt.label, selected)) {
 				if (hm.mode != opt.value) {
 					hm.mode = opt.value;
+					// The floor offset only applies under DriverSynth, so switching
+					// modes adds or removes it. Re-push transforms now rather than
+					// waiting for the next calibration tick.
+					InvalidateAllTransformCaches();
+					ScanAndApplyProfile(CalCtx);
+					CCal_InvalidateBoundaryFloorSourceCache();
 					SaveProfile(CalCtx);
 					CCal_SendHeadMountConfig();
 				}
@@ -227,6 +329,7 @@ void CCal_DrawHeadMountSection(const ImVec2& panelSize)
 		}
 		ds.AttachReasonTooltip();
 	}
+	DrawDriverSynthTimingPanel(hm);
 
 	ImGui::Spacing();
 	{

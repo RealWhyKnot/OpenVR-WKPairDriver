@@ -100,13 +100,15 @@ void DrawModulesTab(ShellContext &context, std::vector<std::unique_ptr<FeaturePl
 		"Changes take effect the next time SteamVR loads the driver.");
 	ImGui::Spacing();
 
-	std::vector<FeaturePlugin *> releaseModules;
+	std::vector<FeaturePlugin *> modules;
 	for (auto &plugin : plugins) {
 		if (ShouldShowInModulesTab(*plugin)) {
-			releaseModules.push_back(plugin.get());
+			modules.push_back(plugin.get());
 		}
 	}
-	DrawModuleToggleTable(context, releaseModules, "modules", "No release modules were compiled into this build.");
+	ModuleToggleTableOptions options;
+	options.markDevelopmentModules = true;
+	DrawModuleToggleTable(context, modules, "modules", "No modules were compiled into this build.", options);
 }
 
 void DrawThemesTab(ShellContext &)

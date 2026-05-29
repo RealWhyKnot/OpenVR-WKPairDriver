@@ -142,7 +142,7 @@ enum class HeadMountMode : uint8_t {
 	Off          = 0,
 	AutoPaired   = 1,
 	Corroborate  = 2,
-	DriverSynth  = 3,   // dev-only
+	DriverSynth  = 3,
 };
 
 enum class HeadMountSampleSource : uint8_t {
@@ -220,6 +220,14 @@ struct CalibrationContext
 	Eigen::Vector3d calibratedRotation;
 	Eigen::Vector3d calibratedTranslation;
 	double calibratedScale;
+
+	// Vertical floor adjustment, in meters, applied on top of the calibration
+	// solve when sending transforms to the driver. The Oculus/Quest runtime owns
+	// the headset floor and ignores SteamVR chaperone writes, so "set floor"
+	// instead shifts all calibrated (target) content in world-space Y to align
+	// the rig's floor with the headset floor. Kept separate from the solve so a
+	// recalibration does not wipe it. Negative lowers content.
+	double floorOffsetMetersY = 0.0;
 
 	std::string referenceTrackingSystem;
 	std::string targetTrackingSystem;

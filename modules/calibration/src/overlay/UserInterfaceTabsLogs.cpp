@@ -4,7 +4,6 @@
 #include "Configuration.h"
 #include "DebugLogging.h"
 #include "UiControls.h"
-#include "UserInterfaceHeadMount.h"
 #include "UserInterfaceLogFiles.h"
 #include "Win32Text.h"
 #if WKOPENVR_BUILD_IS_DEV
@@ -14,32 +13,6 @@
 #include <string>
 #include <shellapi.h>
 #include <imgui/imgui.h>
-
-#if WKOPENVR_BUILD_IS_DEV
-namespace {
-
-bool DrawDriverSynthTimingControl(const char* label,
-	int& value,
-	int minValue,
-	int maxValue,
-	const char* tooltip)
-{
-	ImGui::TableNextRow();
-	ImGui::TableSetColumnIndex(0);
-	ImGui::AlignTextToFramePadding();
-	ImGui::TextUnformatted(label);
-	ImGui::TableSetColumnIndex(1);
-	ImGui::PushItemWidth(-1.0f);
-	const bool changed = ImGui::SliderInt("##value", &value, minValue, maxValue, "%d ms");
-	ImGui::PopItemWidth();
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("%s", tooltip);
-	}
-	return changed;
-}
-
-} // namespace
-#endif
 
 // Release builds ship user-controlled debug logs and bug-report support.
 // Replay CSV capture and simulated devices are dev-build-only surfaces.
@@ -220,93 +193,6 @@ void CCal_DrawDevToolsPanel() {
 	if (fakeDevices) {
 		ImGui::TextWrapped(
 			"Simulated devices are local to the overlay and do not push transforms to the SteamVR driver.");
-	}
-
-	ImGui::Spacing();
-	ui::DrawSectionHeading("DriverSynth");
-	auto& hm = CalCtx.headMount;
-	const bool hasTracker = !hm.trackerSerial.empty();
-	const bool offsetOk = hm.offsetCalibrated;
-	const bool canUseDriverSynth = hasTracker && offsetOk;
-	{
-		bool driverSynthEnabled = hm.mode == HeadMountMode::DriverSynth;
-		ui::DisabledSection ds(!canUseDriverSynth && !driverSynthEnabled,
-			!hasTracker
-				? "Start continuous calibration with the headset-mounted tracker as the target first."
-				: "Calibrate the tracker-to-headset offset first.");
-		if (ImGui::Checkbox("Synthesize headset pose from tracker", &driverSynthEnabled)) {
-			hm.mode = driverSynthEnabled ? HeadMountMode::DriverSynth : HeadMountMode::Off;
-			SaveProfile(CalCtx);
-			CCal_SendHeadMountConfig();
-		}
-		ds.AttachReasonTooltip();
-	}
-	if (ImGui::IsItemHovered() && canUseDriverSynth) {
-		ImGui::SetTooltip(
-			"Replaces the rendered headset pose with one derived from the head-tracker.\n"
-			"Known compositor and comfort risks.");
-	}
-
-	if (hm.mode == HeadMountMode::DriverSynth) {
-		ImGui::Spacing();
-		ImGui::TextUnformatted("DriverSynth fallback timing");
-		if (ImGui::BeginTable("driver_synth_timing", 2,
-			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
-		{
-			auto timing = wkopenvr::headmount::ClampDriverSynthTimingConfig(
-				hm.driverSynthTiming);
-			bool changed = false;
-			ImGui::PushID("stale_limit");
-			changed |= DrawDriverSynthTimingControl("Tracker stale limit",
-				timing.staleLimitMs,
-				wkopenvr::headmount::kDriverSynthStaleLimitMsMin,
-				wkopenvr::headmount::kDriverSynthStaleLimitMsMax,
-				"How old the last tracker pose can be before it is treated as missing.");
-			ImGui::PopID();
-			ImGui::PushID("grace_hold");
-			changed |= DrawDriverSynthTimingControl("Grace hold",
-				timing.graceHoldMs,
-				wkopenvr::headmount::kDriverSynthTransitionMsMin,
-				wkopenvr::headmount::kDriverSynthTransitionMsMax,
-				"How long to keep the last tracker-synth pose before fading to Quest tracking.");
-			ImGui::PopID();
-			ImGui::PushID("blend_out");
-			changed |= DrawDriverSynthTimingControl("Blend to fallback",
-				timing.blendToFallbackMs,
-				wkopenvr::headmount::kDriverSynthTransitionMsMin,
-				wkopenvr::headmount::kDriverSynthTransitionMsMax,
-				"Fade duration from tracker-synth pose to Quest tracking after grace expires.");
-			ImGui::PopID();
-			ImGui::PushID("stable_return");
-			changed |= DrawDriverSynthTimingControl("Stable before return",
-				timing.stableBeforeSynthMs,
-				wkopenvr::headmount::kDriverSynthTransitionMsMin,
-				wkopenvr::headmount::kDriverSynthTransitionMsMax,
-				"How long the tracker must be good again before WKOpenVR blends back to it.");
-			ImGui::PopID();
-			ImGui::PushID("blend_in");
-			changed |= DrawDriverSynthTimingControl("Blend back to tracker",
-				timing.blendToSynthMs,
-				wkopenvr::headmount::kDriverSynthTransitionMsMin,
-				wkopenvr::headmount::kDriverSynthTransitionMsMax,
-				"Fade duration from Quest tracking back to tracker-synth pose.");
-			ImGui::PopID();
-			ImGui::EndTable();
-
-			if (changed) {
-				hm.driverSynthTiming = timing;
-				SaveProfile(CalCtx);
-				CCal_SendHeadMountConfig();
-			}
-		}
-		if (ImGui::Button("Reset DriverSynth timing")) {
-			hm.driverSynthTiming = {};
-			SaveProfile(CalCtx);
-			CCal_SendHeadMountConfig();
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Restore the default DriverSynth fallback timing values.");
-		}
 	}
 
 	ImGui::Spacing();

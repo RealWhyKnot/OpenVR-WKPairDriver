@@ -61,7 +61,7 @@ TEST(FeaturePlugin, ChannelHelpersRouteReleaseAndDevelopmentModules)
 	using openvr_pair::overlay::FeaturePluginChannel;
 
 	EXPECT_TRUE(openvr_pair::overlay::ShouldShowInModulesTab(FeaturePluginChannel::Release));
-	EXPECT_FALSE(openvr_pair::overlay::ShouldShowInModulesTab(FeaturePluginChannel::Development));
+	EXPECT_TRUE(openvr_pair::overlay::ShouldShowInModulesTab(FeaturePluginChannel::Development));
 	EXPECT_FALSE(openvr_pair::overlay::ShouldShowInModulesTab(FeaturePluginChannel::DevTools));
 
 	EXPECT_FALSE(openvr_pair::overlay::ShouldShowInDevModuleList(FeaturePluginChannel::Release));

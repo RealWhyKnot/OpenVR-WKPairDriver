@@ -45,9 +45,9 @@ public:
 			response.type = protocol::ResponseSuccess;
 			return true;
 		// v25: head-mount tracker config. Caches the payload in the driver
-		// for the DriverSynth pose-synthesis path (dev builds only). The
-		// overlay sends this whenever the user changes head-mount mode or
-		// the resolved tracker deviceId changes.
+		// for the DriverSynth pose-synthesis path. The overlay sends this
+		// whenever the user changes head-mount mode or the resolved tracker
+		// deviceId changes.
 		case protocol::RequestSetHeadMountConfig:
 			LOG("[driver-ipc] head-mount config received: mode=%d deviceId=%d",
 			    (int)request.setHeadMountConfig.mode,
