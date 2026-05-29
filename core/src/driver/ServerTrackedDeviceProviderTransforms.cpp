@@ -1,7 +1,6 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "IsometryTransform.h"
 #include "Logging.h"
-#include "SlewRateCap.h"
 
 #include <algorithm>
 #include <cmath>
@@ -77,116 +76,22 @@ double ServerTrackedDeviceProvider::GetTransformRate(DeltaSize delta) const {
 }
 
 /**
- * Smoothly interpolates the device active transform towards the target transform.
- * When recalibrateOnMovement is enabled on the slot, the lerp progress is bounded
- * by an absolute mm/sec and deg/sec cap (alignmentSpeedParams.slew_* fields).
- * Stationary users see corrections converge at the imperceptible-drift threshold
- * (~0.5 mm/sec by default); when moving, the cap blends up to the much higher
- * moving rate so catch-up of accumulated drift happens quickly without visible
- * snap.
- *
- * 2026-05-24: replaced the prior regime-based still-floor (10/50/90 percent
- * by Tiny/Normal/Large classification) -- the 90 percent Large floor closed
- * ~85 percent of the gap per second when stationary, producing visible jumps
- * the moment the user moved after a long still stretch (user report:
- * "I have to wave a limb to get it to calibrate" gave way to "still very
- * snappy when I have it on"). The cap math lives in SlewRateCap.h; the
- * snap-bypass paths in SetDeviceTransform / first-fallback-activation that
- * directly assign `tf.transform = tf.targetTransform` are untouched, so
- * real tracking discontinuities (chi-square reanchor, Quest re-localization)
- * still snap as today.
+ * Smoothly interpolates the device active transform toward the target transform
+ * at a time-based rate (GetTransformRate by delta size), clamped to [0,1]. Real
+ * tracking discontinuities (chi-square reanchor, Quest re-localization) still snap
+ * via the direct-assign paths in SetDeviceTransform / first-fallback-activation.
  */
 void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const IsoTransform &deviceWorldPose) const {
 	LARGE_INTEGER timestamp;
 	QueryPerformanceCounter(&timestamp);
 
 	// qpcFreq captured once in Init(); QPF is constant per boot so re-querying
-	// here would be wasted work on the pose-update hot path. dt is the wall-
-	// clock seconds since the prior call -- the slew cap below needs it
-	// independently of the lerp factor so it can express its bound in physical
-	// per-second units.
+	// here would be wasted work on the pose-update hot path. dt is wall-clock
+	// seconds since the prior call.
 	const double dt = (timestamp.QuadPart - device.lastPoll.QuadPart) / (double)qpcFreq.QuadPart;
 	device.lastPoll = timestamp;
 
 	double lerp = dt * GetTransformRate(device.currentRate);
-
-	if (device.recalibrateOnMovement) {
-		if (!device.blendMotionInitialized) {
-			// First frame since the flag was enabled: capture the reference pose
-			// and skip blend progress this tick -- there's nothing to compute a
-			// meaningful delta against yet, and we don't want a stale prior pose
-			// (from before re-enable) to produce a giant phantom motion gate.
-			device.lastBlendWorldPos = deviceWorldPose.translation;
-			device.lastBlendWorldRot = deviceWorldPose.rotation;
-			device.blendMotionInitialized = true;
-			lerp = 0.0;
-		} else {
-			// Per-frame device motion in normalized units. kPosFullScale and
-			// kRotFullScale are the per-frame deltas at which the gate is fully
-			// open -- small typical-jitter motions produce partial gate, sustained
-			// natural motion produces gate=1.
-			constexpr double kPosFullScale = 0.005;   // 5 mm
-			constexpr double kRotFullScale = 0.0175;  // ~1 deg in radians
-			const double devPosDelta = (deviceWorldPose.translation - device.lastBlendWorldPos).norm();
-			const double devRotDelta = deviceWorldPose.rotation.angularDistance(device.lastBlendWorldRot);
-			const double motionGate = std::min(1.0,
-				std::max(devPosDelta / kPosFullScale, devRotDelta / kRotFullScale));
-
-			// Pending correction magnitude in metres / radians. The cap is
-			// expressed in the same units so the divide produces a clean scale
-			// factor; the prior code converted to mm + degrees only because the
-			// regime classifier wanted those units, which is no longer relevant.
-			const double pendingPosM =
-				(device.targetTransform.translation - device.transform.translation).norm();
-			const double pendingRotRad =
-				device.targetTransform.rotation.angularDistance(device.transform.rotation);
-
-			// Blend the stationary and moving caps by motionGate, then apply.
-			// Motion (motionGate -> 1) raises the cap so accumulated drift catches
-			// up quickly while the user moves; standing still drops the cap to
-			// the stationary rate so the transform converges imperceptibly.
-			const double capPos = spacecal::slew::BlendRate(
-				alignmentSpeedParams.slew_stationary_pos_rate,
-				alignmentSpeedParams.slew_moving_pos_rate,
-				motionGate);
-			const double capRot = spacecal::slew::BlendRate(
-				alignmentSpeedParams.slew_stationary_rot_rate,
-				alignmentSpeedParams.slew_moving_rot_rate,
-				motionGate);
-
-			lerp = spacecal::slew::ApplyCap(
-				lerp, pendingPosM, pendingRotRad, capPos, capRot, dt);
-
-			// Throttled heartbeat: only when actively slewing (above the
-			// converged thresholds) AND at most once per ~5 s. Lets a session log
-			// confirm the cap is binding without flooding when convergence has
-			// finished and the slot is idle.
-			constexpr double kSlewLogThresholdPosM = 0.001;     // 1 mm
-			constexpr double kSlewLogThresholdRotRad = 0.001745; // ~0.1 deg
-			if (pendingPosM > kSlewLogThresholdPosM || pendingRotRad > kSlewLogThresholdRotRad) {
-				const double secSinceLastLog = device.lastSlewLogTime.QuadPart > 0
-					? (timestamp.QuadPart - device.lastSlewLogTime.QuadPart) / (double)qpcFreq.QuadPart
-					: 1e9;
-				if (secSinceLastLog >= 5.0) {
-					LOG("[blend][slew] pendPosMm=%.2f pendRotDeg=%.3f gate=%.2f capPosMmS=%.2f capRotDegS=%.3f effLerp=%.4f",
-						pendingPosM * 1000.0,
-						pendingRotRad * (180.0 / M_PI),
-						motionGate,
-						capPos * 1000.0,
-						capRot * (180.0 / M_PI),
-						lerp);
-					device.lastSlewLogTime = timestamp;
-				}
-			}
-
-			device.lastBlendWorldPos = deviceWorldPose.translation;
-			device.lastBlendWorldRot = deviceWorldPose.rotation;
-		}
-	} else if (device.blendMotionInitialized) {
-		// Flag was on but is now off -- reset so re-enabling later doesn't see a
-		// stale prior pose.
-		device.blendMotionInitialized = false;
-	}
 
 	if (lerp > 1.0)
 		lerp = 1.0;

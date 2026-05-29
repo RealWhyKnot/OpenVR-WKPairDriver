@@ -299,24 +299,6 @@ void CCal_BasicInfo() {
 				"Useful for verifying the result before committing.");
 		}
 
-		// --- Recalibrate on movement ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Recalibrate on movement");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##basic_recal_on_move", &CalCtx.recalibrateOnMovement)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("When on, calibration corrections converge at a capped rate: imperceptible when\n"
-				"you're stationary (default ~0.5 mm/sec), brisk when you're moving (default ~10 mm/sec).\n"
-				"Prevents the visible jump that otherwise happens when accumulated drift catches up the\n"
-				"moment you move after a long stationary stretch.\n"
-				"Default ON. Tune the rates on the Advanced tab. Turn this off for the legacy time-based\n"
-				"blend without any cap.");
-		}
-
 		// (Enable debug logs toggle moved to the Logs tab where the user is
 		// already managing log files. The checkbox here was redundant.)
 

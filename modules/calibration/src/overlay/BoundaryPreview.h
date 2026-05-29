@@ -70,6 +70,10 @@ int BoundaryPreviewUploadFailureDisableThreshold();
 
 bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount);
 
+// Retry backoff in seconds after N consecutive texture-upload failures. Returns 0
+// for 0 failures and grows (~2x per failure) up to a cap. Pure; unit tested.
+double BoundaryUploadBackoffSeconds(int consecutiveFailures);
+
 bool BoundaryPreviewUsesOpenGlTextureUpload();
 
 int BoundaryPreviewFileMarkerLimit();

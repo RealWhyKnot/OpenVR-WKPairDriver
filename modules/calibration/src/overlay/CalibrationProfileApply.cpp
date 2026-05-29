@@ -145,9 +145,7 @@ namespace {
 		payload.enabled = enabled;
 		Eigen::Vector3d trans = translationCm * 0.01; // cm -> m, matches per-ID convention
 		payload.translation.v[0] = trans.x();
-		payload.translation.v[1] = trans.y()
-			+ wkopenvr::headmount::EffectiveFloorOffsetMetersY(
-				CalCtx.headMount.mode, CalCtx.floorOffsetMetersY); // world-Y floor adjustment, applied only under DriverSynth
+		payload.translation.v[1] = trans.y();
 		payload.translation.v[2] = trans.z();
 		payload.rotation.w = rotation.w();
 		payload.rotation.x = rotation.x();
@@ -500,11 +498,6 @@ void ScanAndApplyProfile(
 			VRRotationQuat(ctx.calibratedRotation),
 			ctx.calibratedScale
 		};
-		// Vertical floor adjustment: shift calibrated content in world-space Y so
-		// the rig's floor aligns with the headset floor (the Quest runtime ignores
-		// SteamVR chaperone floor writes). Applied on top of the solve.
-		payload.translation.v[1] += wkopenvr::headmount::EffectiveFloorOffsetMetersY(
-			ctx.headMount.mode, ctx.floorOffsetMetersY);
 		// During continuous calibration, lerp toward the smoothly-updating target so
 		// the active offset doesn't snap on every cycle. EXCEPT when this is a freshly
 		// adopted device -- those need to snap into place rather than ramping in from

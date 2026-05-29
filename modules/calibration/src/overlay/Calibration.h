@@ -221,12 +221,11 @@ struct CalibrationContext
 	Eigen::Vector3d calibratedTranslation;
 	double calibratedScale;
 
-	// Vertical floor adjustment, in meters, applied on top of the calibration
-	// solve when sending transforms to the driver. The Oculus/Quest runtime owns
-	// the headset floor and ignores SteamVR chaperone writes, so "set floor"
-	// instead shifts all calibrated (target) content in world-space Y to align
-	// the rig's floor with the headset floor. Kept separate from the solve so a
-	// recalibration does not wipe it. Negative lowers content.
+	// Cumulative vertical shift (meters) applied to the SteamVR standing-zero pose
+	// via "Set floor from controller". Floor height is set by editing the chaperone
+	// standing-zero (the runtime-consistent mechanism, like OpenVR Advanced Settings),
+	// not by shifting device poses. Tracked only so "Reset floor" can undo exactly
+	// what we applied; persisted to know our own contribution across restarts.
 	double floorOffsetMetersY = 0.0;
 
 	std::string referenceTrackingSystem;

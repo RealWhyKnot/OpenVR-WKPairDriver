@@ -393,6 +393,43 @@ void ApplyBoundaryFloorY(double floorY)
     s_cachedFloorSourceInitialized = false;
 }
 
+// Shift the SteamVR standing-zero pose vertically by deltaY metres and commit it
+// to the live chaperone. This is the correct, runtime-consistent way to set floor
+// height (the same mechanism OpenVR Advanced Settings uses): moving the universe
+// origin keeps the runtime, compositor, chaperone bounds and our boundary all in
+// agreement, unlike a per-device world-Y shift which fights the runtime. The
+// offset is applied along the standing-zero's own up axis so the rotation is
+// untouched and the play space can't tilt. Returns true on a committed write.
+bool AdjustStandingZeroFloorY(double deltaY)
+{
+    if (!std::isfinite(deltaY)) return false;
+    if (std::fabs(deltaY) < 1e-6) return true;
+    auto* setup = vr::VRChaperoneSetup();
+    if (!setup) return false;
+
+    setup->RevertWorkingCopy();
+    vr::HmdMatrix34_t zero;
+    if (!setup->GetWorkingStandingZeroPoseToRawTrackingPose(&zero)) {
+        openvr_pair::common::DiagnosticLog("boundary-floor", "standing_zero get failed");
+        return false;
+    }
+
+    const double beforeY = zero.m[1][3];
+    zero.m[0][3] += zero.m[0][1] * deltaY;
+    zero.m[1][3] += zero.m[1][1] * deltaY;
+    zero.m[2][3] += zero.m[2][1] * deltaY;
+    setup->SetWorkingStandingZeroPoseToRawTrackingPose(&zero);
+    const bool committed = setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+
+    char lbuf[224];
+    snprintf(lbuf, sizeof lbuf,
+        "[boundary-floor] standing_zero shift dY=%.4f beforeY=%.4f afterY=%.4f committed=%d",
+        deltaY, beforeY, zero.m[1][3], committed ? 1 : 0);
+    Metrics::WriteLogAnnotation(lbuf);
+    openvr_pair::common::DiagnosticLog("boundary-floor", "%s", lbuf);
+    return committed;
+}
+
 wkopenvr::boundary::BoundaryFloorSourceRequest BuildFloorSourceRequest(
     bool controllerContactValid = false,
     double controllerContactStandingY = 0.0)
@@ -1126,24 +1163,31 @@ bool ApplyFloorFromStandingContactPose(
         return false;
     }
 
-    // The headset runtime (e.g. Oculus/Quest) owns the floor and ignores SteamVR
-    // chaperone writes, so instead of moving the SteamVR standing-zero we shift
-    // all calibrated (target) content down in world-space Y until the controller
-    // resting on the physical floor maps to floor level. measuredStandingY is the
-    // controller's height above the headset floor *with the current offset
-    // already applied*, so subtracting it is cumulative and converges to zero
-    // over repeated applies. Kept separate from the calibration solve.
+    // Move the SteamVR standing-zero so the controller resting on the floor maps
+    // to floor level. This is the upstream, runtime-consistent way to set floor
+    // height (same as OpenVR Advanced Settings) -- runtime, compositor, chaperone
+    // bounds and our boundary all stay aligned. measuredStandingY is the
+    // controller's height above the current floor, so shifting by it is cumulative
+    // and converges to zero over repeated applies.
     const double previousOffset = CalCtx.floorOffsetMetersY;
-    CalCtx.floorOffsetMetersY = previousOffset - measuredStandingY;
+    if (!AdjustStandingZeroFloorY(measuredStandingY)) {
+        s_boundaryError = "Couldn't write floor height to SteamVR's chaperone.";
+        char fbuf[256];
+        snprintf(fbuf, sizeof fbuf,
+            "[boundary-floor] apply failed: chaperone_write device=%d system='%s' standing_y=%.4f",
+            static_cast<int>(deviceId), trackingSystem.c_str(), measuredStandingY);
+        Metrics::WriteLogAnnotation(fbuf);
+        openvr_pair::common::DiagnosticLog("boundary-floor", "%s", fbuf);
+        return false;
+    }
+    // Track the cumulative shift applied to the standing-zero so Reset undoes it.
+    CalCtx.floorOffsetMetersY = previousOffset + measuredStandingY;
     ApplyBoundaryFloorY(0.0);
     s_boundaryError.clear();
-
-    InvalidateAllTransformCaches();
-    ScanAndApplyProfile(CalCtx, false, "set_floor");
     SaveProfile(CalCtx);
 
     if (CalCtx.boundary.enabled) {
-        // Harmless no-op on Quest; keeps lighthouse-native HMDs correct.
+        // Bounds are stored relative to the standing-zero, so re-push after moving it.
         std::string pushError;
         PushTargetBoundaryToChaperone(pushError);
     }
@@ -1593,8 +1637,6 @@ void DrawBoundarySection(ImVec2 panelSize) {
                 HideBoundaryPreviewOverlay();
             }
         } else {
-            const bool floorControlsEnabled = CalCtx.headMount.mode == HeadMountMode::DriverSynth;
-            if (!floorControlsEnabled) ImGui::BeginDisabled();
             if (!controllerReady) ImGui::BeginDisabled();
             if (ImGui::Button("Set floor from controller")) {
                 s_floorCapture.Begin(CalCtx.boundary.floorY, CalCtx.boundary.ceilingY);
@@ -1606,29 +1648,24 @@ void DrawBoundarySection(ImVec2 panelSize) {
             }
             if (!controllerReady) ImGui::EndDisabled();
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Rest the controller on the floor and apply. This lowers the calibrated rig so the controller sits on your headset's floor (your headset, not SteamVR, owns the floor).");
+                ImGui::SetTooltip("Rest the controller on the floor and apply. Moves SteamVR's floor (standing-zero) so the controller sits at floor level.");
             }
             ImGui::SameLine();
             const bool hasFloorOffset = std::fabs(CalCtx.floorOffsetMetersY) > 1e-6;
             if (!hasFloorOffset) ImGui::BeginDisabled();
             if (ImGui::Button("Reset floor")) {
+                AdjustStandingZeroFloorY(-CalCtx.floorOffsetMetersY);
                 CalCtx.floorOffsetMetersY = 0.0;
                 ApplyBoundaryFloorY(0.0);
-                InvalidateAllTransformCaches();
-                ScanAndApplyProfile(CalCtx, false, "reset_floor");
                 SaveProfile(CalCtx);
                 s_cachedFloorSourceInitialized = false;
                 s_boundaryError.clear();
                 s_boundaryNativeStatus.clear();
-                Metrics::WriteLogAnnotation("[boundary-floor] floor offset reset to 0");
+                Metrics::WriteLogAnnotation("[boundary-floor] floor reset (standing-zero restored)");
             }
             if (!hasFloorOffset) ImGui::EndDisabled();
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Removes the floor adjustment, restoring the rig to its raw calibration height.");
-            }
-            if (!floorControlsEnabled) ImGui::EndDisabled();
-            if (!floorControlsEnabled) {
-                ImGui::TextDisabled("Floor offset applies only while \"Synthesize headset pose from tracker\" is on.");
+                ImGui::SetTooltip("Undoes the floor adjustment, restoring SteamVR's previous floor height.");
             }
         }
 

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -27,6 +28,11 @@ constexpr double kMinPreviewSpanMeters = 1.0;
 constexpr double kPreviewPadMeters = 0.30;
 constexpr int kUploadFailureDisableThreshold = 3;
 constexpr int kMaxFileMarkerOverlays = 32;
+// Texture-upload retry backoff. A transient SetOverlayRaw failure never disables
+// the boundary permanently; failures only pace retries between these bounds while
+// a vertex-marker fallback keeps the boundary visible.
+constexpr double kUploadBackoffBaseSec = 0.1;
+constexpr double kUploadBackoffCapSec = 1.0;
 constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
@@ -45,6 +51,8 @@ struct PreviewState {
     int uploadFailureCount = 0;
     int fileMarkerFailureCount = 0;
     bool uploadsDisabled = false;
+    uint64_t lastFailedHash = 0;
+    double nextUploadAttemptSec = 0.0;
     vr::EVROverlayError lastError = vr::VROverlayError_None;
     vr::EVROverlayError fileMarkerLastError = vr::VROverlayError_None;
     size_t lastVertexCount = 0;
@@ -57,6 +65,12 @@ PreviewState& State()
 {
     static PreviewState s;
     return s;
+}
+
+double NowSeconds()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
 constexpr const char* kPreviewKey = "wkopenvr.boundary.preview";
@@ -896,6 +910,14 @@ int BoundaryPreviewUploadFailureDisableThreshold()
     return kUploadFailureDisableThreshold;
 }
 
+double BoundaryUploadBackoffSeconds(int consecutiveFailures)
+{
+    if (consecutiveFailures <= 0) return 0.0;
+    const int shift = std::min(consecutiveFailures - 1, 6);
+    const double secs = kUploadBackoffBaseSec * static_cast<double>(1 << shift);
+    return std::min(secs, kUploadBackoffCapSec);
+}
+
 bool BoundaryPreviewShouldDisableUploadsAfterFailureCount(int failureCount)
 {
     return failureCount >= kUploadFailureDisableThreshold;
@@ -1080,76 +1102,71 @@ void TickBoundaryPreview(
         HideFileMarkers(source ? source : "invalid_plane");
         return;
     }
-    if (showFileMarkers) {
+    if (!EnsureCreated()) {
+        HideFileMarkers(source ? source : "no_overlay");
+        return;
+    }
+
+    // Upload the current raster when its content changes. A failed SetOverlayRaw
+    // (e.g. a transient RequestFailed while drawing) must NEVER permanently
+    // disable a safety boundary, so failures only schedule a short, growing
+    // backoff and we always retry. Freshly drawn/applied content (a new hash that
+    // hasn't failed) clears the backoff for an immediate clean attempt.
+    const bool contentChanged = (raster.hash != s.uploadedHash);
+    if (contentChanged && raster.hash != s.lastFailedHash) {
+        s.uploadFailureCount = 0;
+        s.nextUploadAttemptSec = 0.0;
+    }
+    if (contentChanged && NowSeconds() >= s.nextUploadAttemptSec) {
+        const vr::EVROverlayError err = UploadRasterTexture(raster);
+        if (err == vr::VROverlayError_None) {
+            s.uploadedHash = raster.hash;
+            s.uploadFailureCount = 0;
+            s.nextUploadAttemptSec = 0.0;
+            s.lastError = vr::VROverlayError_None;
+            s.textureReady = true;
+            s.uploadsDisabled = false;
+        } else {
+            s.lastError = err;
+            s.textureReady = false;
+            ++s.uploadFailureCount;
+            s.lastFailedHash = raster.hash;
+            // uploadsDisabled now means "in retry backoff" -- transient, never
+            // permanent. The time gate above paces retries; success clears it.
+            s.uploadsDisabled = true;
+            s.nextUploadAttemptSec =
+                NowSeconds() + BoundaryUploadBackoffSeconds(s.uploadFailureCount);
+            if (s.uploadFailureCount <= 3 || (s.uploadFailureCount % 30) == 0) {
+                openvr_pair::common::DiagnosticLog(
+                    "boundary-preview",
+                    "texture_upload_failed err=%d error_name=%s count=%d source=%s vertices=%zu hash=%llu backoff=%.3f mode=opengl_texture",
+                    static_cast<int>(err),
+                    OverlayErrorName(err),
+                    s.uploadFailureCount,
+                    s.lastSource,
+                    s.lastVertexCount,
+                    static_cast<unsigned long long>(raster.hash),
+                    BoundaryUploadBackoffSeconds(s.uploadFailureCount));
+            }
+        }
+    }
+
+    // The overlay only shows the correct filled boundary when the texture for the
+    // CURRENT content is uploaded. Until then (first draw, or while retrying after
+    // a failure) show vertex markers so the boundary is never invisible. When the
+    // caller wants reference markers (capture cursor/origin/HMD) keep them too.
+    const bool currentTextureLive = s.textureReady && (s.uploadedHash == raster.hash);
+    if (showFileMarkers || !currentTextureLive) {
         TickFileMarkers(commands, source ? source : "file_markers");
     } else {
         HideFileMarkers(source ? source : "markers_suppressed");
     }
 
-    if (!EnsureCreated()) return;
-
-    if (s.uploadsDisabled) {
+    if (!currentTextureLive) {
+        // No valid texture for this boundary yet; the marker fallback covers it.
+        // Don't show a stale/wrong filled shape.
+        HideOnly(source ? source : "await_texture");
         return;
-    }
-    if (raster.hash != s.uploadedHash) {
-        vr::EVROverlayError err = UploadRasterTexture(raster);
-        if (err == vr::VROverlayError_None) {
-            s.uploadedHash = raster.hash;
-            s.uploadFailureCount = 0;
-            s.lastError = vr::VROverlayError_None;
-            s.textureReady = true;
-        } else {
-            s.lastError = err;
-            s.textureReady = false;
-            ++s.uploadFailureCount;
-            if (s.uploadFailureCount <= 3 || (s.uploadFailureCount % 30) == 0) {
-                openvr_pair::common::DiagnosticLog(
-                    "boundary-preview",
-                    "texture_upload_failed err=%d error_name=%s count=%d source=%s vertices=%zu hash=%llu mode=opengl_texture",
-                    static_cast<int>(err),
-                    OverlayErrorName(err),
-                    s.uploadFailureCount,
-                    s.lastSource,
-                    s.lastVertexCount,
-                    static_cast<unsigned long long>(raster.hash));
-                openvr_pair::common::DiagnosticLog(
-                    "boundary_preview_status",
-                    "created=%d visible=%d uploads_disabled=%d failures=%d error=%d error_name=%s source=%s vertices=%zu hash=%llu mode=opengl_texture",
-                    s.created ? 1 : 0,
-                    s.visible ? 1 : 0,
-                    s.uploadsDisabled ? 1 : 0,
-                    s.uploadFailureCount,
-                    static_cast<int>(err),
-                    OverlayErrorName(err),
-                    s.lastSource,
-                    s.lastVertexCount,
-                    static_cast<unsigned long long>(raster.hash));
-            }
-            if (BoundaryPreviewShouldDisableUploadsAfterFailureCount(s.uploadFailureCount)) {
-                if (vr::VROverlay() && s.handle != vr::k_ulOverlayHandleInvalid) {
-                    vr::VROverlay()->HideOverlay(s.handle);
-                }
-                s.visible = false;
-                s.uploadsDisabled = true;
-                openvr_pair::common::DiagnosticLog(
-                    "boundary-preview",
-                    "uploads_disabled_after_failures err=%d error_name=%s source=%s vertices=%zu mode=opengl_texture",
-                    static_cast<int>(err),
-                    OverlayErrorName(err),
-                    s.lastSource,
-                    s.lastVertexCount);
-                openvr_pair::common::DiagnosticLog(
-                    "boundary_preview_status",
-                    "created=%d visible=0 uploads_disabled=1 failures=%d error=%d error_name=%s source=%s vertices=%zu mode=opengl_texture",
-                    s.created ? 1 : 0,
-                    s.uploadFailureCount,
-                    static_cast<int>(err),
-                    OverlayErrorName(err),
-                    s.lastSource,
-                    s.lastVertexCount);
-            }
-            return;
-        }
     }
 
     vr::VROverlay()->SetOverlayWidthInMeters(
