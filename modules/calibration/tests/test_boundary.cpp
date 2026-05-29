@@ -7,6 +7,7 @@
 #include "BoundaryCapture.h"
 #include "BoundaryFloorCapture.h"
 #include "BoundaryPreview.h"
+#include "BoundaryRePush.h"
 #include "BoundarySpatial.h"
 #include "ControllerInput.h"
 #include "boundary_test_helpers.h"
@@ -1620,6 +1621,21 @@ TEST(BoundaryPreviewTest, PersistentBoundaryCommandsEmptyBelowThreeVertices) {
     EXPECT_TRUE(BuildPersistentBoundaryCommands(twoPoints, 0.0).empty());
 }
 
+TEST(BoundaryPreviewTest, UploadBackoffGrowsAndCaps) {
+    // No failures -> no backoff.
+    EXPECT_DOUBLE_EQ(BoundaryUploadBackoffSeconds(0), 0.0);
+    EXPECT_DOUBLE_EQ(BoundaryUploadBackoffSeconds(-3), 0.0);
+    // Grows ~2x per consecutive failure.
+    EXPECT_NEAR(BoundaryUploadBackoffSeconds(1), 0.1, 1e-9);
+    EXPECT_NEAR(BoundaryUploadBackoffSeconds(2), 0.2, 1e-9);
+    EXPECT_NEAR(BoundaryUploadBackoffSeconds(3), 0.4, 1e-9);
+    EXPECT_NEAR(BoundaryUploadBackoffSeconds(4), 0.8, 1e-9);
+    // Caps at 1.0s and never decreases.
+    EXPECT_DOUBLE_EQ(BoundaryUploadBackoffSeconds(5), 1.0);
+    EXPECT_DOUBLE_EQ(BoundaryUploadBackoffSeconds(100), 1.0);
+    EXPECT_GE(BoundaryUploadBackoffSeconds(3), BoundaryUploadBackoffSeconds(2));
+}
+
 TEST(BoundaryPreviewTest, FileMarkerTransformUsesFloorPlaneTransform) {
     const BoundaryVertex marker{ 1.25, -0.10, -2.50 };
 
@@ -1885,4 +1901,61 @@ TEST(ChaperoneSnapshotTest, ReadsLegacyCollisionOnlySnapshot) {
     ASSERT_EQ(parsed.perimeter.size(), 1u);
     EXPECT_NEAR(parsed.perimeter[0].v[0], -1.0f, 1e-6f);
     EXPECT_NEAR(parsed.perimeter[0].v[1], -2.0f, 1e-6f);
+}
+
+// ---------------------------------------------------------------------------
+// BoundaryRePush startup-push countdown. Regression pins for the boundary being
+// pushed with a stale (identity) transform: the countdown must be HELD while
+// the boundary is not pushable and fire only after kStartupGraceTicks pushable
+// ticks, so the one push lands on a converged transform.
+// ---------------------------------------------------------------------------
+
+TEST(BoundaryRePushStartupTest, HeldWhileNotPushable) {
+    using boundary_repush::StepStartupCountdown;
+    int pending = 30;
+    for (int i = 0; i < 100; ++i) {
+        const auto sc = StepStartupCountdown(/*pushable=*/false, pending);
+        pending = sc.pending;
+        EXPECT_FALSE(sc.fire);
+        EXPECT_EQ(pending, 30) << "countdown must not be consumed while not pushable";
+    }
+}
+
+TEST(BoundaryRePushStartupTest, FiresAfterGraceOfPushableTicks) {
+    using boundary_repush::StepStartupCountdown;
+    int pending = 30;
+    int fireTick = -1;
+    for (int i = 0; i < 30; ++i) {
+        const auto sc = StepStartupCountdown(/*pushable=*/true, pending);
+        pending = sc.pending;
+        if (sc.fire) { fireTick = i; break; }
+    }
+    EXPECT_EQ(fireTick, 29) << "should fire on the 30th pushable tick";
+    EXPECT_EQ(pending, 0);
+}
+
+TEST(BoundaryRePushStartupTest, OnlyPushableTicksCountTowardGrace) {
+    using boundary_repush::StepStartupCountdown;
+    int pending = 3;
+    auto step = [&](bool pushable) {
+        const auto sc = StepStartupCountdown(pushable, pending);
+        pending = sc.pending;
+        return sc.fire;
+    };
+    EXPECT_FALSE(step(false)); EXPECT_EQ(pending, 3);
+    EXPECT_FALSE(step(true));  EXPECT_EQ(pending, 2);
+    EXPECT_FALSE(step(false)); EXPECT_EQ(pending, 2);
+    EXPECT_FALSE(step(true));  EXPECT_EQ(pending, 1);
+    EXPECT_FALSE(step(false)); EXPECT_EQ(pending, 1);
+    EXPECT_TRUE(step(true));   EXPECT_EQ(pending, 0);  // 3rd pushable tick fires
+}
+
+TEST(BoundaryRePushStartupTest, ZeroPendingNeverFires) {
+    using boundary_repush::StepStartupCountdown;
+    auto sc = StepStartupCountdown(/*pushable=*/true, 0);
+    EXPECT_FALSE(sc.fire);
+    EXPECT_EQ(sc.pending, 0);
+    sc = StepStartupCountdown(/*pushable=*/false, 0);
+    EXPECT_FALSE(sc.fire);
+    EXPECT_EQ(sc.pending, 0);
 }

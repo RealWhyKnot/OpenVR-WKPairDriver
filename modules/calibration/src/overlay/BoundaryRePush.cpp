@@ -21,14 +21,26 @@ namespace {
 static std::chrono::steady_clock::time_point g_lastPushAt;
 static bool g_firstPush = true;
 
+// True once a "push skipped" annotation has been logged since the last
+// successful push. Keeps the dynamic-disabled skip log edge-only instead of the
+// ~1 Hz spam it produced before.
+static bool g_loggedSkipSincePush = false;
+
 // Transform in effect when we last pushed. Used to skip re-pushes when the
 // calibration hasn't moved enough to matter.
 static Eigen::AffineCompact3d g_lastPushedTransform = Eigen::AffineCompact3d::Identity();
 
-// Ticks elapsed since profile load. Used by the startup-push gate: we wait
-// for kStartupGraceTicks continuous ticks before pushing so the transform has
-// had a chance to converge from an empty sample buffer.
+// Pushable ticks remaining before the startup push fires. Used by the
+// startup-push gate: we wait for kStartupGraceTicks *pushable* ticks before
+// pushing so the transform has had a chance to converge from an empty sample
+// buffer. Held (not consumed) on ticks where the boundary is not pushable.
 static int g_startupPushPending = 0;  // 0 = no pending push; >0 = countdown
+
+// Whether the boundary was pushable (enabled + vertices + valid profile) last
+// tick. A false->true edge re-arms the startup push so the boundary is
+// (re)pushed with a converged transform when it is toggled on or the profile
+// turns valid mid-session.
+static bool g_prevPushable = false;
 
 // Minimum translation change (metres) between pushes to qualify as "meaningful".
 static constexpr double kTranslationThresholdM = 0.005;  // 5 mm
@@ -132,6 +144,7 @@ static void DoPush(const Eigen::AffineCompact3d& xf) {
         g_lastPushedTransform = xf;
         g_lastPushAt = std::chrono::steady_clock::now();
         g_firstPush = false;
+        g_loggedSkipSincePush = false;
         Metrics::chaperoneRePushCount.Push(
             Metrics::chaperoneRePushCount.size() > 0
                 ? static_cast<uint32_t>(Metrics::chaperoneRePushCount.last() + 1u)
@@ -170,24 +183,37 @@ void TickBoundaryRePush(double /*time*/) {
     // Publish the active metric regardless of whether a push fires.
     Metrics::boundaryActive.Push(bc.enabled);
 
-    if (!bc.enabled || bc.vertices.empty() || !ctx.validProfile) {
-        // Startup-push countdown: still tick down so it doesn't stall when
-        // the profile flips valid mid-session.
-        if (g_startupPushPending > 0) --g_startupPushPending;
+    const bool pushable =
+        bc.enabled && !bc.vertices.empty() && ctx.validProfile;
+
+    // Re-arm the one-shot startup push on a not-pushable -> pushable edge
+    // (boundary toggled on, or the profile turned valid mid-session), so the
+    // push uses a freshly converged transform rather than relying on a push that
+    // may have been missed while the boundary wasn't ready.
+    if (pushable && !g_prevPushable) {
+        g_startupPushPending = kStartupGraceTicks;
+        g_firstPush = true;
+    }
+    g_prevPushable = pushable;
+
+    // Advance the startup countdown. It is HELD (not consumed) while not
+    // pushable and fires only after kStartupGraceTicks pushable ticks, so the
+    // boundary is always pushed with a converged transform -- the bug that left
+    // it pushed with a stale identity transform was consuming this while the
+    // boundary was not yet pushable.
+    const boundary_repush::StartupCountdown sc =
+        boundary_repush::StepStartupCountdown(pushable, g_startupPushPending);
+    g_startupPushPending = sc.pending;
+    if (sc.fire) {
+        DoPush(BuildCalibrationTransform(ctx));
+        return;
+    }
+    if (!pushable || g_startupPushPending > 0) {
+        // Not pushable (countdown held), or still inside the startup grace.
         return;
     }
 
     const Eigen::AffineCompact3d xf = BuildCalibrationTransform(ctx);
-
-    // Startup-push path: fire once after the grace window elapses.
-    if (g_startupPushPending > 0) {
-        --g_startupPushPending;
-        if (g_startupPushPending == 0) {
-            DoPush(xf);
-            return;
-        }
-        return;
-    }
 
     const auto now = std::chrono::steady_clock::now();
 
@@ -199,17 +225,22 @@ void TickBoundaryRePush(double /*time*/) {
     }
 
     if (!g_firstPush && !kDynamicRePushEnabled) {
-        if (TransformDeltaExceedsThreshold(xf, g_lastPushedTransform)) {
+        // Dynamic re-push is disabled: the chaperone stays fixed at the startup/
+        // apply transform instead of chasing calibration jitter. Log the first
+        // skip after each push (edge only), not every interval.
+        if (!g_loggedSkipSincePush
+            && TransformDeltaExceedsThreshold(xf, g_lastPushedTransform)) {
             const double transDelta = (xf.translation() - g_lastPushedTransform.translation()).norm();
             const Eigen::Matrix3d dR = xf.rotation() * g_lastPushedTransform.rotation().transpose();
             const double trace = dR.trace();
             const double cosAngle = std::max(-1.0, std::min(1.0, (trace - 1.0) * 0.5));
             const double angleDeg = std::acos(cosAngle) * (180.0 / EIGEN_PI);
-            char lbuf[192];
+            char lbuf[208];
             snprintf(lbuf, sizeof lbuf,
-                "[boundary-re-push] dynamic push skipped: trans=%.2fmm rot=%.2fdeg",
+                "[boundary-re-push] dynamic push skipped (chaperone held fixed): trans=%.2fmm rot=%.2fdeg",
                 transDelta * 1000.0, angleDeg);
             Metrics::WriteLogAnnotation(lbuf);
+            g_loggedSkipSincePush = true;
         }
         g_lastPushAt = now;
         return;
