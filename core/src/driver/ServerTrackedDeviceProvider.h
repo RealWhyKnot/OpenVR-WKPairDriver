@@ -127,18 +127,23 @@ private:
 	};
 
 #if WKOPENVR_BUILD_IS_DEV
+	// Aggregated over a ~5 s window, then logged and reset. The shadow runs a
+	// CANDIDATE one-euro (BuildCandidateParams) against the live filter so the
+	// log shows the jitter (at rest) vs lag (in motion) tradeoff of a tuning we
+	// might promote.
 	struct SmartSmoothingShadowStats
 	{
 		uint64_t samples = 0;
 		uint64_t restSamples = 0;
+		uint64_t moveSamples = 0;
 		uint64_t invalidReportedLinear = 0;
 		uint64_t invalidReportedAngular = 0;
 		uint64_t reseeds = 0;
 		uint64_t gapReseeds = 0;
-		uint64_t positionJumpReseeds = 0;
-		uint64_t rotationJumpReseeds = 0;
+		uint64_t jumpReseeds = 0;
 		uint64_t nonFinitePoseResets = 0;
 
+		// Candidate gate + adaptive cutoff (averaged / peak).
 		double sumPosRelease = 0.0;
 		double maxPosRelease = 0.0;
 		double sumRotRelease = 0.0;
@@ -148,44 +153,51 @@ private:
 		double sumRotCutoffHz = 0.0;
 		double maxRotCutoffHz = 0.0;
 
+		// Rest regime: per-frame output step (jitter). Lower = smoother at rest.
 		double sumSqRestRawStepM = 0.0;
 		double sumSqRestLiveStepM = 0.0;
-		double sumSqRestShadowStepM = 0.0;
+		double sumSqRestCandStepM = 0.0;
 		double sumSqRestRawRotStepRad = 0.0;
 		double sumSqRestLiveRotStepRad = 0.0;
-		double sumSqRestShadowRotStepRad = 0.0;
+		double sumSqRestCandRotStepRad = 0.0;
 
-		double sumSqShadowRawErrM = 0.0;
-		double maxShadowRawErrM = 0.0;
-		double sumSqLiveShadowErrM = 0.0;
-		double maxLiveShadowErrM = 0.0;
-		double sumSqShadowRawRotErrRad = 0.0;
-		double maxShadowRawRotErrRad = 0.0;
-		double sumSqLiveShadowRotErrRad = 0.0;
-		double maxLiveShadowRotErrRad = 0.0;
+		// Move regime: output-vs-raw lag. Lower = more responsive in motion.
+		double sumSqMoveLiveLagM = 0.0;
+		double maxMoveLiveLagM = 0.0;
+		double sumSqMoveCandLagM = 0.0;
+		double maxMoveCandLagM = 0.0;
+		double sumSqMoveLiveLagRad = 0.0;
+		double sumSqMoveCandLagRad = 0.0;
+
+		// Candidate divergence from the live filter and from raw (all samples).
+		double sumSqCandLiveErrM = 0.0;
+		double maxCandLiveErrM = 0.0;
+		double sumSqCandRawErrM = 0.0;
+		double sumSqCandLiveErrRad = 0.0;
+		double sumSqCandRawErrRad = 0.0;
 	};
 
 	struct SmartSmoothingShadowState
 	{
-		bool initialized = false;
 		bool previousOutputsInitialized = false;
 		LARGE_INTEGER lastSample{};
 		LARGE_INTEGER lastLog{};
+		LARGE_INTEGER lastCandidateCheck{};
 
+		// The candidate one-euro filter -- its own state, distinct from the live
+		// device.smartFilter -- plus the selected variant.
+		prediction::smart_shadow::FilterState filter;
+		prediction::smart_shadow::CandidateKind candidate =
+			prediction::smart_shadow::CandidateKind::Strong;
+
+		// Previous-frame outputs (raw / live / candidate) for per-frame step.
 		double prevRawPos[3] = {0.0, 0.0, 0.0};
 		double prevLivePos[3] = {0.0, 0.0, 0.0};
-		double prevShadowPos[3] = {0.0, 0.0, 0.0};
-		double filteredPos[3] = {0.0, 0.0, 0.0};
+		double prevCandPos[3] = {0.0, 0.0, 0.0};
+		double prevRawRot[4] = {1.0, 0.0, 0.0, 0.0};
+		double prevLiveRot[4] = {1.0, 0.0, 0.0, 0.0};
+		double prevCandRot[4] = {1.0, 0.0, 0.0, 0.0};
 
-		vr::HmdQuaternion_t prevRawRot{1.0, 0.0, 0.0, 0.0};
-		vr::HmdQuaternion_t prevLiveRot{1.0, 0.0, 0.0, 0.0};
-		vr::HmdQuaternion_t prevShadowRot{1.0, 0.0, 0.0, 0.0};
-		vr::HmdQuaternion_t filteredRot{1.0, 0.0, 0.0, 0.0};
-
-		double linearSpeedHat = 0.0;
-		double angularSpeedHat = 0.0;
-		double posRelease = 0.0;
-		double rotRelease = 0.0;
 		SmartSmoothingShadowStats stats;
 	};
 #endif

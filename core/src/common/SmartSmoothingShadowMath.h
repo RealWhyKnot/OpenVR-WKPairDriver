@@ -115,6 +115,46 @@ inline Params BuildParams(uint8_t smoothness)
     return p;
 }
 
+// Candidate selector for the dev A/B shadow. The shadow filter runs one of these
+// variants against the live one-euro so a session's [smart-shadow] log shows the
+// jitter-vs-lag tradeoff of a tuning we might promote.
+enum class CandidateKind { Match, Strong, Responsive };
+
+inline const char* CandidateKindName(CandidateKind k)
+{
+    switch (k) {
+        case CandidateKind::Strong: return "strong";
+        case CandidateKind::Responsive: return "responsive";
+        case CandidateKind::Match:
+        default: return "match";
+    }
+}
+
+// Derive a candidate parameter set from the slider value.
+//   Match      -- identical to live (sanity baseline; divergence ~0).
+//   Strong     -- lower floor cutoffs => more rest smoothing, expect more lag.
+//   Responsive -- higher beta + faster release => less motion lag, slightly more
+//                 rest jitter.
+inline Params BuildCandidateParams(uint8_t smoothness, CandidateKind kind)
+{
+    Params p = BuildParams(smoothness);
+    switch (kind) {
+        case CandidateKind::Strong:
+            p.posMinCutoffHz *= 0.5;
+            p.rotMinCutoffHz *= 0.5;
+            break;
+        case CandidateKind::Responsive:
+            p.posBetaHzPerMps *= 1.6;
+            p.rotBetaHzPerRadps *= 1.6;
+            p.gateReleaseTauSeconds *= 0.5;
+            break;
+        case CandidateKind::Match:
+        default:
+            break;
+    }
+    return p;
+}
+
 // ---------------------------------------------------------------------------
 // Shared per-sample filter (one-euro speed-adaptive low-pass).
 //
@@ -230,6 +270,7 @@ struct FilterState {
 };
 
 // Per-sample diagnostics (used by the dev comparison log; harmless to ignore).
+enum class ReseedReason { None, Init, Gap, Jump };
 struct StepResult {
     double posAlpha = 1.0;
     double rotAlpha = 1.0;
@@ -238,6 +279,7 @@ struct StepResult {
     double posCutoffHz = 0.0;
     double rotCutoffHz = 0.0;
     bool reseeded = false;
+    ReseedReason reseedReason = ReseedReason::None;
 };
 
 // Seed (or reseed) the filter so the output equals the raw input this frame.
@@ -279,14 +321,22 @@ inline StepResult FilterStep(FilterState& s,
         // Degenerate input: force a reseed on the next good sample.
         s.initialized = false;
         out.reseeded = true;
+        out.reseedReason = ReseedReason::Init;
         return out;
     }
 
-    if (!s.initialized ||
-        !(rawDtSeconds > 0.0) ||
-        rawDtSeconds > p.resetGapSeconds) {
+    if (!s.initialized) {
         SeedFilter(s, rawPos, rawRot);
         out.reseeded = true;
+        out.reseedReason = ReseedReason::Init;
+        out.posRelease = s.posRelease;
+        out.rotRelease = s.rotRelease;
+        return out;
+    }
+    if (!(rawDtSeconds > 0.0) || rawDtSeconds > p.resetGapSeconds) {
+        SeedFilter(s, rawPos, rawRot);
+        out.reseeded = true;
+        out.reseedReason = ReseedReason::Gap;
         out.posRelease = s.posRelease;
         out.rotRelease = s.rotRelease;
         return out;
@@ -300,6 +350,7 @@ inline StepResult FilterStep(FilterState& s,
     if (posInnovation > p.positionJumpM || rotInnovation > p.rotationJumpRad) {
         SeedFilter(s, rawPos, rawRot);
         out.reseeded = true;
+        out.reseedReason = ReseedReason::Jump;
         out.posRelease = s.posRelease;
         out.rotRelease = s.rotRelease;
         return out;

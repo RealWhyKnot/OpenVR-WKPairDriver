@@ -320,4 +320,32 @@ TEST(PredictionSmoothingFilterTest, RotationConvergesTowardHeldTarget) {
         << "rotation should converge toward a held target";
 }
 
+TEST(PredictionSmoothingFilterTest, CandidateParamsVaryAsIntended) {
+    using namespace prediction::smart_shadow;
+    const Params base = BuildParams(80);
+
+    const Params match = BuildCandidateParams(80, CandidateKind::Match);
+    EXPECT_DOUBLE_EQ(match.posMinCutoffHz, base.posMinCutoffHz);
+    EXPECT_DOUBLE_EQ(match.posBetaHzPerMps, base.posBetaHzPerMps);
+    EXPECT_DOUBLE_EQ(match.gateReleaseTauSeconds, base.gateReleaseTauSeconds);
+
+    const Params strong = BuildCandidateParams(80, CandidateKind::Strong);
+    EXPECT_LT(strong.posMinCutoffHz, base.posMinCutoffHz)
+        << "strong should smooth harder at rest (lower floor cutoff)";
+    EXPECT_LT(strong.rotMinCutoffHz, base.rotMinCutoffHz);
+
+    const Params resp = BuildCandidateParams(80, CandidateKind::Responsive);
+    EXPECT_GT(resp.posBetaHzPerMps, base.posBetaHzPerMps)
+        << "responsive should ramp cutoff faster with speed (less motion lag)";
+    EXPECT_LT(resp.gateReleaseTauSeconds, base.gateReleaseTauSeconds)
+        << "responsive should release faster";
+}
+
+TEST(PredictionSmoothingFilterTest, CandidateKindNames) {
+    using namespace prediction::smart_shadow;
+    EXPECT_STREQ(CandidateKindName(CandidateKind::Match), "match");
+    EXPECT_STREQ(CandidateKindName(CandidateKind::Strong), "strong");
+    EXPECT_STREQ(CandidateKindName(CandidateKind::Responsive), "responsive");
+}
+
 } // namespace
